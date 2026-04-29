@@ -78,7 +78,7 @@ async fn render_dir(
                 name: name.clone(),
                 url: format!("/browse/{}", encode_path(&rel_child)),
             });
-        } else if ftype.is_file() && is_png(&name) {
+        } else if ftype.is_file() && is_png(&name) && !is_hidden(&name) {
             images.push(ImageEntry {
                 thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
                 image_url: format!("/image/{}", encode_path(&rel_child)),
@@ -113,7 +113,7 @@ pub async fn image(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_png(&rel) {
+    if !is_png(&rel) || rel_filename_is_hidden(&rel) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let meta = match tokio::fs::metadata(&path).await {
@@ -147,7 +147,7 @@ pub async fn thumb(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_png(&rel) {
+    if !is_png(&rel) || rel_filename_is_hidden(&rel) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -194,6 +194,20 @@ fn is_png(name: &str) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("png"))
+        .unwrap_or(false)
+}
+
+/// A file is "hidden" if its basename contains the substring "hidden"
+/// (case-insensitive). Applied on top of the .png filter.
+fn is_hidden(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("hidden")
+}
+
+fn rel_filename_is_hidden(rel: &str) -> bool {
+    Path::new(rel)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(is_hidden)
         .unwrap_or(false)
 }
 
