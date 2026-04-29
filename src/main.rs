@@ -26,7 +26,8 @@ async fn main() -> Result<()> {
         .init();
 
     let cwd = std::env::current_dir()?;
-    let photos_dir = cwd.join("photos");
+    let binding = cwd.parent().expect("CANNOT FIND PHOTOS");
+    let photos_dir = binding.join("photos");
     let cache_dir = cwd.join("cache").join("thumbs");
     let static_dir = cwd.join("static");
 
