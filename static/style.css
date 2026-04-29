@@ -1,0 +1,151 @@
+:root {
+  --bg: #edefe7;
+  --surface: #f6f7f1;
+  --text: #2f3a26;
+  --muted: #6c7559;
+  --accent: #6b8e4e;
+  --accent-hover: #87a96b;
+  --border: #c9d1b8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+header.site {
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 1.5rem;
+  background: var(--surface);
+}
+
+header.site .brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-size: 1.1rem;
+  color: var(--text);
+}
+
+header.site .brand:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+main {
+  max-width: 1200px;
+  margin: 2rem auto;
+  padding: 0 1.5rem;
+}
+
+nav.crumbs {
+  margin-bottom: 1.5rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+nav.crumbs .sep {
+  margin: 0 0.4rem;
+  color: var(--border);
+}
+
+nav.crumbs .current {
+  color: var(--text);
+  font-weight: 500;
+}
+
+section.dirs {
+  margin-bottom: 2rem;
+}
+
+section.dirs h2,
+section.gallery h2 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+  font-weight: 600;
+}
+
+ul.dirlist {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+ul.dirlist li a {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+
+ul.dirlist li a:hover {
+  background: var(--accent);
+  color: var(--surface);
+  border-color: var(--accent);
+  text-decoration: none;
+}
+
+ul.grid {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+li.tile a {
+  display: block;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+li.tile a:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(47, 58, 38, 0.15);
+}
+
+li.tile img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+
+p.empty {
+  color: var(--muted);
+  font-style: italic;
+}
