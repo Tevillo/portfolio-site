@@ -46,6 +46,8 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(handlers::index))
+        .route("/browse", get(handlers::browse_root))
+        .route("/browse/", get(handlers::browse_root))
         .route("/browse/*path", get(handlers::browse))
         .route("/image/*path", get(handlers::image))
         .route("/thumb/*path", get(handlers::thumb))

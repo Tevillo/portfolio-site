@@ -16,8 +16,22 @@ use crate::views::{self, Crumb, DirEntry, ImageEntry};
 
 const FRONT_PAGE_DIR: &str = "portfolio";
 
+#[derive(Clone, Copy)]
+enum PageKind {
+    Index,
+    BrowseRoot,
+    BrowseSub,
+}
+
 pub async fn index(State(state): State<AppState>) -> Response {
-    match render_dir(&state, FRONT_PAGE_DIR, true).await {
+    match render_dir(&state, FRONT_PAGE_DIR, PageKind::Index).await {
+        Ok(html) => html.into_response(),
+        Err(status) => status.into_response(),
+    }
+}
+
+pub async fn browse_root(State(state): State<AppState>) -> Response {
+    match render_dir(&state, "", PageKind::BrowseRoot).await {
         Ok(html) => html.into_response(),
         Err(status) => status.into_response(),
     }
@@ -27,7 +41,7 @@ pub async fn browse(
     State(state): State<AppState>,
     AxumPath(rel): AxumPath<String>,
 ) -> Response {
-    match render_dir(&state, &rel, false).await {
+    match render_dir(&state, &rel, PageKind::BrowseSub).await {
         Ok(html) => html.into_response(),
         Err(status) => status.into_response(),
     }
@@ -36,7 +50,7 @@ pub async fn browse(
 async fn render_dir(
     state: &AppState,
     rel: &str,
-    is_root: bool,
+    kind: PageKind,
 ) -> Result<Markup, StatusCode> {
     let dir = safe_resolve(state.photos_root(), rel).await.map_err(map_path_err)?;
 
@@ -76,11 +90,16 @@ async fn render_dir(
     subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    let crumbs = breadcrumbs(rel, is_root);
-    let title = if is_root {
-        "Home".to_string()
-    } else {
-        rel.trim_end_matches('/').to_string()
+    let crumbs = breadcrumbs(rel, kind);
+    let title = match kind {
+        PageKind::Index => "Portfolio".to_string(),
+        PageKind::BrowseRoot => "Browse".to_string(),
+        PageKind::BrowseSub => rel
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string(),
     };
     Ok(views::page(&title, &crumbs, &subdirs, &images))
 }
@@ -221,24 +240,40 @@ fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn breadcrumbs(rel: &str, is_root: bool) -> Vec<Crumb> {
+fn breadcrumbs(rel: &str, kind: PageKind) -> Vec<Crumb> {
     let mut out = Vec::new();
-    if is_root {
-        out.push(Crumb {
-            label: "Portfolio".into(),
-            url: None,
-        });
-        return out;
+    match kind {
+        PageKind::Index => {
+            out.push(Crumb {
+                label: "Portfolio".into(),
+                url: None,
+            });
+            return out;
+        }
+        PageKind::BrowseRoot => {
+            out.push(Crumb {
+                label: "Home".into(),
+                url: Some("/".into()),
+            });
+            out.push(Crumb {
+                label: "Browse".into(),
+                url: None,
+            });
+            return out;
+        }
+        PageKind::BrowseSub => {
+            out.push(Crumb {
+                label: "Home".into(),
+                url: Some("/".into()),
+            });
+            out.push(Crumb {
+                label: "Browse".into(),
+                url: Some("/browse".into()),
+            });
+        }
     }
-    out.push(Crumb {
-        label: "Home".into(),
-        url: Some("/".into()),
-    });
     let mut acc = String::new();
-    let parts: Vec<_> = rel
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let parts: Vec<_> = rel.split('/').filter(|s| !s.is_empty()).collect();
     for (i, part) in parts.iter().enumerate() {
         if !acc.is_empty() {
             acc.push('/');

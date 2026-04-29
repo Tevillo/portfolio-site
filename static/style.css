@@ -40,6 +40,10 @@ header.site {
   border-bottom: 1px solid var(--border);
   padding: 1rem 1.5rem;
   background: var(--surface);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.5rem;
 }
 
 header.site .brand {
@@ -51,6 +55,21 @@ header.site .brand {
 
 header.site .brand:hover {
   color: var(--accent);
+  text-decoration: none;
+}
+
+header.site .topnav {
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.95rem;
+}
+
+header.site .topnav a {
+  color: var(--muted);
+}
+
+header.site .topnav a:hover {
+  color: var(--accent-hover);
   text-decoration: none;
 }
 

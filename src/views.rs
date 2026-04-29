@@ -29,6 +29,10 @@ pub fn page(title: &str, crumbs: &[Crumb], subdirs: &[DirEntry], images: &[Image
             body {
                 header.site {
                     a.brand href="/" { "Portfolio" }
+                    nav.topnav {
+                        a href="/" { "Home" }
+                        a href="/browse" { "Browse" }
+                    }
                 }
                 main {
                     nav.crumbs aria-label="breadcrumb" {
