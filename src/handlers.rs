@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -12,7 +12,7 @@ use tracing::warn;
 use crate::paths::{PathError, safe_resolve};
 use crate::state::AppState;
 use crate::thumbs;
-use crate::views::{self, Crumb, DirEntry, ImageEntry};
+use crate::views::{self, Crumb, DirEntry, FolderGroup, ImageEntry};
 
 const FRONT_PAGE_DIR: &str = "portfolio";
 
@@ -102,6 +102,96 @@ async fn render_dir(
             .to_string(),
     };
     Ok(views::page(&title, &crumbs, &subdirs, &images))
+}
+
+pub async fn all_photos(State(state): State<AppState>) -> Response {
+    match walk_groups(state.photos_root()).await {
+        Ok(groups) => {
+            let crumbs = vec![
+                Crumb {
+                    label: "Home".into(),
+                    url: Some("/".into()),
+                },
+                Crumb {
+                    label: "All".into(),
+                    url: None,
+                },
+            ];
+            views::all_page("All", &crumbs, &groups).into_response()
+        }
+        Err(status) => status.into_response(),
+    }
+}
+
+async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
+    let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
+    let mut groups: Vec<FolderGroup> = Vec::new();
+
+    while let Some((abs, rel)) = stack.pop() {
+        let mut read = match tokio::fs::read_dir(&abs).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(path = %abs.display(), error = %e, "read_dir failed during walk");
+                continue;
+            }
+        };
+
+        let mut images: Vec<ImageEntry> = Vec::new();
+        let mut child_dirs: Vec<(PathBuf, String)> = Vec::new();
+
+        loop {
+            let entry = match read.next_entry().await {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+            };
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let ftype = match entry.file_type().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let rel_child = join_rel(&rel, &name);
+            if ftype.is_dir() {
+                child_dirs.push((entry.path(), rel_child));
+            } else if ftype.is_file() && is_png(&name) && !is_hidden(&name) {
+                images.push(ImageEntry {
+                    thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
+                    image_url: format!("/image/{}", encode_path(&rel_child)),
+                    name,
+                });
+            }
+        }
+
+        if !images.is_empty() {
+            images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            let (label, browse_url) = if rel.is_empty() {
+                ("Photos (root)".to_string(), "/browse".to_string())
+            } else {
+                (rel.clone(), format!("/browse/{}", encode_path(&rel)))
+            };
+            groups.push(FolderGroup {
+                label,
+                browse_url,
+                images,
+            });
+        }
+
+        // Push children in reverse alphabetical order so the stack pops them in
+        // alphabetical order, producing a pre-order DFS where each folder is
+        // immediately followed by its descendants.
+        child_dirs.sort_by(|a, b| b.1.to_lowercase().cmp(&a.1.to_lowercase()));
+        for child in child_dirs {
+            stack.push(child);
+        }
+    }
+
+    Ok(groups)
 }
 
 pub async fn image(

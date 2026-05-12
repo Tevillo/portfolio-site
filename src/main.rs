@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
         .route("/browse", get(handlers::browse_root))
         .route("/browse/", get(handlers::browse_root))
         .route("/browse/*path", get(handlers::browse))
+        .route("/all", get(handlers::all_photos))
         .route("/image/*path", get(handlers::image))
         .route("/thumb/*path", get(handlers::thumb))
         .nest_service("/static", ServeDir::new(static_dir))
