@@ -78,7 +78,7 @@ async fn render_dir(
                 name: name.clone(),
                 url: format!("/browse/{}", encode_path(&rel_child)),
             });
-        } else if ftype.is_file() && is_png(&name) && !is_hidden(&name) {
+        } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
             images.push(ImageEntry {
                 thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
                 image_url: format!("/image/{}", encode_path(&rel_child)),
@@ -159,7 +159,7 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
             let rel_child = join_rel(&rel, &name);
             if ftype.is_dir() {
                 child_dirs.push((entry.path(), rel_child));
-            } else if ftype.is_file() && is_png(&name) && !is_hidden(&name) {
+            } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
                 images.push(ImageEntry {
                     thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
                     image_url: format!("/image/{}", encode_path(&rel_child)),
@@ -203,7 +203,7 @@ pub async fn image(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_png(&rel) || rel_filename_is_hidden(&rel) {
+    if !is_jpeg(&rel) || rel_filename_is_hidden(&rel) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let meta = match tokio::fs::metadata(&path).await {
@@ -237,7 +237,7 @@ pub async fn thumb(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_png(&rel) || rel_filename_is_hidden(&rel) {
+    if !is_jpeg(&rel) || rel_filename_is_hidden(&rel) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -265,7 +265,7 @@ pub async fn thumb(
 fn image_response(bytes: Vec<u8>, etag: &str) -> Response {
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CACHE_CONTROL, "public, max-age=3600")
         .header(header::ETAG, etag)
         .body(Body::from(bytes))
@@ -279,16 +279,16 @@ fn map_path_err(e: PathError) -> StatusCode {
     }
 }
 
-fn is_png(name: &str) -> bool {
+fn is_jpeg(name: &str) -> bool {
     Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("png"))
+        .map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
         .unwrap_or(false)
 }
 
 /// A file is "hidden" if its basename contains the substring "hidden"
-/// (case-insensitive). Applied on top of the .png filter.
+/// (case-insensitive). Applied on top of the .jpg/.jpeg filter.
 fn is_hidden(name: &str) -> bool {
     name.to_ascii_lowercase().contains("hidden")
 }
