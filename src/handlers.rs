@@ -5,8 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use maud::Markup;
+use axum::response::{IntoResponse, Redirect, Response};
 use tracing::warn;
 
 use crate::paths::{PathError, safe_resolve};
@@ -25,14 +24,14 @@ enum PageKind {
 
 pub async fn index(State(state): State<AppState>) -> Response {
     match render_dir(&state, FRONT_PAGE_DIR, PageKind::Index).await {
-        Ok(html) => html.into_response(),
+        Ok(resp) => resp,
         Err(status) => status.into_response(),
     }
 }
 
 pub async fn browse_root(State(state): State<AppState>) -> Response {
     match render_dir(&state, "", PageKind::BrowseRoot).await {
-        Ok(html) => html.into_response(),
+        Ok(resp) => resp,
         Err(status) => status.into_response(),
     }
 }
@@ -42,7 +41,7 @@ pub async fn browse(
     AxumPath(rel): AxumPath<String>,
 ) -> Response {
     match render_dir(&state, &rel, PageKind::BrowseSub).await {
-        Ok(html) => html.into_response(),
+        Ok(resp) => resp,
         Err(status) => status.into_response(),
     }
 }
@@ -51,14 +50,14 @@ async fn render_dir(
     state: &AppState,
     rel: &str,
     kind: PageKind,
-) -> Result<Markup, StatusCode> {
+) -> Result<Response, StatusCode> {
     let dir = safe_resolve(state.photos_root(), rel).await.map_err(map_path_err)?;
 
     let mut read = tokio::fs::read_dir(&dir)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    let mut subdirs = Vec::new();
+    let mut candidate_subdirs: Vec<(String, String, PathBuf)> = Vec::new();
     let mut images = Vec::new();
     while let Some(entry) = read.next_entry().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
         let name = match entry.file_name().into_string() {
@@ -74,11 +73,8 @@ async fn render_dir(
         };
         let rel_child = join_rel(rel, &name);
         if ftype.is_dir() {
-            subdirs.push(DirEntry {
-                name: name.clone(),
-                url: format!("/browse/{}", encode_path(&rel_child)),
-            });
-        } else if ftype.is_file() && is_png(&name) && !is_hidden(&name) {
+            candidate_subdirs.push((name, rel_child, entry.path()));
+        } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
             images.push(ImageEntry {
                 thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
                 image_url: format!("/image/{}", encode_path(&rel_child)),
@@ -87,8 +83,23 @@ async fn render_dir(
         }
     }
 
+    let mut subdirs = Vec::new();
+    for (name, rel_child, path) in candidate_subdirs {
+        if subtree_has_jpeg(&path).await {
+            subdirs.push(DirEntry {
+                name,
+                url: format!("/browse/{}", encode_path(&rel_child)),
+            });
+        }
+    }
+
     subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    if images.is_empty() && subdirs.len() == 1 {
+        let target = subdirs.into_iter().next().unwrap().url;
+        return Ok(Redirect::to(&target).into_response());
+    }
 
     let crumbs = breadcrumbs(rel, kind);
     let title = match kind {
@@ -101,7 +112,48 @@ async fn render_dir(
             .unwrap_or("")
             .to_string(),
     };
-    Ok(views::page(&title, &crumbs, &subdirs, &images))
+    Ok(views::page(&title, &crumbs, &subdirs, &images).into_response())
+}
+
+async fn subtree_has_jpeg(root: &Path) -> bool {
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut read = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(path = %dir.display(), error = %e, "read_dir failed in subtree scan");
+                continue;
+            }
+        };
+        loop {
+            let entry = match read.next_entry().await {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(path = %dir.display(), error = %e, "next_entry failed in subtree scan");
+                    break;
+                }
+            };
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let ftype = match entry.file_type().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+                return true;
+            }
+            if ftype.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    false
 }
 
 pub async fn all_photos(State(state): State<AppState>) -> Response {
@@ -159,7 +211,7 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
             let rel_child = join_rel(&rel, &name);
             if ftype.is_dir() {
                 child_dirs.push((entry.path(), rel_child));
-            } else if ftype.is_file() && is_png(&name) && !is_hidden(&name) {
+            } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
                 images.push(ImageEntry {
                     thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
                     image_url: format!("/image/{}", encode_path(&rel_child)),
@@ -203,7 +255,7 @@ pub async fn image(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_png(&rel) || rel_filename_is_hidden(&rel) {
+    if !is_jpeg(&rel) || rel_filename_is_hidden(&rel) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let meta = match tokio::fs::metadata(&path).await {
@@ -237,7 +289,7 @@ pub async fn thumb(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_png(&rel) || rel_filename_is_hidden(&rel) {
+    if !is_jpeg(&rel) || rel_filename_is_hidden(&rel) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -265,7 +317,7 @@ pub async fn thumb(
 fn image_response(bytes: Vec<u8>, etag: &str) -> Response {
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CACHE_CONTROL, "public, max-age=3600")
         .header(header::ETAG, etag)
         .body(Body::from(bytes))
@@ -279,16 +331,16 @@ fn map_path_err(e: PathError) -> StatusCode {
     }
 }
 
-fn is_png(name: &str) -> bool {
+fn is_jpeg(name: &str) -> bool {
     Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("png"))
+        .map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
         .unwrap_or(false)
 }
 
 /// A file is "hidden" if its basename contains the substring "hidden"
-/// (case-insensitive). Applied on top of the .png filter.
+/// (case-insensitive). Applied on top of the .jpg/.jpeg filter.
 fn is_hidden(name: &str) -> bool {
     name.to_ascii_lowercase().contains("hidden")
 }

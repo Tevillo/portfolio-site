@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use image::ImageReader;
 
 const THUMB_MAX_DIM: u32 = 400;
-const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-const PRESERVED_CHUNKS: &[&[u8; 4]] = &[b"iCCP", b"sRGB", b"gAMA", b"cHRM"];
+const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
+const APP2_MARKER: u8 = 0xE2;
+const ICC_IDENTIFIER: &[u8] = b"ICC_PROFILE\0";
 
 pub struct ThumbInfo {
     pub path: PathBuf,
@@ -72,11 +73,11 @@ fn render_thumb(src: &Path, dst: &Path) -> Result<()> {
 
     let mut thumb_bytes = Vec::new();
     thumb
-        .write_to(&mut Cursor::new(&mut thumb_bytes), image::ImageFormat::Png)
+        .write_to(&mut Cursor::new(&mut thumb_bytes), image::ImageFormat::Jpeg)
         .with_context(|| format!("encoding thumb for {}", src.display()))?;
 
-    let final_bytes = splice_color_chunks(&thumb_bytes, &src_bytes)
-        .with_context(|| format!("splicing color chunks for {}", src.display()))?;
+    let final_bytes = splice_icc_profile(&thumb_bytes, &src_bytes)
+        .with_context(|| format!("splicing ICC profile for {}", src.display()))?;
 
     let parent = dst.parent().context("thumb dst has no parent")?;
     let file_name = dst.file_name().context("thumb dst has no file name")?;
@@ -90,76 +91,76 @@ fn render_thumb(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Copy iCCP/sRGB/gAMA/cHRM chunks from `source` PNG into `thumb` PNG so
-/// browsers color-manage the thumbnail the same way as the original.
-/// Returns `thumb` unchanged if neither input is a PNG or the source has
-/// none of the preserved chunks.
-fn splice_color_chunks(thumb: &[u8], source: &[u8]) -> Result<Vec<u8>> {
-    if !thumb.starts_with(&PNG_SIGNATURE) || !source.starts_with(&PNG_SIGNATURE) {
+/// Copy APP2 `ICC_PROFILE` segments from `source` JPEG into `thumb` JPEG so
+/// browsers color-manage the thumbnail the same way as the original. ICC
+/// profiles larger than ~64 KB span multiple APP2 segments; all are copied
+/// in order so the decoder reassembles them via the sequence numbers in
+/// each segment's identifier block. Returns `thumb` unchanged if either
+/// input is not a JPEG or the source has no ICC profile.
+fn splice_icc_profile(thumb: &[u8], source: &[u8]) -> Result<Vec<u8>> {
+    if !thumb.starts_with(&JPEG_SOI) || !source.starts_with(&JPEG_SOI) {
         return Ok(thumb.to_vec());
     }
 
-    let preserved = extract_preserved_chunks(source)?;
-    if preserved.is_empty() {
+    let segments = extract_icc_segments(source)?;
+    if segments.is_empty() {
         return Ok(thumb.to_vec());
     }
 
-    let preserved_total: usize = preserved.iter().map(|c| c.len()).sum();
-    let mut out = Vec::with_capacity(thumb.len() + preserved_total);
-    out.extend_from_slice(&PNG_SIGNATURE);
-
-    let ihdr_end = chunk_end(thumb, 8)?;
-    if &thumb[12..16] != b"IHDR" {
-        anyhow::bail!("thumb does not start with IHDR");
+    let extra: usize = segments.iter().map(|s| s.len()).sum();
+    let mut out = Vec::with_capacity(thumb.len() + extra);
+    out.extend_from_slice(&JPEG_SOI);
+    for seg in &segments {
+        out.extend_from_slice(seg);
     }
-    out.extend_from_slice(&thumb[8..ihdr_end]);
-
-    for chunk in preserved {
-        out.extend_from_slice(chunk);
-    }
-
-    let mut idx = ihdr_end;
-    while idx < thumb.len() {
-        let end = chunk_end(thumb, idx)?;
-        let ctype = &thumb[idx + 4..idx + 8];
-        if !is_preserved_type(ctype) {
-            out.extend_from_slice(&thumb[idx..end]);
-        }
-        idx = end;
-    }
-
+    out.extend_from_slice(&thumb[2..]);
     Ok(out)
 }
 
-fn extract_preserved_chunks(buf: &[u8]) -> Result<Vec<&[u8]>> {
+/// Walk the marker segments of a JPEG (between SOI and SOS), returning each
+/// APP2 segment whose payload begins with the `ICC_PROFILE\0` identifier.
+/// Each returned vector is a complete segment: `FF E2 len_hi len_lo payload`.
+fn extract_icc_segments(buf: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut out = Vec::new();
-    let mut idx = 8usize;
+    let mut idx = 2usize;
     while idx < buf.len() {
-        let end = chunk_end(buf, idx)?;
-        let ctype = &buf[idx + 4..idx + 8];
-        if ctype == b"IEND" {
-            break;
+        while idx < buf.len() && buf[idx] == 0xFF {
+            idx += 1;
         }
-        if is_preserved_type(ctype) {
-            out.push(&buf[idx..end]);
+        if idx >= buf.len() {
+            anyhow::bail!("truncated JPEG marker");
         }
-        idx = end;
+        let marker = buf[idx];
+        idx += 1;
+        match marker {
+            // SOS / EOI — ICC must appear before compressed data.
+            0xDA | 0xD9 => break,
+            // Standalone markers with no payload.
+            0x01 | 0xD0..=0xD7 => continue,
+            _ => {}
+        }
+        if idx + 2 > buf.len() {
+            anyhow::bail!("truncated JPEG segment length");
+        }
+        let seg_len = u16::from_be_bytes([buf[idx], buf[idx + 1]]) as usize;
+        if seg_len < 2 {
+            anyhow::bail!("invalid JPEG segment length");
+        }
+        let payload_end = idx + seg_len;
+        if payload_end > buf.len() {
+            anyhow::bail!("truncated JPEG segment");
+        }
+        if marker == APP2_MARKER {
+            let payload = &buf[idx + 2..payload_end];
+            if payload.starts_with(ICC_IDENTIFIER) {
+                let mut seg = Vec::with_capacity(2 + seg_len);
+                seg.push(0xFF);
+                seg.push(marker);
+                seg.extend_from_slice(&buf[idx..payload_end]);
+                out.push(seg);
+            }
+        }
+        idx = payload_end;
     }
     Ok(out)
-}
-
-fn chunk_end(buf: &[u8], idx: usize) -> Result<usize> {
-    if idx + 8 > buf.len() {
-        anyhow::bail!("truncated PNG chunk header at {idx}");
-    }
-    let len = u32::from_be_bytes(buf[idx..idx + 4].try_into().unwrap()) as usize;
-    let end = idx + 8 + len + 4;
-    if end > buf.len() {
-        anyhow::bail!("truncated PNG chunk body at {idx}");
-    }
-    Ok(end)
-}
-
-fn is_preserved_type(ctype: &[u8]) -> bool {
-    PRESERVED_CHUNKS.iter().any(|w| w.as_slice() == ctype)
 }
