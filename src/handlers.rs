@@ -73,6 +73,9 @@ async fn render_dir(
         };
         let rel_child = join_rel(rel, &name);
         if ftype.is_dir() {
+            if is_skipped_dir(&name) {
+                continue;
+            }
             candidate_subdirs.push((name, rel_child, entry.path()));
         } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
             images.push(ImageEntry {
@@ -148,7 +151,7 @@ async fn subtree_has_jpeg(root: &Path) -> bool {
             if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
                 return true;
             }
-            if ftype.is_dir() {
+            if ftype.is_dir() && !is_skipped_dir(&name) {
                 stack.push(entry.path());
             }
         }
@@ -210,6 +213,9 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
             };
             let rel_child = join_rel(&rel, &name);
             if ftype.is_dir() {
+                if is_skipped_dir(&name) {
+                    continue;
+                }
                 child_dirs.push((entry.path(), rel_child));
             } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
                 images.push(ImageEntry {
@@ -343,6 +349,11 @@ fn is_jpeg(name: &str) -> bool {
 /// (case-insensitive). Applied on top of the .jpg/.jpeg filter.
 fn is_hidden(name: &str) -> bool {
     name.to_ascii_lowercase().contains("hidden")
+}
+
+/// Directories the lister and subtree scanners should pretend don't exist.
+fn is_skipped_dir(name: &str) -> bool {
+    name.eq_ignore_ascii_case("negative")
 }
 
 fn rel_filename_is_hidden(rel: &str) -> bool {
