@@ -235,6 +235,7 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
             };
             groups.push(FolderGroup {
                 label,
+                path: rel.clone(),
                 browse_url,
                 images,
             });

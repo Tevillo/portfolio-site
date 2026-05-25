@@ -18,6 +18,7 @@ pub struct Crumb {
 
 pub struct FolderGroup {
     pub label: String,
+    pub path: String,
     pub browse_url: String,
     pub images: Vec<ImageEntry>,
 }
@@ -113,6 +114,7 @@ pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup
                 title { (title) " - Portfolio" }
                 link rel="stylesheet" href="/static/style.css";
                 script src="/static/lightbox.js" defer {}
+                script src="/static/collapse.js" defer {}
             }
             body {
                 (site_header())
@@ -122,8 +124,15 @@ pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup
                         p.empty { "Nothing here yet." }
                     } @else {
                         @for g in groups {
-                            section.gallery {
-                                h2 { a href=(g.browse_url) { (g.label) } }
+                            section.gallery data-path=(g.path) {
+                                h2 {
+                                    button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
+                                        svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+                                            polyline points="6,9 12,15 18,9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" {}
+                                        }
+                                    }
+                                    a href=(g.browse_url) { (g.label) }
+                                }
                                 (image_grid(&g.images))
                             }
                         }

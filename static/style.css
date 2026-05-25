@@ -108,6 +108,50 @@ section.gallery h2 {
   font-weight: 600;
 }
 
+section.gallery h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.collapse-toggle {
+  background: transparent;
+  border: none;
+  padding: 0.15rem;
+  margin: 0;
+  cursor: pointer;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.collapse-toggle:hover {
+  color: var(--accent);
+  background: var(--surface);
+}
+
+.collapse-toggle svg {
+  width: 1rem;
+  height: 1rem;
+  display: block;
+  transition: transform 0.15s ease;
+}
+
+section.gallery.collapsed .collapse-toggle svg {
+  transform: rotate(-90deg);
+}
+
+section.gallery.collapsed ul.grid {
+  display: none;
+}
+
+section.gallery.hidden-by-ancestor {
+  display: none;
+}
+
 ul.dirlist {
   list-style: none;
   padding: 0;
