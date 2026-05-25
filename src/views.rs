@@ -72,6 +72,7 @@ pub fn page(title: &str, crumbs: &[Crumb], subdirs: &[DirEntry], images: &[Image
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) " - Portfolio" }
                 link rel="stylesheet" href="/static/style.css";
+                script src="/static/lightbox.js" defer {}
             }
             body {
                 (site_header())
@@ -111,6 +112,7 @@ pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) " - Portfolio" }
                 link rel="stylesheet" href="/static/style.css";
+                script src="/static/lightbox.js" defer {}
             }
             body {
                 (site_header())
