@@ -9,9 +9,10 @@ use axum::response::{IntoResponse, Redirect, Response};
 use tracing::warn;
 
 use crate::paths::{PathError, safe_resolve};
+use crate::people;
 use crate::state::AppState;
 use crate::thumbs;
-use crate::views::{self, Crumb, DirEntry, FolderGroup, ImageEntry};
+use crate::views::{self, Crumb, DirEntry, FolderGroup, ImageEntry, PersonEntry};
 
 const FRONT_PAGE_DIR: &str = "portfolio";
 
@@ -157,6 +158,93 @@ async fn subtree_has_jpeg(root: &Path) -> bool {
         }
     }
     false
+}
+
+pub async fn people_index(State(state): State<AppState>) -> Response {
+    let db = match state.db_path() {
+        Some(p) => p.clone(),
+        None => return people_unavailable_response(),
+    };
+    let people_list = match people::list_people(db).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = ?e, "listing people failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let entries: Vec<PersonEntry> = people_list
+        .into_iter()
+        .map(|p| PersonEntry {
+            url: format!("/people/{}", encode_path(&p.name)),
+            name: p.name,
+            photo_count: p.photo_count,
+        })
+        .collect();
+    let crumbs = vec![
+        Crumb {
+            label: "Home".into(),
+            url: Some("/".into()),
+        },
+        Crumb {
+            label: "People".into(),
+            url: None,
+        },
+    ];
+    views::people_index_page("People", &crumbs, &entries).into_response()
+}
+
+pub async fn person_photos(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    let db = match state.db_path() {
+        Some(p) => p.clone(),
+        None => return people_unavailable_response(),
+    };
+    if name.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let photos = match people::list_person_photos(db, name.clone()).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = ?e, person = %name, "listing person photos failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if photos.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let images: Vec<ImageEntry> = photos
+        .into_iter()
+        .map(|p| ImageEntry {
+            thumb_url: format!("/thumb/{}", encode_path(&p.rel)),
+            image_url: format!("/image/{}", encode_path(&p.rel)),
+            name: p.name,
+        })
+        .collect();
+    let crumbs = vec![
+        Crumb {
+            label: "Home".into(),
+            url: Some("/".into()),
+        },
+        Crumb {
+            label: "People".into(),
+            url: Some("/people".into()),
+        },
+        Crumb {
+            label: name.clone(),
+            url: None,
+        },
+    ];
+    views::page(&name, &crumbs, &[], &images).into_response()
+}
+
+fn people_unavailable_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        "people tag database not available",
+    )
+        .into_response()
 }
 
 pub async fn all_photos(State(state): State<AppState>) -> Response {

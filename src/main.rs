@@ -1,5 +1,6 @@
 mod handlers;
 mod paths;
+mod people;
 mod state;
 mod thumbs;
 mod views;
@@ -41,9 +42,21 @@ async fn main() -> Result<()> {
     let cache_root: PathBuf = std::fs::canonicalize(&cache_dir)
         .with_context(|| format!("canonicalizing {}", cache_dir.display()))?;
 
-    info!(photos = %photos_root.display(), cache = %cache_root.display(), "roots");
+    let db_candidate = photos_root.join("digikam4.db");
+    let db_path: Option<PathBuf> = if db_candidate.is_file() {
+        Some(db_candidate)
+    } else {
+        None
+    };
 
-    let state = AppState::new(photos_root, cache_root);
+    info!(
+        photos = %photos_root.display(),
+        cache = %cache_root.display(),
+        db = ?db_path.as_ref().map(|p| p.display().to_string()),
+        "roots",
+    );
+
+    let state = AppState::new(photos_root, cache_root, db_path);
 
     let app = Router::new()
         .route("/", get(handlers::index))
@@ -51,6 +64,9 @@ async fn main() -> Result<()> {
         .route("/browse/", get(handlers::browse_root))
         .route("/browse/*path", get(handlers::browse))
         .route("/all", get(handlers::all_photos))
+        .route("/people", get(handlers::people_index))
+        .route("/people/", get(handlers::people_index))
+        .route("/people/:name", get(handlers::person_photos))
         .route("/image/*path", get(handlers::image))
         .route("/thumb/*path", get(handlers::thumb))
         .nest_service("/static", ServeDir::new(static_dir))

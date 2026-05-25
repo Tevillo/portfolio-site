@@ -177,6 +177,15 @@ ul.dirlist li a:hover {
   text-decoration: none;
 }
 
+ul.dirlist li a .count {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+ul.dirlist li a:hover .count {
+  color: var(--surface);
+}
+
 ul.grid {
   list-style: none;
   padding: 0;

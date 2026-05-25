@@ -13,3 +13,4 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 maud = { version = "0.26", features = ["axum"] }
 anyhow = "1"
 thiserror = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }

@@ -7,13 +7,15 @@ pub struct AppState(Arc<Inner>);
 struct Inner {
     photos_root: PathBuf,
     cache_root: PathBuf,
+    db_path: Option<PathBuf>,
 }
 
 impl AppState {
-    pub fn new(photos_root: PathBuf, cache_root: PathBuf) -> Self {
+    pub fn new(photos_root: PathBuf, cache_root: PathBuf, db_path: Option<PathBuf>) -> Self {
         Self(Arc::new(Inner {
             photos_root,
             cache_root,
+            db_path,
         }))
     }
 
@@ -23,5 +25,9 @@ impl AppState {
 
     pub fn cache_root(&self) -> &PathBuf {
         &self.0.cache_root
+    }
+
+    pub fn db_path(&self) -> Option<&PathBuf> {
+        self.0.db_path.as_ref()
     }
 }

@@ -23,6 +23,12 @@ pub struct FolderGroup {
     pub images: Vec<ImageEntry>,
 }
 
+pub struct PersonEntry {
+    pub name: String,
+    pub url: String,
+    pub photo_count: u32,
+}
+
 fn site_header() -> Markup {
     html! {
         header.site {
@@ -31,6 +37,7 @@ fn site_header() -> Markup {
                 a href="/" { "Home" }
                 a href="/browse" { "Browse" }
                 a href="/all" { "All" }
+                a href="/people" { "People" }
             }
         }
     }
@@ -97,6 +104,42 @@ pub fn page(title: &str, crumbs: &[Crumb], subdirs: &[DirEntry], images: &[Image
                     }
                     @if subdirs.is_empty() && images.is_empty() {
                         p.empty { "Nothing here yet." }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn people_index_page(title: &str, crumbs: &[Crumb], people: &[PersonEntry]) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { (title) " - Portfolio" }
+                link rel="stylesheet" href="/static/style.css";
+            }
+            body {
+                (site_header())
+                main {
+                    (crumbs_nav(crumbs))
+                    @if people.is_empty() {
+                        p.empty { "No people tagged yet." }
+                    } @else {
+                        section.dirs {
+                            ul.dirlist {
+                                @for p in people {
+                                    li {
+                                        a href=(p.url) {
+                                            (p.name)
+                                            span.count { " (" (p.photo_count) ")" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
