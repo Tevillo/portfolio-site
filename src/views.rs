@@ -54,7 +54,7 @@ fn image_grid(images: &[ImageEntry]) -> Markup {
         ul.grid {
             @for img in images {
                 li.tile {
-                    a href=(img.image_url) target="_blank" rel="noopener" {
+                    a href=(img.image_url) {
                         img src=(img.thumb_url) alt=(img.name) loading="lazy";
                     }
                 }
