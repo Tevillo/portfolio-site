@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, params};
 
+use crate::handlers::{is_hidden, is_skipped_dir};
+
 pub struct Person {
     pub name: String,
     pub photo_count: u32,
@@ -94,7 +96,10 @@ fn list_person_photos_blocking(db_path: &Path, person_name: &str) -> Result<Vec<
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for r in rows {
         let (album_rel, name) = r?;
-        if !is_jpeg(&name) {
+        if !is_jpeg(&name) || is_hidden(&name) {
+            continue;
+        }
+        if album_has_skipped_segment(&album_rel) {
             continue;
         }
         let rel = combine_rel(&album_rel, &name);
@@ -112,6 +117,12 @@ fn combine_rel(album_rel: &str, name: &str) -> String {
     } else {
         format!("{trimmed}/{name}")
     }
+}
+
+fn album_has_skipped_segment(album_rel: &str) -> bool {
+    album_rel
+        .split('/')
+        .any(|seg| !seg.is_empty() && is_skipped_dir(seg))
 }
 
 fn is_jpeg(name: &str) -> bool {

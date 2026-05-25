@@ -436,12 +436,12 @@ fn is_jpeg(name: &str) -> bool {
 
 /// A file is "hidden" if its basename contains the substring "hidden"
 /// (case-insensitive). Applied on top of the .jpg/.jpeg filter.
-fn is_hidden(name: &str) -> bool {
+pub(crate) fn is_hidden(name: &str) -> bool {
     name.to_ascii_lowercase().contains("hidden")
 }
 
 /// Directories the lister and subtree scanners should pretend don't exist.
-fn is_skipped_dir(name: &str) -> bool {
+pub(crate) fn is_skipped_dir(name: &str) -> bool {
     name.eq_ignore_ascii_case("negative")
 }
 

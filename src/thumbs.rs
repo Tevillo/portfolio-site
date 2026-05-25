@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use image::ImageReader;
+use exif::{In, Reader as ExifReader, Tag, Value};
+use image::{DynamicImage, ImageReader};
 
 const THUMB_MAX_DIM: u32 = 400;
 const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
@@ -69,7 +70,8 @@ fn render_thumb(src: &Path, dst: &Path) -> Result<()> {
         .with_context(|| format!("guessing format for {}", src.display()))?
         .decode()
         .with_context(|| format!("decoding {}", src.display()))?;
-    let thumb = img.thumbnail(THUMB_MAX_DIM, THUMB_MAX_DIM);
+    let orientation = read_exif_orientation(&src_bytes);
+    let thumb = apply_orientation(img.thumbnail(THUMB_MAX_DIM, THUMB_MAX_DIM), orientation);
 
     let mut thumb_bytes = Vec::new();
     thumb
@@ -163,4 +165,35 @@ fn extract_icc_segments(buf: &[u8]) -> Result<Vec<Vec<u8>>> {
         idx = payload_end;
     }
     Ok(out)
+}
+
+/// Read the EXIF Orientation tag (1..=8) from a JPEG byte stream.
+/// Returns 1 (normal) if the file has no EXIF or the tag is missing/invalid.
+fn read_exif_orientation(buf: &[u8]) -> u32 {
+    let mut cursor = Cursor::new(buf);
+    let exif = match ExifReader::new().read_from_container(&mut cursor) {
+        Ok(e) => e,
+        Err(_) => return 1,
+    };
+    let field = match exif.get_field(Tag::Orientation, In::PRIMARY) {
+        Some(f) => f,
+        None => return 1,
+    };
+    match &field.value {
+        Value::Short(v) => v.first().copied().unwrap_or(1) as u32,
+        _ => 1,
+    }
+}
+
+fn apply_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
+    match orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    }
 }
