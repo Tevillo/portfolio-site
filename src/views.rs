@@ -241,8 +241,8 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
                     div.nether-layout {
                         (nether_sidebar(nav, NetherView::Graph))
                         article.nether-content.graph-content {
-                            (crumbs_nav(crumbs))
                             div.graph-stage {
+                                (crumbs_nav(crumbs))
                                 canvas #graph-canvas {}
                                 div.graph-empty hidden { "This vault has no notes to graph yet." }
                             }

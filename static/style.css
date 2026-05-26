@@ -382,27 +382,38 @@ main.nether {
 }
 
 /* ---- Nether graph view ---- */
-.graph-content {
+/* The graph fills the whole pane below the header, edge-to-edge, with the
+   breadcrumb floating over the canvas so the drawing area is maximised.
+   The compound selector outranks the `.nether-content` defaults above. */
+.nether-content.graph-content {
   max-width: none;
+  padding: 0;
   display: flex;
-  flex-direction: column;
-  padding-bottom: 1rem;
 }
 
 .graph-stage {
   position: relative;
   flex: 1 1 auto;
-  margin-top: 0.5rem;
-  min-height: 480px;
-  height: calc(100vh - 10rem);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  height: calc(100vh - 4rem);
   background: var(--surface);
   overflow: hidden;
 }
 
+.graph-stage .crumbs {
+  position: absolute;
+  top: 0.75rem;
+  left: 1rem;
+  z-index: 1;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(2px);
+}
+
 #graph-canvas {
   display: block;
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   cursor: grab;

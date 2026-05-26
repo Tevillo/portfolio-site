@@ -18,6 +18,7 @@
     vx: 0,
     vy: 0,
     r: 4 + Math.sqrt(n.deg || 0) * 2.2,
+    pinned: false, // dropped nodes stay put; the rest relax around them
   }));
   const edges = (graph.edges || []).map(([a, b]) => ({ a, b }));
 
@@ -54,6 +55,9 @@
     dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
+    // Spread scales with available area so the graph fills the pane rather than
+    // huddling in a small square.
+    repulsion = Math.max(8000, Math.min(30000, (W * H) / Math.max(nodes.length, 8) * 0.7));
   }
 
   // Seed nodes on a circle around the centre so the sim unfolds cleanly.
@@ -69,12 +73,16 @@
   }
 
   // ---- Force simulation -------------------------------------------------
-  const REPULSION = 9000; // node-node Coulomb constant
-  const SPRING = 0.02; // edge stiffness
-  const SPRING_LEN = 70; // edge rest length
-  const GRAVITY = 0.015; // pull toward centre
-  const DAMPING = 0.86;
-  let alpha = 1; // cools to 0; reheats on interaction
+  // Repulsion spreads nodes to fill the pane; springs hold links together; a
+  // weak gravity keeps disconnected nodes from drifting off. Instead of a stiff
+  // centre-seeking force (which "rubber-bands"), we recentre the whole layout's
+  // centroid each frame so the graph stays put without springing back.
+  const SPRING = 0.03; // edge stiffness
+  const SPRING_LEN = 90; // edge rest length
+  const GRAVITY = 0.004; // gentle containment for stray nodes
+  const DAMPING = 0.9;
+  let repulsion = 16000; // node-node Coulomb constant; scaled to the pane size
+  let alpha = 1; // cools toward a low floor; reheats on interaction
 
   function step() {
     const cx = W / 2;
@@ -92,8 +100,8 @@
           dy = Math.random() - 0.5;
           d2 = 0.01;
         }
-        const force = REPULSION / d2;
         const d = Math.sqrt(d2);
+        const force = repulsion / d2;
         const fx = (dx / d) * force;
         const fy = (dy / d) * force;
         a.vx += fx;
@@ -118,18 +126,43 @@
       b.vy -= fy;
     }
 
+    let sx = 0;
+    let sy = 0;
+    let count = 0;
     for (const n of nodes) {
+      // A node held by the pointer, or one the user dropped (pinned), is fixed:
+      // it exerts forces on others but takes none itself, so nothing snaps back.
+      if (n === dragNode || n.pinned) {
+        n.vx = 0;
+        n.vy = 0;
+        continue;
+      }
       n.vx += (cx - n.x) * GRAVITY;
       n.vy += (cy - n.y) * GRAVITY;
-      if (n === dragNode) continue;
       n.vx *= DAMPING;
       n.vy *= DAMPING;
       n.x += n.vx * alpha;
       n.y += n.vy * alpha;
+      sx += n.x;
+      sy += n.y;
+      count++;
     }
 
-    alpha *= 0.99;
-    if (alpha < 0.03) alpha = 0.03;
+    // Recentre gently: ease the free nodes' centroid toward the pane centre a
+    // fraction at a time. A full snap each frame makes dragging a hub slosh the
+    // whole graph; easing keeps it calm. Fixed nodes are left untouched.
+    if (count > 0) {
+      const shiftX = (cx - sx / count) * 0.06;
+      const shiftY = (cy - sy / count) * 0.06;
+      for (const nd of nodes) {
+        if (nd === dragNode || nd.pinned) continue;
+        nd.x += shiftX;
+        nd.y += shiftY;
+      }
+    }
+
+    alpha *= 0.985;
+    if (alpha < 0.02) alpha = 0.02;
   }
 
   // ---- Rendering --------------------------------------------------------
@@ -178,8 +211,9 @@
       ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
       ctx.fillStyle = i === hoverIdx ? C.accent : C.muted;
       ctx.fill();
-      ctx.lineWidth = 1.5 / view.scale;
-      ctx.strokeStyle = C.surface;
+      // A pinned (dropped) node gets an accent ring; others a surface outline.
+      ctx.lineWidth = (n.pinned ? 2 : 1.5) / view.scale;
+      ctx.strokeStyle = n.pinned ? C.accent : C.surface;
       ctx.stroke();
     }
 
@@ -251,7 +285,8 @@
     const idx = nodeAt(p.x, p.y);
     if (idx >= 0) {
       dragNode = nodes[idx];
-      alpha = Math.max(alpha, 0.6);
+      dragNode.pinned = false; // picking it up frees it again
+      alpha = Math.max(alpha, 0.3);
     } else {
       panning = true;
     }
@@ -267,7 +302,7 @@
       dragNode.y = w.y;
       dragNode.vx = 0;
       dragNode.vy = 0;
-      alpha = Math.max(alpha, 0.4);
+      alpha = Math.max(alpha, 0.25);
       return;
     }
     if (panning) {
@@ -287,8 +322,11 @@
 
   window.addEventListener('mouseup', (e) => {
     if (dragNode && !moved) {
-      const idx = nodes.indexOf(dragNode);
-      if (idx >= 0 && nodes[idx].url) window.location.href = nodes[idx].url;
+      // A click (no drag) opens the note.
+      if (dragNode.url) window.location.href = dragNode.url;
+    } else if (dragNode && moved) {
+      // A drag drops the node where you let go and keeps it there.
+      dragNode.pinned = true;
     }
     dragNode = null;
     panning = false;
