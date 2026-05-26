@@ -313,6 +313,264 @@ p.empty {
   line-height: 1;
 }
 
+/* ---- Nether (Obsidian vault) ---- */
+main.nether {
+  margin: 0;
+  padding: 0;
+}
+
+.nether-layout {
+  display: flex;
+  align-items: flex-start;
+  min-height: calc(100vh - 4rem);
+}
+
+.nether-sidebar {
+  flex: 0 0 190px;
+  align-self: stretch;
+  padding: 1.25rem 0.75rem;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  overflow-y: auto;
+}
+
+.nether-sidebar .nether-home {
+  display: block;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.nether-sidebar .nether-home:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.nether-views {
+  display: flex;
+  gap: 0.3rem;
+  margin-bottom: 1rem;
+}
+
+.nether-views a {
+  flex: 1 1 0;
+  text-align: center;
+  padding: 0.3rem 0.4rem;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.nether-views a:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  text-decoration: none;
+}
+
+.nether-views a.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface);
+}
+
+/* ---- Nether graph view ---- */
+.graph-content {
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 1rem;
+}
+
+.graph-stage {
+  position: relative;
+  flex: 1 1 auto;
+  margin-top: 0.5rem;
+  min-height: 480px;
+  height: calc(100vh - 10rem);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+#graph-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+#graph-canvas:active {
+  cursor: grabbing;
+}
+
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.graph-empty[hidden] {
+  display: none;
+}
+
+ul.nav-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+ul.nav-tree ul.nav-tree {
+  margin-left: 0.6rem;
+  padding-left: 0.6rem;
+  border-left: 1px solid var(--border);
+}
+
+.nav-folder > .folder-name {
+  display: block;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0.5rem 0 0.25rem;
+}
+
+.nav-note a {
+  display: block;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  color: var(--text);
+}
+
+.nav-note a:hover {
+  background: var(--bg);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.nav-note a.active {
+  background: var(--accent);
+  color: var(--surface);
+}
+
+.nether-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2rem 2rem;
+  max-width: 820px;
+}
+
+.note-body {
+  line-height: 1.65;
+}
+
+.note-body h1,
+.note-body h2,
+.note-body h3,
+.note-body h4 {
+  color: var(--text);
+  line-height: 1.25;
+  margin: 1.6rem 0 0.6rem;
+}
+
+.note-body h1 { font-size: 1.8rem; }
+.note-body h2 { font-size: 1.4rem; }
+.note-body h3 { font-size: 1.15rem; }
+.note-body h4 { font-size: 1rem; }
+
+.note-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.8rem 0;
+}
+
+.note-body ul,
+.note-body ol {
+  padding-left: 1.5rem;
+}
+
+.note-body li {
+  margin: 0.15rem 0;
+}
+
+.note-body code {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.9em;
+}
+
+.note-body pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+}
+
+.note-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.note-body blockquote {
+  margin: 0.8rem 0;
+  padding: 0.2rem 0 0.2rem 1rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.note-body table {
+  border-collapse: collapse;
+  margin: 0.8rem 0;
+}
+
+.note-body th,
+.note-body td {
+  border: 1px solid var(--border);
+  padding: 0.4rem 0.7rem;
+}
+
+.note-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+.wikilink-missing {
+  color: var(--muted);
+  border-bottom: 1px dashed var(--border);
+  cursor: help;
+}
+
+@media (max-width: 700px) {
+  .nether-layout {
+    flex-direction: column;
+  }
+  .nether-sidebar {
+    flex-basis: auto;
+    width: 100%;
+    position: static;
+    max-height: none;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .nether-content {
+    padding: 1.5rem 1.25rem;
+  }
+}
+
 @media (max-width: 600px) {
   .lightbox { padding: 0.5rem; }
   .lightbox img {

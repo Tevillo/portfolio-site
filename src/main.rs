@@ -1,4 +1,5 @@
 mod handlers;
+mod nether;
 mod paths;
 mod people;
 mod state;
@@ -31,6 +32,7 @@ async fn main() -> Result<()> {
     let photos_dir = binding.join("photos");
     let cache_dir = cwd.join("cache").join("thumbs");
     let static_dir = cwd.join("static");
+    let nether_dir = binding.join("nether");
 
     std::fs::create_dir_all(&photos_dir)
         .with_context(|| format!("creating {}", photos_dir.display()))?;
@@ -49,14 +51,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    // The Obsidian vault is optional; fall back to the uncanonicalized path so
+    // the handlers simply 404 if it is absent rather than failing startup.
+    let nether_root: PathBuf = std::fs::canonicalize(&nether_dir).unwrap_or(nether_dir);
+
     info!(
         photos = %photos_root.display(),
         cache = %cache_root.display(),
         db = ?db_path.as_ref().map(|p| p.display().to_string()),
+        nether = %nether_root.display(),
         "roots",
     );
 
-    let state = AppState::new(photos_root, cache_root, db_path);
+    let state = AppState::new(photos_root, cache_root, db_path, nether_root);
 
     let app = Router::new()
         .route("/", get(handlers::index))
@@ -69,6 +76,10 @@ async fn main() -> Result<()> {
         .route("/people/:name", get(handlers::person_photos))
         .route("/image/*path", get(handlers::image))
         .route("/thumb/*path", get(handlers::thumb))
+        .route("/nether", get(nether::root))
+        .route("/nether/", get(nether::root))
+        .route("/nether/graph", get(nether::graph))
+        .route("/nether/*path", get(nether::note))
         .nest_service("/static", ServeDir::new(static_dir))
         .with_state(state)
         .layer(TraceLayer::new_for_http());

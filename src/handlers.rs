@@ -462,7 +462,7 @@ fn join_rel(parent: &str, child: &str) -> String {
     }
 }
 
-fn encode_path(s: &str) -> String {
+pub(crate) fn encode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
