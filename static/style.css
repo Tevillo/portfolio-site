@@ -593,3 +593,199 @@ ul.nav-tree ul.nav-tree {
   .lightbox .lb-next { right: 0.5rem; }
   .lightbox .lb-close { width: 3rem; height: 3rem; top: 0.5rem; right: 0.5rem; }
 }
+
+/* ---- Jobs (client delivery) ---- */
+main.job {
+  max-width: 1100px;
+  margin: 2rem auto;
+}
+
+.job-title {
+  margin: 0 0 1rem;
+  font-size: 1.5rem;
+  color: var(--text);
+}
+
+.banner {
+  border-radius: 6px;
+  padding: 0.7rem 1rem;
+  margin: 0 0 1rem;
+  font-size: 0.95rem;
+}
+
+.banner-error {
+  background: #f8d8c8;
+  border: 1px solid #d4886a;
+  color: #6e2a10;
+}
+
+ul.job-cards {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.75rem;
+}
+
+li.job-card a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+
+li.job-card a:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface);
+  text-decoration: none;
+}
+
+.job-name {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.job-counts {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+li.job-card a:hover .job-counts {
+  color: var(--surface);
+}
+
+.job-downloads {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  margin-bottom: 1.5rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(47, 58, 38, 0.06);
+}
+
+.dl-label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+  font-weight: 500;
+}
+
+#job-password {
+  width: 100%;
+  max-width: 320px;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+#job-password:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.dl-locked {
+  margin: 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.dl-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.dl-buttons button,
+.feed-download {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.45rem 0.9rem;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--surface);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.dl-buttons button:hover:not(:disabled),
+.feed-download:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.dl-buttons button:disabled,
+.feed-download:disabled {
+  background: var(--border);
+  border-color: var(--border);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+ul.feed {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2.5rem;
+}
+
+li.feed-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+a.feed-image {
+  display: block;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+a.feed-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 85vh;
+  object-fit: contain;
+  background: var(--surface);
+}
+
+.feed-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.feed-name {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.feed-meta {
+  flex: 1 1 auto;
+}
+
+.feed-download {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.85rem;
+}

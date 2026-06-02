@@ -54,14 +54,22 @@
     show();
   }
 
-  document.querySelectorAll('ul.grid').forEach((grid) => {
-    const links = Array.from(grid.querySelectorAll('li.tile a'));
-    const list = links.map((a) => a.href);
-    links.forEach((a, i) => {
-      a.addEventListener('click', (e) => {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
-        e.preventDefault();
-        open(list, i);
+  // (groupSelector, linkSelector) — each group renders an independent
+  // lightbox sequence, so the prev/next loop wraps inside one folder/feed.
+  const groups = [
+    ['ul.grid', 'li.tile a'],
+    ['ul.feed', 'a.feed-image'],
+  ];
+  groups.forEach(([groupSel, linkSel]) => {
+    document.querySelectorAll(groupSel).forEach((group) => {
+      const links = Array.from(group.querySelectorAll(linkSel));
+      const list = links.map((a) => a.href);
+      links.forEach((a, i) => {
+        a.addEventListener('click', (e) => {
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
+          e.preventDefault();
+          open(list, i);
+        });
       });
     });
   });

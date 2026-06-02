@@ -29,6 +29,22 @@ pub struct PersonEntry {
     pub photo_count: u32,
 }
 
+pub struct JobIndexEntry {
+    pub name: String,
+    pub url: String,
+    pub jpeg_count: u32,
+    pub raw_count: u32,
+}
+
+pub struct JobFeedPhoto {
+    pub name: String,
+    pub preview_url: String,
+    pub image_url: String,
+    pub download_action: String,
+    pub exif_datetime: Option<String>,
+    pub exif_camera: Option<String>,
+}
+
 /// One node in the Obsidian vault sidebar tree.
 pub enum NavNode {
     Folder { name: String, children: Vec<NavNode> },
@@ -44,6 +60,7 @@ fn site_header() -> Markup {
                 a href="/browse" { "Browse" }
                 a href="/all" { "All" }
                 a href="/people" { "People" }
+                a href="/jobs" { "Jobs" }
             }
         }
     }
@@ -286,6 +303,148 @@ pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup
                                     a href=(g.browse_url) { (g.label) }
                                 }
                                 (image_grid(&g.images))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn jobs_index_page(title: &str, crumbs: &[Crumb], jobs: &[JobIndexEntry]) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { (title) " - Portfolio" }
+                link rel="stylesheet" href="/static/style.css";
+            }
+            body {
+                (site_header())
+                main {
+                    (crumbs_nav(crumbs))
+                    @if jobs.is_empty() {
+                        p.empty { "No jobs yet." }
+                    } @else {
+                        section.jobs-index {
+                            ul.job-cards {
+                                @for j in jobs {
+                                    li.job-card {
+                                        a href=(j.url) {
+                                            span.job-name { (j.name) }
+                                            span.job-counts {
+                                                (j.jpeg_count) " JPEG"
+                                                @if j.raw_count > 0 { " · " (j.raw_count) " RAW" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Job detail view: vertical feed of large photos with EXIF caption and a
+/// sticky download bar. A single form holds the password input; each
+/// download button declares its own `formaction`, so per-photo and bulk
+/// downloads all share the same input without any JavaScript.
+pub fn job_page(
+    name: &str,
+    crumbs: &[Crumb],
+    photos: &[JobFeedPhoto],
+    raw_count: u32,
+    has_password: bool,
+    bulk_action: &str,
+    error: Option<&str>,
+) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { (name) " - Jobs" }
+                link rel="stylesheet" href="/static/style.css";
+                script src="/static/lightbox.js" defer {}
+            }
+            body {
+                (site_header())
+                main.job {
+                    (crumbs_nav(crumbs))
+                    h1.job-title { (name) }
+
+                    @if let Some(msg) = error {
+                        div.banner.banner-error role="alert" { (msg) }
+                    }
+
+                    form.job-downloads method="post" {
+                        @if has_password {
+                            label.dl-label for="job-password" { "Password" }
+                            input #job-password
+                                type="password"
+                                name="password"
+                                autocomplete="off"
+                                placeholder="Enter password to download"
+                                required;
+                        } @else {
+                            p.dl-locked {
+                                "Downloads are locked — no password has been set for this job yet."
+                            }
+                        }
+                        div.dl-buttons {
+                            button
+                                type="submit"
+                                formaction=(bulk_action)
+                                name="kind"
+                                value="jpeg"
+                                disabled[!has_password || photos.is_empty()] {
+                                    "Download all JPEG (" (photos.len()) ")"
+                                }
+                            button
+                                type="submit"
+                                formaction=(bulk_action)
+                                name="kind"
+                                value="raw"
+                                disabled[!has_password || raw_count == 0] {
+                                    "Download all RAW (" (raw_count) ")"
+                                }
+                        }
+
+                        @if photos.is_empty() {
+                            p.empty { "No JPEG photos in this job yet." }
+                        } @else {
+                            ul.feed {
+                                @for p in photos {
+                                    li.feed-item {
+                                        a.feed-image href=(p.image_url) data-name=(p.name) {
+                                            img src=(p.preview_url) alt=(p.name) loading="lazy";
+                                        }
+                                        div.feed-caption {
+                                            span.feed-name { (p.name) }
+                                            @if p.exif_datetime.is_some() || p.exif_camera.is_some() {
+                                                span.feed-meta {
+                                                    @if let Some(dt) = &p.exif_datetime { (dt) }
+                                                    @if p.exif_datetime.is_some() && p.exif_camera.is_some() { " · " }
+                                                    @if let Some(cam) = &p.exif_camera { (cam) }
+                                                }
+                                            }
+                                            button
+                                                type="submit"
+                                                class="feed-download"
+                                                formaction=(p.download_action)
+                                                disabled[!has_password] {
+                                                    "Download"
+                                                }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

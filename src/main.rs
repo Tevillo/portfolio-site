@@ -1,4 +1,5 @@
 mod handlers;
+mod jobs;
 mod nether;
 mod paths;
 mod people;
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -30,14 +31,18 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let binding = cwd.parent().expect("CANNOT FIND PHOTOS");
     let photos_dir = binding.join("photos");
-    let cache_dir = cwd.join("cache").join("thumbs");
+    let cache_dir = cwd.join("cache");
     let static_dir = cwd.join("static");
     let nether_dir = binding.join("nether");
 
     std::fs::create_dir_all(&photos_dir)
         .with_context(|| format!("creating {}", photos_dir.display()))?;
-    std::fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("creating {}", cache_dir.display()))?;
+    std::fs::create_dir_all(cache_dir.join("thumbs"))
+        .with_context(|| format!("creating {}", cache_dir.join("thumbs").display()))?;
+    std::fs::create_dir_all(cache_dir.join("preview"))
+        .with_context(|| format!("creating {}", cache_dir.join("preview").display()))?;
+    std::fs::create_dir_all(cache_dir.join("jobs"))
+        .with_context(|| format!("creating {}", cache_dir.join("jobs").display()))?;
 
     let photos_root: PathBuf = std::fs::canonicalize(&photos_dir)
         .with_context(|| format!("canonicalizing {}", photos_dir.display()))?;
@@ -74,8 +79,17 @@ async fn main() -> Result<()> {
         .route("/people", get(handlers::people_index))
         .route("/people/", get(handlers::people_index))
         .route("/people/:name", get(handlers::person_photos))
+        .route("/jobs", get(handlers::jobs_index))
+        .route("/jobs/", get(handlers::jobs_index))
+        .route("/jobs/:name", get(handlers::job_detail))
+        .route("/jobs/:name/download", post(handlers::job_download))
+        .route(
+            "/jobs/:name/file/*filename",
+            post(handlers::job_file_download),
+        )
         .route("/image/*path", get(handlers::image))
         .route("/thumb/*path", get(handlers::thumb))
+        .route("/preview/*path", get(handlers::preview))
         .route("/nether", get(nether::root))
         .route("/nether/", get(nether::root))
         .route("/nether/graph", get(nether::graph))

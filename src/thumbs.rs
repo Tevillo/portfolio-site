@@ -6,10 +6,36 @@ use anyhow::{Context, Result};
 use exif::{In, Reader as ExifReader, Tag, Value};
 use image::{DynamicImage, ImageReader};
 
-const THUMB_MAX_DIM: u32 = 400;
 const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
 const APP2_MARKER: u8 = 0xE2;
 const ICC_IDENTIFIER: &[u8] = b"ICC_PROFILE\0";
+
+/// Which rendition to produce. Each kind owns its own cache subdirectory
+/// (`cache/<subdir>/<same layout as photos>/file.jpg`) and target dimension.
+#[derive(Clone, Copy)]
+pub enum ThumbKind {
+    /// 400px grid thumbnail.
+    Grid,
+    /// 1600px medium-size preview, used by the jobs feed so the page can
+    /// show "big" photos without serving the multi-megabyte originals.
+    Preview,
+}
+
+impl ThumbKind {
+    fn subdir(self) -> &'static str {
+        match self {
+            ThumbKind::Grid => "thumbs",
+            ThumbKind::Preview => "preview",
+        }
+    }
+
+    fn max_dim(self) -> u32 {
+        match self {
+            ThumbKind::Grid => 400,
+            ThumbKind::Preview => 1600,
+        }
+    }
+}
 
 pub struct ThumbInfo {
     pub path: PathBuf,
@@ -17,19 +43,20 @@ pub struct ThumbInfo {
     pub size: u64,
 }
 
-/// Ensure a fresh thumbnail exists for `source` under `cache_root`,
-/// mirroring the path layout of `photos_root`. Returns the cached path
-/// plus metadata for ETag/Last-Modified headers.
+/// Ensure a fresh rendition exists for `source` under `cache_root/<kind>/`,
+/// mirroring the path layout of `photos_root`. Returns the cached path plus
+/// metadata for ETag/Last-Modified headers.
 pub async fn ensure_thumb(
     source: &Path,
     photos_root: &Path,
     cache_root: &Path,
+    kind: ThumbKind,
 ) -> Result<ThumbInfo> {
     let rel = source
         .strip_prefix(photos_root)
         .context("source not under photos_root")?
         .to_path_buf();
-    let cache_path = cache_root.join(&rel);
+    let cache_path = cache_root.join(kind.subdir()).join(&rel);
 
     let source_meta = tokio::fs::metadata(source).await?;
     let source_mtime = source_meta.modified()?;
@@ -48,7 +75,8 @@ pub async fn ensure_thumb(
         }
         let src = source.to_path_buf();
         let dst = cache_path.clone();
-        tokio::task::spawn_blocking(move || render_thumb(&src, &dst))
+        let max_dim = kind.max_dim();
+        tokio::task::spawn_blocking(move || render_thumb(&src, &dst, max_dim))
             .await
             .context("thumbnail task panicked")??;
     }
@@ -61,7 +89,7 @@ pub async fn ensure_thumb(
     })
 }
 
-fn render_thumb(src: &Path, dst: &Path) -> Result<()> {
+fn render_thumb(src: &Path, dst: &Path, max_dim: u32) -> Result<()> {
     let src_bytes =
         std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
 
@@ -71,7 +99,7 @@ fn render_thumb(src: &Path, dst: &Path) -> Result<()> {
         .decode()
         .with_context(|| format!("decoding {}", src.display()))?;
     let orientation = read_exif_orientation(&src_bytes);
-    let thumb = apply_orientation(img.thumbnail(THUMB_MAX_DIM, THUMB_MAX_DIM), orientation);
+    let thumb = apply_orientation(img.thumbnail(max_dim, max_dim), orientation);
 
     let mut thumb_bytes = Vec::new();
     thumb

@@ -1,18 +1,23 @@
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
+use tokio_util::io::ReaderStream;
 use tracing::warn;
 
+use crate::jobs::{self, DownloadKind};
 use crate::paths::{PathError, safe_resolve};
 use crate::people;
 use crate::state::AppState;
-use crate::thumbs;
-use crate::views::{self, Crumb, DirEntry, FolderGroup, ImageEntry, PersonEntry};
+use crate::thumbs::{self, ThumbKind};
+use crate::views::{
+    self, Crumb, DirEntry, FolderGroup, ImageEntry, JobFeedPhoto, JobIndexEntry, PersonEntry,
+};
 
 const FRONT_PAGE_DIR: &str = "portfolio";
 
@@ -74,7 +79,7 @@ async fn render_dir(
         };
         let rel_child = join_rel(rel, &name);
         if ftype.is_dir() {
-            if is_skipped_dir(&name) {
+            if is_skipped_dir(&name) || is_jobs_root(rel, &name) {
                 continue;
             }
             candidate_subdirs.push((name, rel_child, entry.path()));
@@ -301,7 +306,7 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
             };
             let rel_child = join_rel(&rel, &name);
             if ftype.is_dir() {
-                if is_skipped_dir(&name) {
+                if is_skipped_dir(&name) || is_jobs_root(&rel, &name) {
                     continue;
                 }
                 child_dirs.push((entry.path(), rel_child));
@@ -380,23 +385,41 @@ pub async fn thumb(
     AxumPath(rel): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    let source = match safe_resolve(state.photos_root(), &rel).await {
+    render_thumb_response(&state, &rel, &headers, ThumbKind::Grid).await
+}
+
+pub async fn preview(
+    State(state): State<AppState>,
+    AxumPath(rel): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    render_thumb_response(&state, &rel, &headers, ThumbKind::Preview).await
+}
+
+async fn render_thumb_response(
+    state: &AppState,
+    rel: &str,
+    headers: &HeaderMap,
+    kind: ThumbKind,
+) -> Response {
+    let source = match safe_resolve(state.photos_root(), rel).await {
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_jpeg(&rel) || rel_filename_is_hidden(&rel) {
+    if !is_jpeg(rel) || rel_filename_is_hidden(rel) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let info = match thumbs::ensure_thumb(&source, state.photos_root(), state.cache_root()).await {
-        Ok(i) => i,
-        Err(e) => {
-            warn!(source = %source.display(), error = ?e, "thumbnail failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let info =
+        match thumbs::ensure_thumb(&source, state.photos_root(), state.cache_root(), kind).await {
+            Ok(i) => i,
+            Err(e) => {
+                warn!(source = %source.display(), error = ?e, "thumbnail failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
     let etag = build_etag(info.mtime, info.size);
-    if matches_etag(&headers, &etag) {
+    if matches_etag(headers, &etag) {
         return StatusCode::NOT_MODIFIED.into_response();
     }
     let bytes = match tokio::fs::read(&info.path).await {
@@ -443,6 +466,13 @@ pub(crate) fn is_hidden(name: &str) -> bool {
 /// Directories the lister and subtree scanners should pretend don't exist.
 pub(crate) fn is_skipped_dir(name: &str) -> bool {
     name.eq_ignore_ascii_case("negative")
+}
+
+/// The "jobs" directory at the photos root is reserved for the client-delivery
+/// area (`/jobs/...`) and must not appear in the regular browse/all listings.
+/// Nested folders named "jobs" lower in the tree are unaffected.
+pub(crate) fn is_jobs_root(parent_rel: &str, name: &str) -> bool {
+    parent_rel.is_empty() && name == "jobs"
 }
 
 fn rel_filename_is_hidden(rel: &str) -> bool {
@@ -549,5 +579,356 @@ fn breadcrumbs(rel: &str, kind: PageKind) -> Vec<Crumb> {
         }
     }
     out
+}
+
+pub async fn jobs_index(State(state): State<AppState>) -> Response {
+    let jobs_list = match jobs::list_jobs(state.photos_root().clone()).await {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(error = ?e, "listing jobs failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let entries: Vec<JobIndexEntry> = jobs_list
+        .into_iter()
+        .map(|j| JobIndexEntry {
+            url: format!("/jobs/{}", encode_path(&j.name)),
+            name: j.name,
+            jpeg_count: j.jpeg_count,
+            raw_count: j.raw_count,
+        })
+        .collect();
+    let crumbs = vec![
+        Crumb {
+            label: "Home".into(),
+            url: Some("/".into()),
+        },
+        Crumb {
+            label: "Jobs".into(),
+            url: None,
+        },
+    ];
+    views::jobs_index_page("Jobs", &crumbs, &entries).into_response()
+}
+
+pub async fn job_detail(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    render_job_page(&state, &name, None, StatusCode::OK).await
+}
+
+async fn render_job_page(
+    state: &AppState,
+    name: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> Response {
+    if !is_valid_job_name(name) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let detail = match jobs::read_job(state.photos_root().clone(), name.to_string()).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            warn!(error = ?e, "reading job failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let photos: Vec<JobFeedPhoto> = detail
+        .jpegs
+        .into_iter()
+        .map(|p| JobFeedPhoto {
+            preview_url: format!("/preview/{}", encode_path(&p.rel)),
+            image_url: format!("/image/{}", encode_path(&p.rel)),
+            download_action: format!(
+                "/jobs/{}/file/{}",
+                encode_path(name),
+                encode_path(&p.name)
+            ),
+            name: p.name,
+            exif_datetime: p.exif.datetime,
+            exif_camera: p.exif.camera,
+        })
+        .collect();
+    let crumbs = vec![
+        Crumb {
+            label: "Home".into(),
+            url: Some("/".into()),
+        },
+        Crumb {
+            label: "Jobs".into(),
+            url: Some("/jobs".into()),
+        },
+        Crumb {
+            label: name.to_string(),
+            url: None,
+        },
+    ];
+    let action = format!("/jobs/{}/download", encode_path(name));
+    let body = views::job_page(
+        name,
+        &crumbs,
+        &photos,
+        detail.raws.len() as u32,
+        detail.has_password,
+        &action,
+        error,
+    );
+    (status, body).into_response()
+}
+
+/// Bulk download: POST /jobs/:name/download with form fields `password`,
+/// `kind=jpeg|raw`. Streams a cached zip on success; re-renders the job page
+/// with an error banner on auth failure.
+pub async fn job_download(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    if !is_valid_job_name(&name) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let form = parse_urlencoded(&body);
+    let kind = match form.get("kind").and_then(|s| DownloadKind::parse(s)) {
+        Some(k) => k,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let submitted = form.get("password").cloned().unwrap_or_default();
+    match check_password(&state, &name, &submitted).await {
+        AuthResult::NoPassword => {
+            return render_job_page(
+                &state,
+                &name,
+                Some("Downloads are locked — no password is set for this job."),
+                StatusCode::FORBIDDEN,
+            )
+            .await;
+        }
+        AuthResult::Bad => {
+            return render_job_page(
+                &state,
+                &name,
+                Some("Incorrect password."),
+                StatusCode::UNAUTHORIZED,
+            )
+            .await;
+        }
+        AuthResult::Ok => {}
+    }
+
+    let zip_path = match jobs::build_or_get_zip(
+        state.photos_root().clone(),
+        state.cache_root().clone(),
+        name.clone(),
+        kind,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = ?e, "building job zip failed");
+            return render_job_page(
+                &state,
+                &name,
+                Some("No files of this kind are available for this job."),
+                StatusCode::NOT_FOUND,
+            )
+            .await;
+        }
+    };
+    let kind_slug = match kind {
+        DownloadKind::Jpeg => "jpeg",
+        DownloadKind::Raw => "raw",
+    };
+    let attach = format!("{}-{}.zip", sanitize_attachment(&name), kind_slug);
+    stream_file_response(&zip_path, "application/zip", &attach).await
+}
+
+/// Per-photo download: POST /jobs/:name/file/*filename with form field
+/// `password`. Same auth flow as the bulk download.
+pub async fn job_file_download(
+    State(state): State<AppState>,
+    AxumPath((name, filename)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Response {
+    if !is_valid_job_name(&name) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // The filename comes from a `*var` route and may include "/"; reject
+    // anything that isn't a flat name so a client can't reach outside the
+    // job folder.
+    if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !(jobs::is_jpeg_name(&filename) || jobs::is_raw_name(&filename)) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let form = parse_urlencoded(&body);
+    let submitted = form.get("password").cloned().unwrap_or_default();
+    match check_password(&state, &name, &submitted).await {
+        AuthResult::NoPassword => {
+            return render_job_page(
+                &state,
+                &name,
+                Some("Downloads are locked — no password is set for this job."),
+                StatusCode::FORBIDDEN,
+            )
+            .await;
+        }
+        AuthResult::Bad => {
+            return render_job_page(
+                &state,
+                &name,
+                Some("Incorrect password."),
+                StatusCode::UNAUTHORIZED,
+            )
+            .await;
+        }
+        AuthResult::Ok => {}
+    }
+
+    let rel = format!("jobs/{}/{}", name, filename);
+    let path = match safe_resolve(state.photos_root(), &rel).await {
+        Ok(p) => p,
+        Err(e) => return map_path_err(e).into_response(),
+    };
+    let mime = if jobs::is_jpeg_name(&filename) {
+        "image/jpeg"
+    } else {
+        "application/octet-stream"
+    };
+    stream_file_response(&path, mime, &filename).await
+}
+
+enum AuthResult {
+    Ok,
+    Bad,
+    NoPassword,
+}
+
+async fn check_password(state: &AppState, job_name: &str, submitted: &str) -> AuthResult {
+    let stored = match jobs::read_password(state.photos_root().clone(), job_name.to_string()).await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => return AuthResult::NoPassword,
+        Err(e) => {
+            warn!(error = ?e, "reading job password failed");
+            return AuthResult::NoPassword;
+        }
+    };
+    if jobs::verify(&stored, submitted) {
+        AuthResult::Ok
+    } else {
+        AuthResult::Bad
+    }
+}
+
+async fn stream_file_response(path: &Path, mime: &str, attach_name: &str) -> Response {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "open for stream failed");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    let meta = match file.metadata().await {
+        Ok(m) => m,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let len = meta.len();
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        attach_name.replace('"', "")
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_LENGTH, len)
+        .header(header::CONTENT_DISPOSITION, disposition)
+        .body(body)
+        .unwrap()
+}
+
+fn is_valid_job_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name != "."
+        && name != ".."
+}
+
+fn sanitize_attachment(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
+/// Minimal `application/x-www-form-urlencoded` parser — keeps the dep tree
+/// lean (no serde just for two fields). Last value wins on duplicates.
+fn parse_urlencoded(body: &[u8]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let s = match std::str::from_utf8(body) {
+        Ok(s) => s,
+        Err(_) => return out,
+    };
+    for pair in s.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.split_once('=') {
+            Some(t) => t,
+            None => (pair, ""),
+        };
+        out.insert(url_decode(k), url_decode(v));
+    }
+    out
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                    (Some(a), Some(b)) => {
+                        out.push((a << 4) | b);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
