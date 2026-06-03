@@ -10,13 +10,14 @@ use axum::response::{IntoResponse, Redirect, Response};
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
-use crate::jobs::{self, DownloadKind};
+use crate::work::{self, DownloadKind, Scope};
 use crate::paths::{PathError, safe_resolve};
 use crate::people;
 use crate::state::AppState;
 use crate::thumbs::{self, ThumbKind};
 use crate::views::{
-    self, Crumb, DirEntry, FolderGroup, ImageEntry, JobFeedPhoto, JobIndexEntry, PersonEntry,
+    self, Crumb, DirEntry, FolderGroup, ImageEntry, WorkFeedPhoto, WorkFeedSection, WorkIndexEntry,
+    PersonEntry,
 };
 
 const FRONT_PAGE_DIR: &str = "portfolio";
@@ -79,7 +80,7 @@ async fn render_dir(
         };
         let rel_child = join_rel(rel, &name);
         if ftype.is_dir() {
-            if is_skipped_dir(&name) || is_jobs_root(rel, &name) {
+            if is_skipped_dir(&name) || is_work_root(rel, &name) {
                 continue;
             }
             candidate_subdirs.push((name, rel_child, entry.path()));
@@ -306,7 +307,7 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
             };
             let rel_child = join_rel(&rel, &name);
             if ftype.is_dir() {
-                if is_skipped_dir(&name) || is_jobs_root(&rel, &name) {
+                if is_skipped_dir(&name) || is_work_root(&rel, &name) {
                     continue;
                 }
                 child_dirs.push((entry.path(), rel_child));
@@ -468,11 +469,11 @@ pub(crate) fn is_skipped_dir(name: &str) -> bool {
     name.eq_ignore_ascii_case("negative")
 }
 
-/// The "jobs" directory at the photos root is reserved for the client-delivery
-/// area (`/jobs/...`) and must not appear in the regular browse/all listings.
-/// Nested folders named "jobs" lower in the tree are unaffected.
-pub(crate) fn is_jobs_root(parent_rel: &str, name: &str) -> bool {
-    parent_rel.is_empty() && name == "jobs"
+/// The "work" directory at the photos root is reserved for the client-delivery
+/// area (`/work/...`) and must not appear in the regular browse/all listings.
+/// Nested folders named "work" lower in the tree are unaffected.
+pub(crate) fn is_work_root(parent_rel: &str, name: &str) -> bool {
+    parent_rel.is_empty() && name == "work"
 }
 
 fn rel_filename_is_hidden(rel: &str) -> bool {
@@ -581,18 +582,18 @@ fn breadcrumbs(rel: &str, kind: PageKind) -> Vec<Crumb> {
     out
 }
 
-pub async fn jobs_index(State(state): State<AppState>) -> Response {
-    let jobs_list = match jobs::list_jobs(state.photos_root().clone()).await {
+pub async fn work_index(State(state): State<AppState>) -> Response {
+    let work_list = match work::list_work(state.photos_root().clone()).await {
         Ok(j) => j,
         Err(e) => {
-            warn!(error = ?e, "listing jobs failed");
+            warn!(error = ?e, "listing work failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let entries: Vec<JobIndexEntry> = jobs_list
+    let entries: Vec<WorkIndexEntry> = work_list
         .into_iter()
-        .map(|j| JobIndexEntry {
-            url: format!("/jobs/{}", encode_path(&j.name)),
+        .map(|j| WorkIndexEntry {
+            url: format!("/work/{}", encode_path(&j.name)),
             name: j.name,
             jpeg_count: j.jpeg_count,
             raw_count: j.raw_count,
@@ -604,51 +605,93 @@ pub async fn jobs_index(State(state): State<AppState>) -> Response {
             url: Some("/".into()),
         },
         Crumb {
-            label: "Jobs".into(),
+            label: "Work".into(),
             url: None,
         },
     ];
-    views::jobs_index_page("Jobs", &crumbs, &entries).into_response()
+    views::work_index_page("Work", &crumbs, &entries).into_response()
 }
 
-pub async fn job_detail(
+pub async fn work_detail(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Response {
-    render_job_page(&state, &name, None, StatusCode::OK).await
+    render_work_page(&state, &name, &headers, None, StatusCode::OK).await
 }
 
-async fn render_job_page(
+async fn render_work_page(
     state: &AppState,
     name: &str,
+    headers: &HeaderMap,
     error: Option<&str>,
     status: StatusCode,
 ) -> Response {
-    if !is_valid_job_name(name) {
+    if !is_valid_work_name(name) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let detail = match jobs::read_job(state.photos_root().clone(), name.to_string()).await {
+    let detail = match work::read_work(state.photos_root().clone(), name.to_string()).await {
         Ok(Some(d)) => d,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
-            warn!(error = ?e, "reading job failed");
+            warn!(error = ?e, "reading work failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let photos: Vec<JobFeedPhoto> = detail
-        .jpegs
+    // Authorize against the .password file via the request cookie. Without a
+    // valid cookie we suppress the per-photo download URLs so the lightbox
+    // button stays hidden, and the view will render the password prompt.
+    let stored_pw = match work::read_password(state.photos_root().clone(), name.to_string()).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = ?e, "reading work password failed");
+            None
+        }
+    };
+    let authorized = match &stored_pw {
+        Some(pw) => cookie_authorizes(headers, name, pw),
+        None => false,
+    };
+    let mut total_jpeg_count: u32 = 0;
+    let sections: Vec<WorkFeedSection> = detail
+        .sections
         .into_iter()
-        .map(|p| JobFeedPhoto {
-            preview_url: format!("/preview/{}", encode_path(&p.rel)),
-            image_url: format!("/image/{}", encode_path(&p.rel)),
-            download_action: format!(
-                "/jobs/{}/file/{}",
-                encode_path(name),
-                encode_path(&p.name)
-            ),
-            name: p.name,
-            exif_datetime: p.exif.datetime,
-            exif_camera: p.exif.camera,
+        .map(|s| {
+            let photos: Vec<WorkFeedPhoto> = s
+                .photos
+                .into_iter()
+                .map(|p| WorkFeedPhoto {
+                    preview_url: format!("/preview/{}", encode_path(&p.rel)),
+                    image_url: format!("/image/{}", encode_path(&p.rel)),
+                    download_action: if authorized {
+                        format!(
+                            "/work/{}/file/{}",
+                            encode_path(name),
+                            encode_path(&p.subpath)
+                        )
+                    } else {
+                        String::new()
+                    },
+                    name: p.name,
+                    preview_dims: p.preview_dims,
+                })
+                .collect();
+            total_jpeg_count += photos.len() as u32;
+            // The job-root section gets the empty-label slot; everything else
+            // hangs off its subfolder path so collapse.js can persist per
+            // section choices without colliding across work items.
+            let data_path = if s.label.is_empty() {
+                format!("work:{name}:")
+            } else {
+                format!("work:{name}:{}", s.label)
+            };
+            let default_open = s.is_edited || s.label.is_empty();
+            WorkFeedSection {
+                label: s.label,
+                photos,
+                data_path,
+                default_open,
+            }
         })
         .collect();
     let crumbs = vec![
@@ -657,36 +700,93 @@ async fn render_job_page(
             url: Some("/".into()),
         },
         Crumb {
-            label: "Jobs".into(),
-            url: Some("/jobs".into()),
+            label: "Work".into(),
+            url: Some("/work".into()),
         },
         Crumb {
             label: name.to_string(),
             url: None,
         },
     ];
-    let action = format!("/jobs/{}/download", encode_path(name));
-    let body = views::job_page(
+    let bulk_action = format!("/work/{}/download", encode_path(name));
+    let auth_action = format!("/work/{}/auth", encode_path(name));
+    let body = views::work_page(
         name,
         &crumbs,
-        &photos,
-        detail.raws.len() as u32,
+        &sections,
+        total_jpeg_count,
+        detail.counts,
         detail.has_password,
-        &action,
+        authorized,
+        &bulk_action,
+        &auth_action,
         error,
     );
     (status, body).into_response()
 }
 
-/// Bulk download: POST /jobs/:name/download with form fields `password`,
-/// `kind=jpeg|raw`. Streams a cached zip on success; re-renders the job page
-/// with an error banner on auth failure.
-pub async fn job_download(
+/// Verify the submitted password and issue a path-scoped cookie. On success
+/// we 303-redirect back to the job page so the GET handler can re-render
+/// with the authorized state visible. On failure we re-render the page with
+/// an error banner.
+pub async fn work_auth(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !is_valid_job_name(&name) {
+    if !is_valid_work_name(&name) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let form = parse_urlencoded(&body);
+    let submitted = form.get("password").cloned().unwrap_or_default();
+    let stored = match work::read_password(state.photos_root().clone(), name.clone()).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return render_work_page(
+                &state,
+                &name,
+                &headers,
+                Some("Downloads are locked — no password is set for this work item."),
+                StatusCode::FORBIDDEN,
+            )
+            .await;
+        }
+        Err(e) => {
+            warn!(error = ?e, "reading work password failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if !work::verify(&stored, &submitted) {
+        return render_work_page(
+            &state,
+            &name,
+            &headers,
+            Some("Incorrect password."),
+            StatusCode::UNAUTHORIZED,
+        )
+        .await;
+    }
+    let set_cookie = build_work_cookie(&name, &submitted);
+    let redirect_to = format!("/work/{}", encode_path(&name));
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, redirect_to)
+        .header(header::SET_COOKIE, set_cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Bulk download: POST /work/:name/download with form field `kind=jpeg|raw`.
+/// Auth comes from the path-scoped cookie set by `work_auth`; this handler
+/// never accepts a password directly. Streams the cached zip on success.
+pub async fn work_download(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_valid_work_name(&name) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let form = parse_urlencoded(&body);
@@ -694,135 +794,211 @@ pub async fn job_download(
         Some(k) => k,
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let submitted = form.get("password").cloned().unwrap_or_default();
-    match check_password(&state, &name, &submitted).await {
-        AuthResult::NoPassword => {
-            return render_job_page(
-                &state,
-                &name,
-                Some("Downloads are locked — no password is set for this job."),
-                StatusCode::FORBIDDEN,
-            )
-            .await;
-        }
-        AuthResult::Bad => {
-            return render_job_page(
-                &state,
-                &name,
-                Some("Incorrect password."),
-                StatusCode::UNAUTHORIZED,
-            )
-            .await;
-        }
-        AuthResult::Ok => {}
+    let scope = match form.get("scope").and_then(|s| Scope::parse(s)) {
+        Some(s) => s,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if let Some(err) = require_cookie_auth(&state, &name, &headers).await {
+        return err;
     }
 
-    let zip_path = match jobs::build_or_get_zip(
+    let zip_path = match work::build_or_get_zip(
         state.photos_root().clone(),
         state.cache_root().clone(),
         name.clone(),
+        scope,
         kind,
     )
     .await
     {
         Ok(p) => p,
         Err(e) => {
-            warn!(error = ?e, "building job zip failed");
-            return render_job_page(
+            warn!(error = ?e, "building work zip failed");
+            return render_work_page(
                 &state,
                 &name,
-                Some("No files of this kind are available for this job."),
+                &headers,
+                Some("No files matching that selection are available for this work item."),
                 StatusCode::NOT_FOUND,
             )
             .await;
         }
     };
-    let kind_slug = match kind {
-        DownloadKind::Jpeg => "jpeg",
-        DownloadKind::Raw => "raw",
-    };
-    let attach = format!("{}-{}.zip", sanitize_attachment(&name), kind_slug);
+    let attach = format!(
+        "{}-{}-{}.zip",
+        sanitize_attachment(&name),
+        scope.slug(),
+        kind.slug()
+    );
     stream_file_response(&zip_path, "application/zip", &attach).await
 }
 
-/// Per-photo download: POST /jobs/:name/file/*filename with form field
-/// `password`. Same auth flow as the bulk download.
-pub async fn job_file_download(
+/// Per-photo download: POST /work/:name/file/*subpath. `subpath` may include
+/// forward slashes for nested folders (e.g. `digital/edited/foo.jpg`). Path
+/// safety is enforced both by per-component validation here and by
+/// `safe_resolve` downstream; auth comes from the cookie.
+pub async fn work_file_download(
     State(state): State<AppState>,
-    AxumPath((name, filename)): AxumPath<(String, String)>,
-    body: Bytes,
+    AxumPath((name, subpath)): AxumPath<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
-    if !is_valid_job_name(&name) {
+    if !is_valid_work_name(&name) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    // The filename comes from a `*var` route and may include "/"; reject
-    // anything that isn't a flat name so a client can't reach outside the
-    // job folder.
-    if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
+    if !is_valid_work_subpath(&subpath) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if !(jobs::is_jpeg_name(&filename) || jobs::is_raw_name(&filename)) {
+    // Only allow the extensions a job page actually links to.
+    let basename = subpath.rsplit('/').next().unwrap_or("");
+    if !(work::is_jpeg_name(basename) || work::is_raw_name(basename)) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let form = parse_urlencoded(&body);
-    let submitted = form.get("password").cloned().unwrap_or_default();
-    match check_password(&state, &name, &submitted).await {
-        AuthResult::NoPassword => {
-            return render_job_page(
-                &state,
-                &name,
-                Some("Downloads are locked — no password is set for this job."),
-                StatusCode::FORBIDDEN,
-            )
-            .await;
-        }
-        AuthResult::Bad => {
-            return render_job_page(
-                &state,
-                &name,
-                Some("Incorrect password."),
-                StatusCode::UNAUTHORIZED,
-            )
-            .await;
-        }
-        AuthResult::Ok => {}
+    if let Some(err) = require_cookie_auth(&state, &name, &headers).await {
+        return err;
     }
 
-    let rel = format!("jobs/{}/{}", name, filename);
+    let rel = format!("work/{}/{}", name, subpath);
     let path = match safe_resolve(state.photos_root(), &rel).await {
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    let mime = if jobs::is_jpeg_name(&filename) {
+    let mime = if work::is_jpeg_name(basename) {
         "image/jpeg"
     } else {
         "application/octet-stream"
     };
-    stream_file_response(&path, mime, &filename).await
+    stream_file_response(&path, mime, basename).await
 }
 
-enum AuthResult {
-    Ok,
-    Bad,
-    NoPassword,
+fn is_valid_work_subpath(s: &str) -> bool {
+    if s.is_empty() || s.contains('\\') {
+        return false;
+    }
+    for seg in s.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.starts_with('.') {
+            return false;
+        }
+    }
+    true
 }
 
-async fn check_password(state: &AppState, job_name: &str, submitted: &str) -> AuthResult {
-    let stored = match jobs::read_password(state.photos_root().clone(), job_name.to_string()).await
+/// Returns `Some(error_response)` when the request lacks a valid cookie for
+/// this job; returns `None` when the caller may proceed.
+async fn require_cookie_auth(
+    state: &AppState,
+    job_name: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let stored = match work::read_password(state.photos_root().clone(), job_name.to_string()).await
     {
         Ok(Some(s)) => s,
-        Ok(None) => return AuthResult::NoPassword,
+        Ok(None) => {
+            return Some(
+                render_work_page(
+                    state,
+                    job_name,
+                    headers,
+                    Some("Downloads are locked — no password is set for this work item."),
+                    StatusCode::FORBIDDEN,
+                )
+                .await,
+            );
+        }
         Err(e) => {
-            warn!(error = ?e, "reading job password failed");
-            return AuthResult::NoPassword;
+            warn!(error = ?e, "reading work password failed");
+            return Some(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
-    if jobs::verify(&stored, submitted) {
-        AuthResult::Ok
+    if cookie_authorizes(headers, job_name, &stored) {
+        None
     } else {
-        AuthResult::Bad
+        Some(
+            render_work_page(
+                state,
+                job_name,
+                headers,
+                Some("Authentication required — enter the job password to unlock downloads."),
+                StatusCode::UNAUTHORIZED,
+            )
+            .await,
+        )
     }
+}
+
+/// Cookie carrying the auth token for one job. Hex-encoded so values pass
+/// through cookie parsing untouched regardless of password characters, and
+/// path-scoped so a token for one job can't be sent to another's endpoints.
+const COOKIE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn cookie_name(job: &str) -> String {
+    format!("work_token_{}", sanitize_attachment(job))
+}
+
+fn build_work_cookie(name: &str, password: &str) -> String {
+    let value = encode_hex(password.as_bytes());
+    let path = format!("/work/{}", encode_path(name));
+    format!(
+        "{}={}; Path={}; Max-Age={}; HttpOnly; SameSite=Lax",
+        cookie_name(name),
+        value,
+        path,
+        COOKIE_TTL_SECS,
+    )
+}
+
+fn read_work_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let header_val = headers.get(header::COOKIE)?.to_str().ok()?;
+    let want = cookie_name(name);
+    for pair in header_val.split(';') {
+        let pair = pair.trim();
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == want {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn cookie_authorizes(headers: &HeaderMap, name: &str, expected: &str) -> bool {
+    let val = match read_work_cookie(headers, name) {
+        Some(v) => v,
+        None => return false,
+    };
+    let bytes = match decode_hex(&val) {
+        Some(b) => b,
+        None => return false,
+    };
+    let submitted = match std::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    work::verify(expected, submitted)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{:02x}", b).unwrap();
+    }
+    out
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = hex_nibble(bytes[i])?;
+        let lo = hex_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Some(out)
 }
 
 async fn stream_file_response(path: &Path, mime: &str, attach_name: &str) -> Response {
@@ -853,7 +1029,7 @@ async fn stream_file_response(path: &Path, mime: &str, attach_name: &str) -> Res
         .unwrap()
 }
 
-fn is_valid_job_name(name: &str) -> bool {
+fn is_valid_work_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
         && !name.contains('/')

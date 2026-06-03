@@ -6,6 +6,24 @@
   --accent: #6b8e4e;
   --accent-hover: #87a96b;
   --border: #c9d1b8;
+  /* Stable light foreground used for text on accent/dark backgrounds —
+     decoupled from --surface so a dark-theme can flip the card surface
+     without inverting the legibility of accent buttons and the lightbox. */
+  --on-accent: #f6f7f1;
+}
+
+/* Dark theme — opt-in site-wide. The inline head script in views.rs sets
+   <html data-theme="dark"> before paint, so the variable overrides cascade
+   to every element with no FOUC. `--on-accent` stays light from :root, so
+   accent buttons and the lightbox caption keep legible contrast. */
+html[data-theme="dark"] {
+  --bg: #0d0e0c;
+  --surface: #181a17;
+  --text: #e8ebe2;
+  --muted: #9aa395;
+  --border: #2a2e26;
+  --accent: #8db168;
+  --accent-hover: #a8c884;
 }
 
 * {
@@ -46,11 +64,52 @@ header.site {
   gap: 1.5rem;
 }
 
+header.site .site-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 header.site .brand {
   font-weight: 600;
   letter-spacing: 0.02em;
   font-size: 1.1rem;
   color: var(--text);
+}
+
+/* Theme toggle: one button with both sun + moon icons stacked; CSS shows
+   the icon for the *target* theme based on the current data-theme value,
+   so the button visually previews what clicking it will do. */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.theme-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.theme-toggle .theme-icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  display: block;
+}
+
+/* Show moon in light mode (clicking goes dark); show sun in dark mode. */
+html[data-theme="light"] .theme-icon-sun,
+html[data-theme="dark"] .theme-icon-moon {
+  display: none;
 }
 
 header.site .brand:hover {
@@ -172,7 +231,7 @@ ul.dirlist li a {
 
 ul.dirlist li a:hover {
   background: var(--accent);
-  color: var(--surface);
+  color: var(--on-accent);
   border-color: var(--accent);
   text-decoration: none;
 }
@@ -183,7 +242,7 @@ ul.dirlist li a .count {
 }
 
 ul.dirlist li a:hover .count {
-  color: var(--surface);
+  color: var(--on-accent);
 }
 
 ul.grid {
@@ -268,7 +327,7 @@ p.empty {
 .lightbox .lb-btn {
   position: absolute;
   background: rgba(246, 247, 241, 0.12);
-  color: var(--surface);
+  color: var(--on-accent);
   border: 1px solid rgba(246, 247, 241, 0.25);
   cursor: pointer;
   font-family: inherit;
@@ -378,7 +437,7 @@ main.nether {
 .nether-views a.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--surface);
+  color: var(--on-accent);
 }
 
 /* ---- Nether graph view ---- */
@@ -470,7 +529,7 @@ ul.nav-tree ul.nav-tree {
 
 .nav-note a.active {
   background: var(--accent);
-  color: var(--surface);
+  color: var(--on-accent);
 }
 
 .nether-content {
@@ -583,6 +642,21 @@ ul.nav-tree ul.nav-tree {
 }
 
 @media (max-width: 600px) {
+  header.site {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+  }
+  header.site .site-left {
+    justify-content: space-between;
+  }
+  header.site .topnav {
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    font-size: 0.9rem;
+  }
+
   .lightbox { padding: 0.5rem; }
   .lightbox img {
     max-width: 100vw;
@@ -594,13 +668,13 @@ ul.nav-tree ul.nav-tree {
   .lightbox .lb-close { width: 3rem; height: 3rem; top: 0.5rem; right: 0.5rem; }
 }
 
-/* ---- Jobs (client delivery) ---- */
-main.job {
+/* ---- Work (client delivery) ---- */
+main.work {
   max-width: 1100px;
   margin: 2rem auto;
 }
 
-.job-title {
+.work-title {
   margin: 0 0 1rem;
   font-size: 1.5rem;
   color: var(--text);
@@ -619,7 +693,7 @@ main.job {
   color: #6e2a10;
 }
 
-ul.job-cards {
+ul.work-cards {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -628,7 +702,7 @@ ul.job-cards {
   gap: 0.75rem;
 }
 
-li.job-card a {
+li.work-card a {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -639,37 +713,33 @@ li.job-card a {
   color: var(--text);
 }
 
-li.job-card a:hover {
+li.work-card a:hover {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--surface);
+  color: var(--on-accent);
   text-decoration: none;
 }
 
-.job-name {
+.work-name {
   font-weight: 600;
   font-size: 1rem;
 }
 
-.job-counts {
+.work-counts {
   font-size: 0.85rem;
   color: var(--muted);
 }
 
-li.job-card a:hover .job-counts {
-  color: var(--surface);
+li.work-card a:hover .work-counts {
+  color: var(--on-accent);
 }
 
-.job-downloads {
+.work-downloads {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1rem 1.1rem;
   margin-bottom: 1.5rem;
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  box-shadow: 0 2px 8px rgba(47, 58, 38, 0.06);
 }
 
 .dl-label {
@@ -680,7 +750,7 @@ li.job-card a:hover .job-counts {
   font-weight: 500;
 }
 
-#job-password {
+#work-password {
   width: 100%;
   max-width: 320px;
   padding: 0.45rem 0.6rem;
@@ -691,7 +761,7 @@ li.job-card a:hover .job-counts {
   font: inherit;
 }
 
-#job-password:focus {
+#work-password:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -709,83 +779,155 @@ li.job-card a:hover .job-counts {
   margin-top: 0.6rem;
 }
 
-.dl-buttons button,
-.feed-download {
+/* Bulk download bar uses one row per scope: a label on the left, three
+   submit buttons on the right (JPEG / RAW / Both). Each row is its own
+   <form> so the hidden scope field rides with whichever kind button fires. */
+.dl-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.5rem 0;
+  margin: 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.dl-row:last-child {
+  border-bottom: none;
+}
+
+.dl-row-label {
+  flex: 1 1 12rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.dl-row .dl-buttons {
+  margin-top: 0;
+}
+
+.dl-buttons button {
   font: inherit;
   cursor: pointer;
   padding: 0.45rem 0.9rem;
   border-radius: 4px;
   border: 1px solid var(--accent);
   background: var(--accent);
-  color: var(--surface);
+  color: var(--on-accent);
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.dl-buttons button:hover:not(:disabled),
-.feed-download:hover:not(:disabled) {
+.dl-buttons button:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
 }
 
-.dl-buttons button:disabled,
-.feed-download:disabled {
+.dl-buttons button:disabled {
   background: var(--border);
   border-color: var(--border);
   color: var(--muted);
   cursor: not-allowed;
 }
 
-ul.feed {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2.5rem;
+/* Work galleries reuse the /all grid scaffolding but with bigger tiles so
+   clients see large previews; the name + per-photo download surface only
+   in the lightbox (see lightbox.js + .lb-caption below). */
+main.work .work-gallery {
+  margin-top: 1.5rem;
 }
 
-li.feed-item {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
+main.work .work-gallery h2 {
+  font-size: 1rem;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  margin: 0 0 0.6rem;
 }
 
-a.feed-image {
-  display: block;
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--surface);
-  border: 1px solid var(--border);
+main.work .work-gallery .section-label {
+  color: var(--text);
+  font-weight: 600;
 }
 
-a.feed-image img {
-  display: block;
-  width: 100%;
-  height: auto;
-  max-height: 85vh;
-  object-fit: contain;
-  background: var(--surface);
-}
-
-.feed-caption {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 1rem;
-  font-size: 0.9rem;
+main.work .work-gallery .section-count {
+  font-weight: 400;
+  font-size: 0.85rem;
   color: var(--muted);
 }
 
-.feed-name {
+/* Photos in a work item land in a CSS-columns masonry rather than a fixed square
+   grid, so each tile renders at the image's natural aspect ratio without
+   leaving gaps for taller portraits next to shorter landscapes. */
+main.work ul.work-grid {
+  display: block;
+  grid-template-columns: none;
+  gap: 0;
+  columns: 360px;
+  column-gap: 1.25rem;
+}
+
+main.work ul.work-grid li.tile {
+  break-inside: avoid;
+  margin: 0 0 1.25rem;
+}
+
+main.work ul.work-grid li.tile a {
+  display: block;
+}
+
+main.work ul.work-grid li.tile img {
+  aspect-ratio: auto;
+  width: 100%;
+  height: auto;
+  object-fit: initial;
+}
+
+.lb-caption {
+  position: absolute;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: calc(100vw - 8rem);
+  padding: 0.55rem 0.85rem;
+  border-radius: 6px;
+  background: rgba(20, 24, 16, 0.78);
+  color: var(--on-accent);
+  font-size: 0.9rem;
+  z-index: 1;
+}
+
+.lb-caption[hidden] {
+  display: none;
+}
+
+.lb-name {
   font-weight: 500;
-  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50vw;
 }
 
-.feed-meta {
-  flex: 1 1 auto;
-}
-
-.feed-download {
-  padding: 0.3rem 0.7rem;
+.lb-download {
+  font: inherit;
   font-size: 0.85rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.lb-download:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.lb-download[hidden] {
+  display: none;
 }

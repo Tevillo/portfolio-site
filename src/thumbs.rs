@@ -16,7 +16,7 @@ const ICC_IDENTIFIER: &[u8] = b"ICC_PROFILE\0";
 pub enum ThumbKind {
     /// 400px grid thumbnail.
     Grid,
-    /// 1600px medium-size preview, used by the jobs feed so the page can
+    /// 1600px medium-size preview, used by the work feed so the page can
     /// show "big" photos without serving the multi-megabyte originals.
     Preview,
 }
@@ -41,6 +41,46 @@ pub struct ThumbInfo {
     pub path: PathBuf,
     pub mtime: SystemTime,
     pub size: u64,
+}
+
+/// Cheap pre-flight: read just the JPEG header + EXIF orientation from `src`
+/// and return the (w, h) the Preview rendition will end up with after
+/// orientation rotation and downscaling to fit within `Preview.max_dim()`.
+/// No image decode happens; only ~headers are read off disk, so this is
+/// safe to call per-photo during page render to populate `<img width
+/// height>` attributes that prevent layout shift.
+pub fn preview_dimensions(src: &Path) -> Result<(u32, u32)> {
+    let (raw_w, raw_h) = image::image_dimensions(src)
+        .with_context(|| format!("reading dimensions of {}", src.display()))?;
+    let orientation = read_orientation(src).unwrap_or(1);
+    let (w, h) = if (5..=8).contains(&orientation) {
+        (raw_h, raw_w)
+    } else {
+        (raw_w, raw_h)
+    };
+    let max = ThumbKind::Preview.max_dim();
+    if w <= max && h <= max {
+        return Ok((w, h));
+    }
+    let (scaled_w, scaled_h) = if w >= h {
+        let ratio = max as f64 / w as f64;
+        (max, ((h as f64) * ratio).round().max(1.0) as u32)
+    } else {
+        let ratio = max as f64 / h as f64;
+        (((w as f64) * ratio).round().max(1.0) as u32, max)
+    };
+    Ok((scaled_w, scaled_h))
+}
+
+fn read_orientation(path: &Path) -> Option<u32> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let exif = ExifReader::new().read_from_container(&mut reader).ok()?;
+    let field = exif.get_field(Tag::Orientation, In::PRIMARY)?;
+    match &field.value {
+        Value::Short(v) => v.first().map(|n| *n as u32),
+        _ => None,
+    }
 }
 
 /// Ensure a fresh rendition exists for `source` under `cache_root/<kind>/`,
