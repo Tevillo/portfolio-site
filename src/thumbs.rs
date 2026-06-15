@@ -12,7 +12,7 @@ const ICC_IDENTIFIER: &[u8] = b"ICC_PROFILE\0";
 
 /// Which rendition to produce. Each kind owns its own cache subdirectory
 /// (`cache/<subdir>/<same layout as photos>/file.jpg`) and target dimension.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ThumbKind {
     /// 400px grid thumbnail.
     Grid,
@@ -41,6 +41,10 @@ pub struct ThumbInfo {
     pub path: PathBuf,
     pub mtime: SystemTime,
     pub size: u64,
+    /// True if this call actually (re)rendered the file, false if a fresh
+    /// cached rendition already existed. Let cache-warming report progress;
+    /// request handlers ignore it.
+    pub rebuilt: bool,
 }
 
 /// Cheap pre-flight: read just the JPEG header + EXIF orientation from `src`
@@ -126,6 +130,7 @@ pub async fn ensure_thumb(
         path: cache_path,
         mtime: final_meta.modified()?,
         size: final_meta.len(),
+        rebuilt: needs_rebuild,
     })
 }
 

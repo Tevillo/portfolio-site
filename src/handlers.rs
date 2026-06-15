@@ -527,7 +527,7 @@ fn map_path_err(e: PathError) -> StatusCode {
     }
 }
 
-fn is_jpeg(name: &str) -> bool {
+pub(crate) fn is_jpeg(name: &str) -> bool {
     Path::new(name)
         .extension()
         .and_then(|e| e.to_str())

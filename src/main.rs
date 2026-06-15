@@ -10,6 +10,8 @@ mod work;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -20,6 +22,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::state::AppState;
+use crate::thumbs::ThumbKind;
 use crate::work::{DownloadKind, Scope};
 
 #[tokio::main]
@@ -27,11 +30,13 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("prebuild") => prebuild_cmd(&args[2..]).await,
+        Some("warm") => warm_cmd().await,
         Some("serve") | None => serve().await,
         Some(other) => {
             eprintln!("unknown subcommand: {other}");
             eprintln!("usage:");
             eprintln!("  portfolio-site [serve]               run the web server");
+            eprintln!("  portfolio-site warm                  pre-generate grid + preview renditions for every photo");
             eprintln!("  portfolio-site prebuild <name>...    build all zip combos for one or more work items");
             eprintln!("  portfolio-site prebuild --all        build all zip combos for every work item");
             std::process::exit(2);
@@ -134,6 +139,126 @@ async fn serve() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// `portfolio-site warm`
+///
+/// Walks every servable JPEG under the photos root and forces both the grid
+/// (400px) and preview (1600px) renditions into the cache, so the first
+/// visitor to any folder never pays the on-demand decode/downscale cost.
+///
+/// Already-fresh renditions are detected by `ensure_thumb` (mtime check) and
+/// skipped cheaply, so this is safe to re-run after every deploy. Writes are
+/// atomic (temp file + rename) so it can run against a live server.
+async fn warm_cmd() -> Result<()> {
+    let (photos_root, cache_root) = resolve_roots()?;
+
+    println!("scanning {} for photos...", photos_root.display());
+    let jpegs = collect_jpegs(&photos_root).await;
+    let total = jpegs.len();
+    if total == 0 {
+        println!("no photos found under {}", photos_root.display());
+        return Ok(());
+    }
+
+    // Renditions are CPU-bound (JPEG decode + downscale + encode), so cap
+    // concurrency near the core count rather than flooding the blocking pool.
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    println!("found {total} photos; warming grid + preview cache ({concurrency} at a time)");
+
+    let jpegs = Arc::new(jpegs);
+    let next = Arc::new(AtomicUsize::new(0));
+    let built = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+    let start = std::time::Instant::now();
+
+    let mut workers = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let jpegs = jpegs.clone();
+        let next = next.clone();
+        let built = built.clone();
+        let failed = failed.clone();
+        let photos_root = photos_root.clone();
+        let cache_root = cache_root.clone();
+        workers.push(tokio::spawn(async move {
+            loop {
+                let idx = next.fetch_add(1, Ordering::Relaxed);
+                if idx >= jpegs.len() {
+                    break;
+                }
+                let src = &jpegs[idx];
+                for kind in [ThumbKind::Grid, ThumbKind::Preview] {
+                    match thumbs::ensure_thumb(src, &photos_root, &cache_root, kind).await {
+                        Ok(info) => {
+                            if info.rebuilt {
+                                built.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Err(e) => {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            eprintln!("  FAILED {} ({kind:?}): {e:#}", src.display());
+                        }
+                    }
+                }
+                let done = idx + 1;
+                if done % 25 == 0 || done == jpegs.len() {
+                    println!("  [{done}/{}] photos processed", jpegs.len());
+                }
+            }
+        }));
+    }
+    for w in workers {
+        let _ = w.await;
+    }
+
+    println!(
+        "done in {:.1}s — {} renditions generated, {} already fresh, {} failed",
+        start.elapsed().as_secs_f32(),
+        built.load(Ordering::Relaxed),
+        total * 2 - built.load(Ordering::Relaxed) - failed.load(Ordering::Relaxed),
+        failed.load(Ordering::Relaxed),
+    );
+    Ok(())
+}
+
+/// Depth-first walk of `root` collecting every servable JPEG, applying the
+/// same visibility rules the request handlers use: skip dotfiles, skip files
+/// whose name marks them hidden, and skip `negative` directories.
+async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut read = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  read_dir {} failed: {e}", dir.display());
+                continue;
+            }
+        };
+        while let Ok(Some(entry)) = read.next_entry().await {
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let ftype = match entry.file_type().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ftype.is_dir() {
+                if !handlers::is_skipped_dir(&name) {
+                    stack.push(entry.path());
+                }
+            } else if ftype.is_file() && handlers::is_jpeg(&name) && !handlers::is_hidden(&name) {
+                out.push(entry.path());
+            }
+        }
+    }
+    out
 }
 
 /// `portfolio-site prebuild <name>... | --all`
