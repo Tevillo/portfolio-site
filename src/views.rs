@@ -360,6 +360,7 @@ pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup
                 link rel="stylesheet" href="/static/style.css";
                 script src="/static/lightbox.js" defer {}
                 script src="/static/collapse.js" defer {}
+                script src="/static/favs.js" defer {}
             }
             body {
                 (site_header())
@@ -368,6 +369,12 @@ pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup
                     @if groups.is_empty() {
                         p.empty { "Nothing here yet." }
                     } @else {
+                        section.all-controls {
+                            button.favs-toggle type="button" aria-pressed="false" {
+                                span.favs-toggle-track { span.favs-toggle-thumb {} }
+                                span.favs-toggle-label { "Favorites only" }
+                            }
+                        }
                         @for g in groups {
                             section.gallery data-path=(g.path) {
                                 h2 {

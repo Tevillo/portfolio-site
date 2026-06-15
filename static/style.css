@@ -211,6 +211,69 @@ section.gallery.hidden-by-ancestor {
   display: none;
 }
 
+section.gallery.favs-hidden {
+  display: none;
+}
+
+/* "Favorites only" toggle bar on /all. */
+section.all-controls {
+  margin-bottom: 1.5rem;
+}
+
+.favs-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: transparent;
+  border: none;
+  padding: 0.2rem;
+  margin: 0;
+  cursor: pointer;
+  color: var(--muted);
+  font: inherit;
+  transition: color 0.15s ease;
+}
+
+.favs-toggle:hover {
+  color: var(--text);
+}
+
+.favs-toggle-track {
+  position: relative;
+  width: 2.2rem;
+  height: 1.2rem;
+  border-radius: 1rem;
+  background: var(--border);
+  transition: background 0.15s ease;
+  flex: 0 0 auto;
+}
+
+.favs-toggle-thumb {
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform 0.15s ease;
+}
+
+.favs-toggle[aria-pressed="true"] .favs-toggle-track {
+  background: var(--accent);
+}
+
+.favs-toggle[aria-pressed="true"] .favs-toggle-thumb {
+  transform: translateX(1rem);
+}
+
+.favs-toggle-label {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
 ul.dirlist {
   list-style: none;
   padding: 0;
