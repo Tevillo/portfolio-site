@@ -29,11 +29,30 @@ enum PageKind {
     BrowseSub,
 }
 
+/// Home page: every folder under `portfolio/` rendered as its own section on a
+/// single page (grouped by directory), with photos shown at their natural
+/// aspect ratio. Reuses the `/all` grouping machinery, scoped to the portfolio
+/// subtree.
 pub async fn index(State(state): State<AppState>) -> Response {
-    match render_dir(&state, FRONT_PAGE_DIR, PageKind::Index).await {
-        Ok(resp) => resp,
-        Err(status) => status.into_response(),
+    // The portfolio shows large tiles, so load the 1600px preview rendition
+    // rather than the 400px grid thumb used by dense listings.
+    let mut groups = match walk_groups(state.photos_root(), FRONT_PAGE_DIR, "preview").await {
+        Ok(g) => g,
+        Err(status) => return status.into_response(),
+    };
+    // Label each section relative to the portfolio root: the top-level folder
+    // becomes "Portfolio", subfolders show just their sub-path (e.g.
+    // "portfolio/street" -> "street"). `path` stays the full rel so collapse.js
+    // keeps unique per-section state.
+    let prefix = format!("{FRONT_PAGE_DIR}/");
+    for g in &mut groups {
+        g.label = match g.path.strip_prefix(&prefix) {
+            Some(sub) => sub.to_string(),
+            None => "Portfolio".to_string(),
+        };
     }
+    let crumbs = breadcrumbs(FRONT_PAGE_DIR, PageKind::Index);
+    views::grouped_gallery_page("Portfolio", &crumbs, &groups, true, false).into_response()
 }
 
 pub async fn browse_root(State(state): State<AppState>) -> Response {
@@ -283,7 +302,7 @@ fn people_unavailable_response() -> Response {
 }
 
 pub async fn all_photos(State(state): State<AppState>) -> Response {
-    match walk_groups(state.photos_root()).await {
+    match walk_groups(state.photos_root(), "", "thumb").await {
         Ok(groups) => {
             let crumbs = vec![
                 Crumb {
@@ -295,14 +314,30 @@ pub async fn all_photos(State(state): State<AppState>) -> Response {
                     url: None,
                 },
             ];
-            views::all_page("All", &crumbs, &groups).into_response()
+            views::grouped_gallery_page("All", &crumbs, &groups, false, true).into_response()
         }
         Err(status) => status.into_response(),
     }
 }
 
-async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
-    let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
+/// Pre-order DFS from `root`/`start_rel`, emitting one `FolderGroup` per
+/// directory that directly contains JPEGs. `start_rel` is relative to `root`
+/// (empty = the whole photos tree, as `/all` uses); paths and URLs stay
+/// rooted at `root` so thumbnail/image links resolve regardless of where the
+/// walk starts. `thumb_route` selects which rendition the displayed tile loads
+/// — `"thumb"` (400px grid) for dense listings, `"preview"` (1600px) for the
+/// portfolio showcase where tiles render larger.
+async fn walk_groups(
+    root: &Path,
+    start_rel: &str,
+    thumb_route: &str,
+) -> Result<Vec<FolderGroup>, StatusCode> {
+    let start_abs = if start_rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(start_rel)
+    };
+    let mut stack: Vec<(PathBuf, String)> = vec![(start_abs, start_rel.to_string())];
     let mut groups: Vec<FolderGroup> = Vec::new();
 
     while let Some((abs, rel)) = stack.pop() {
@@ -355,7 +390,7 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
                     .get(&file_stem_lower(&name))
                     .map(|raw| format!("/download/{}", encode_path(&join_rel(&rel, raw))));
                 ImageEntry {
-                    thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
+                    thumb_url: format!("/{}/{}", thumb_route, encode_path(&rel_child)),
                     image_url: format!("/image/{}", encode_path(&rel_child)),
                     jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                     raw_download_url,

@@ -894,12 +894,15 @@ li.work-card a:hover .work-counts {
 
 /* Work galleries reuse the /all grid scaffolding but with bigger tiles so
    clients see large previews; the name + per-photo download surface only
-   in the lightbox (see lightbox.js + .lb-caption below). */
-main.work .work-gallery {
+   in the lightbox (see lightbox.js + .lb-caption below). The Portfolio home
+   page (main.portfolio) shares this exact treatment. */
+main.work .work-gallery,
+main.portfolio .work-gallery {
   margin-top: 1.5rem;
 }
 
-main.work .work-gallery h2 {
+main.work .work-gallery h2,
+main.portfolio .work-gallery h2 {
   font-size: 1rem;
   text-transform: lowercase;
   letter-spacing: 0.02em;
@@ -907,21 +910,24 @@ main.work .work-gallery h2 {
   margin: 0 0 0.6rem;
 }
 
-main.work .work-gallery .section-label {
+main.work .work-gallery .section-label,
+main.portfolio .work-gallery .section-label {
   color: var(--text);
   font-weight: 600;
 }
 
-main.work .work-gallery .section-count {
+main.work .work-gallery .section-count,
+main.portfolio .work-gallery .section-count {
   font-weight: 400;
   font-size: 0.85rem;
   color: var(--muted);
 }
 
-/* Photos in a work item land in a CSS-columns masonry rather than a fixed square
-   grid, so each tile renders at the image's natural aspect ratio without
-   leaving gaps for taller portraits next to shorter landscapes. */
-main.work ul.work-grid {
+/* Photos land in a CSS-columns masonry rather than a fixed square grid, so each
+   tile renders at the image's natural aspect ratio without leaving gaps for
+   taller portraits next to shorter landscapes. */
+main.work ul.work-grid,
+main.portfolio ul.work-grid {
   display: block;
   grid-template-columns: none;
   gap: 0;
@@ -929,16 +935,40 @@ main.work ul.work-grid {
   column-gap: 1.25rem;
 }
 
-main.work ul.work-grid li.tile {
+/* Portfolio is single-column by default so phones read the shots top-to-bottom.
+   This also overrides the shared 360px multi-column rule above for narrow
+   viewports. */
+main.portfolio ul.work-grid {
+  columns: 1;
+}
+
+/* Wide screens only: two side-by-side columns with generous, viewport-scaled
+   side margins so the large shots have room to breathe. Below this breakpoint
+   the layout stays single-column with the standard page padding. */
+@media (min-width: 1000px) {
+  main.portfolio {
+    padding-left: clamp(1.5rem, 20vw, 20rem);
+    padding-right: clamp(1.5rem, 20vw, 20rem);
+  }
+
+  main.portfolio ul.work-grid {
+    columns: 2;
+  }
+}
+
+main.work ul.work-grid li.tile,
+main.portfolio ul.work-grid li.tile {
   break-inside: avoid;
   margin: 0 0 1.25rem;
 }
 
-main.work ul.work-grid li.tile a {
+main.work ul.work-grid li.tile a,
+main.portfolio ul.work-grid li.tile a {
   display: block;
 }
 
-main.work ul.work-grid li.tile img {
+main.work ul.work-grid li.tile img,
+main.portfolio ul.work-grid li.tile img {
   aspect-ratio: auto;
   width: 100%;
   height: auto;

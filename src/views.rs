@@ -103,7 +103,6 @@ fn site_header() -> Markup {
                 }
             }
             nav.topnav {
-                a href="/" { "Home" }
                 a href="/browse" { "Browse" }
                 a href="/all" { "All" }
                 a href="/people" { "People" }
@@ -144,9 +143,12 @@ fn crumbs_nav(crumbs: &[Crumb]) -> Markup {
     }
 }
 
-fn image_grid(images: &[ImageEntry]) -> Markup {
+/// `masonry` adds the `work-grid` class so the grid renders as a natural-ratio
+/// CSS-columns masonry (used by the work and portfolio pages) instead of the
+/// default square-cropped grid.
+fn image_grid(images: &[ImageEntry], masonry: bool) -> Markup {
     html! {
-        ul.grid {
+        ul.grid.work-grid[masonry] {
             @for img in images {
                 li.tile {
                     // Per-photo download URLs ride on the anchor as data-* so
@@ -165,6 +167,8 @@ fn image_grid(images: &[ImageEntry]) -> Markup {
     }
 }
 
+/// Shared flat gallery page used by the per-folder browse views and per-person
+/// photo lists: a folder list plus a single square-cropped photo grid.
 pub fn page(title: &str, crumbs: &[Crumb], subdirs: &[DirEntry], images: &[ImageEntry]) -> Markup {
     html! {
         (DOCTYPE)
@@ -194,7 +198,7 @@ pub fn page(title: &str, crumbs: &[Crumb], subdirs: &[DirEntry], images: &[Image
                     @if !images.is_empty() {
                         section.gallery {
                             @if !subdirs.is_empty() { h2 { "Photos" } }
-                            (image_grid(images))
+                            (image_grid(images, false))
                         }
                     }
                     @if subdirs.is_empty() && images.is_empty() {
@@ -348,7 +352,16 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
     }
 }
 
-pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup {
+/// Directory-grouped gallery: one collapsible section per folder, all on a
+/// single page. Used by `/all` (square tiles + a "Favorites only" filter) and
+/// the Portfolio home page (`natural_ratio` masonry, no favorites control).
+pub fn grouped_gallery_page(
+    title: &str,
+    crumbs: &[Crumb],
+    groups: &[FolderGroup],
+    natural_ratio: bool,
+    show_favs: bool,
+) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -360,32 +373,41 @@ pub fn all_page(title: &str, crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup
                 link rel="stylesheet" href="/static/style.css";
                 script src="/static/lightbox.js" defer {}
                 script src="/static/collapse.js" defer {}
-                script src="/static/favs.js" defer {}
+                @if show_favs { script src="/static/favs.js" defer {} }
             }
             body {
                 (site_header())
-                main {
+                main.portfolio[natural_ratio] {
                     (crumbs_nav(crumbs))
                     @if groups.is_empty() {
                         p.empty { "Nothing here yet." }
                     } @else {
-                        section.all-controls {
-                            button.favs-toggle type="button" aria-pressed="false" {
-                                span.favs-toggle-track { span.favs-toggle-thumb {} }
-                                span.favs-toggle-label { "Favorites only" }
+                        @if show_favs {
+                            section.all-controls {
+                                button.favs-toggle type="button" aria-pressed="false" {
+                                    span.favs-toggle-track { span.favs-toggle-thumb {} }
+                                    span.favs-toggle-label { "Favorites only" }
+                                }
                             }
                         }
                         @for g in groups {
-                            section.gallery data-path=(g.path) {
+                            // When natural_ratio (Portfolio), adopt the work page's
+                            // section chrome: `.work-gallery` header with a bold
+                            // `.section-label` + dimmed `.section-count`, and the
+                            // `.work-grid` masonry. `/all` keeps the plain header.
+                            section.gallery.work-gallery[natural_ratio] data-path=(g.path) {
                                 h2 {
                                     button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
                                         svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
                                             polyline points="6,9 12,15 18,9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" {}
                                         }
                                     }
-                                    a href=(g.browse_url) { (g.label) }
+                                    a.section-label[natural_ratio] href=(g.browse_url) { (g.label) }
+                                    @if natural_ratio {
+                                        span.section-count { "(" (g.images.len()) ")" }
+                                    }
                                 }
-                                (image_grid(&g.images))
+                                (image_grid(&g.images, natural_ratio))
                             }
                         }
                     }

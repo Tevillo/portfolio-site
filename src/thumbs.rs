@@ -22,7 +22,7 @@ pub enum ThumbKind {
 }
 
 impl ThumbKind {
-    fn subdir(self) -> &'static str {
+    pub(crate) fn subdir(self) -> &'static str {
         match self {
             ThumbKind::Grid => "thumbs",
             ThumbKind::Preview => "preview",

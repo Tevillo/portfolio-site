@@ -7,6 +7,7 @@ mod thumbs;
 mod views;
 mod work;
 
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -30,13 +31,14 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("prebuild") => prebuild_cmd(&args[2..]).await,
-        Some("warm") => warm_cmd().await,
+        Some("warm") => warm_cmd(&args[2..]).await,
         Some("serve") | None => serve().await,
         Some(other) => {
             eprintln!("unknown subcommand: {other}");
             eprintln!("usage:");
             eprintln!("  portfolio-site [serve]               run the web server");
-            eprintln!("  portfolio-site warm                  pre-generate grid + preview renditions for every photo");
+            eprintln!("  portfolio-site warm [--prune]        pre-generate grid + preview renditions for every photo");
+            eprintln!("                                       (--prune also deletes cached renditions with no source)");
             eprintln!("  portfolio-site prebuild <name>...    build all zip combos for one or more work items");
             eprintln!("  portfolio-site prebuild --all        build all zip combos for every work item");
             std::process::exit(2);
@@ -141,7 +143,7 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
-/// `portfolio-site warm`
+/// `portfolio-site warm [--prune]`
 ///
 /// Walks every servable JPEG under the photos root and forces both the grid
 /// (400px) and preview (1600px) renditions into the cache, so the first
@@ -150,7 +152,12 @@ async fn serve() -> Result<()> {
 /// Already-fresh renditions are detected by `ensure_thumb` (mtime check) and
 /// skipped cheaply, so this is safe to re-run after every deploy. Writes are
 /// atomic (temp file + rename) so it can run against a live server.
-async fn warm_cmd() -> Result<()> {
+///
+/// With `--prune`, after warming it also deletes any cached rendition whose
+/// source photo is no longer servable (deleted, renamed, now hidden, or moved
+/// into a skipped dir) so the cache doesn't accumulate orphans over time.
+async fn warm_cmd(args: &[String]) -> Result<()> {
+    let prune = args.iter().any(|a| a == "--prune");
     let (photos_root, cache_root) = resolve_roots()?;
 
     println!("scanning {} for photos...", photos_root.display());
@@ -220,7 +227,73 @@ async fn warm_cmd() -> Result<()> {
         total * 2 - built.load(Ordering::Relaxed) - failed.load(Ordering::Relaxed),
         failed.load(Ordering::Relaxed),
     );
+
+    if prune {
+        // Relative paths the server can serve; any cached rendition outside
+        // this set is an orphan. Mirrors the `cache/<kind>/<rel>` layout that
+        // `ensure_thumb` writes, so a cache file's rel maps 1:1 to a source rel.
+        let servable: HashSet<PathBuf> = jpegs
+            .iter()
+            .filter_map(|p| p.strip_prefix(&photos_root).ok().map(Path::to_path_buf))
+            .collect();
+        prune_orphans(&cache_root, &servable).await;
+    }
     Ok(())
+}
+
+/// Remove every file under `cache/thumbs` and `cache/preview` whose
+/// root-relative path is not in `servable`. In-progress `.<name>.tmp` files
+/// (written by a concurrent render) are left alone. Reports how much was freed.
+async fn prune_orphans(cache_root: &Path, servable: &HashSet<PathBuf>) {
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    for subdir in [ThumbKind::Grid.subdir(), ThumbKind::Preview.subdir()] {
+        let base = cache_root.join(subdir);
+        let mut stack = vec![base.clone()];
+        while let Some(dir) = stack.pop() {
+            let mut read = match tokio::fs::read_dir(&dir).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            while let Ok(Some(entry)) = read.next_entry().await {
+                let ftype = match entry.file_type().await {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+                if ftype.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !ftype.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with('.') && name.ends_with(".tmp") {
+                    continue;
+                }
+                let rel = match path.strip_prefix(&base) {
+                    Ok(r) => r.to_path_buf(),
+                    Err(_) => continue,
+                };
+                if !servable.contains(&rel) {
+                    let sz = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                    match tokio::fs::remove_file(&path).await {
+                        Ok(_) => {
+                            removed += 1;
+                            freed += sz;
+                        }
+                        Err(e) => eprintln!("  prune failed {}: {e}", path.display()),
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "pruned {removed} orphan renditions ({} freed)",
+        human_bytes(freed)
+    );
 }
 
 /// Depth-first walk of `root` collecting every servable JPEG, applying the
