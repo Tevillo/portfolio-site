@@ -931,3 +931,68 @@ main.work ul.work-grid li.tile img {
 .lb-download[hidden] {
   display: none;
 }
+
+/* Per-photo download control for the regular galleries: a button pinned to the
+   top-left of the lightbox (mirroring the close button opposite it) so it sits
+   to the side of the selected photo without overlapping it. Clicking it opens a
+   small menu offering JPG and, when a sibling raw exists, RAW. Built in
+   lightbox.js and shown only while a photo is open. */
+.lb-dl {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  z-index: 2;
+}
+
+.lb-dl[hidden] {
+  display: none;
+}
+
+/* Match the close button's footprint. Override .lb-btn's absolute position so
+   the toggle sits inside the .lb-dl wrapper (which carries the placement)
+   rather than pinning itself to the lightbox. */
+.lightbox .lb-dl-toggle {
+  position: relative;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+}
+
+.lb-dl-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.35rem;
+  border-radius: 6px;
+  background: rgba(20, 24, 16, 0.92);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.lb-dl-menu[hidden] {
+  display: none;
+}
+
+.lb-dl-option {
+  display: block;
+  min-width: 4rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  color: var(--on-accent);
+  background: var(--accent);
+  transition: background 0.15s ease;
+}
+
+.lb-dl-option:hover {
+  background: var(--accent-hover);
+}
+
+.lb-dl-option[hidden] {
+  display: none;
+}

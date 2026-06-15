@@ -11,8 +11,21 @@
     '<line x1="6" y1="6" x2="18" y2="18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>' +
     '<line x1="18" y1="6" x2="6" y2="18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>' +
     '</svg>';
+  const downloadIcon =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<path d="M12 4v9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>' +
+    '<polyline points="8,10 12,14 16,10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '<path d="M5 19h14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>' +
+    '</svg>';
   lb.innerHTML =
     '<button class="lb-btn lb-close" aria-label="Close">' + closeIcon + '</button>' +
+    '<div class="lb-dl" hidden>' +
+      '<button type="button" class="lb-btn lb-dl-toggle" aria-label="Download" aria-haspopup="true" aria-expanded="false">' + downloadIcon + '</button>' +
+      '<div class="lb-dl-menu" hidden>' +
+        '<a class="lb-dl-option" data-kind="jpg" download>JPG</a>' +
+        '<a class="lb-dl-option" data-kind="raw" download hidden>RAW</a>' +
+      '</div>' +
+    '</div>' +
     '<button class="lb-btn lb-nav lb-prev" aria-label="Previous">' + chevron('15,5 8,12 15,19') + '</button>' +
     '<div class="lb-stage">' +
       '<img alt="" />' +
@@ -31,8 +44,18 @@
   const captionEl = lb.querySelector('.lb-caption');
   const nameEl = lb.querySelector('.lb-name');
   const downloadBtn = lb.querySelector('.lb-download');
+  const dlWrap = lb.querySelector('.lb-dl');
+  const dlToggle = lb.querySelector('.lb-dl-toggle');
+  const dlMenu = lb.querySelector('.lb-dl-menu');
+  const dlJpg = lb.querySelector('.lb-dl-option[data-kind="jpg"]');
+  const dlRaw = lb.querySelector('.lb-dl-option[data-kind="raw"]');
 
-  // Each item: { url, preview?, name?, download? }. `preview` is the
+  function closeDlMenu() {
+    dlMenu.hidden = true;
+    dlToggle.setAttribute('aria-expanded', 'false');
+  }
+
+  // Each item: { url, preview?, name?, download?, jpg?, raw? }. `preview` is the
   // already-loaded thumbnail URL; we paint that immediately on click so the
   // lightbox feels instant, then upgrade to the full-size `url` when it
   // finishes downloading in the background.
@@ -61,6 +84,23 @@
     downloadBtn.hidden = !hasDownload;
     downloadBtn.dataset.action = hasDownload ? it.download : '';
     captionEl.hidden = !(hasName || hasDownload);
+
+    // Side download menu (regular galleries): show when this item carries a
+    // JPG download URL; reveal the RAW option only when a sibling raw exists.
+    // Always collapse the menu when the shown item changes.
+    closeDlMenu();
+    const hasJpg = !!it.jpg;
+    dlWrap.hidden = !hasJpg;
+    if (hasJpg) {
+      dlJpg.href = it.jpg;
+      if (it.raw) {
+        dlRaw.href = it.raw;
+        dlRaw.hidden = false;
+      } else {
+        dlRaw.removeAttribute('href');
+        dlRaw.hidden = true;
+      }
+    }
 
     // Instant feedback: paint the low-res preview right away. The browser
     // already has it in cache from rendering the tile.
@@ -97,6 +137,7 @@
     document.body.style.overflow = 'hidden';
   }
   function close() {
+    closeDlMenu();
     lb.classList.remove('open');
     lb.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
@@ -126,6 +167,8 @@
           preview: innerImg ? innerImg.src : '',
           name: a.dataset.name || '',
           download: a.dataset.download || '',
+          jpg: a.dataset.jpg || '',
+          raw: a.dataset.raw || '',
         };
       });
       links.forEach((a, i) => {
@@ -156,8 +199,23 @@
     form.submit();
     form.remove();
   });
+  // Toggle the JPG/RAW menu without closing the lightbox.
+  dlToggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const willOpen = dlMenu.hidden;
+    dlMenu.hidden = !willOpen;
+    dlToggle.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  });
+  // The JPG/RAW links are plain GET downloads (the `/download` endpoint sends
+  // an attachment Content-Disposition); just collapse the menu after a pick.
+  dlMenu.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (e.target.closest('.lb-dl-option')) closeDlMenu();
+  });
   lb.addEventListener('click', (e) => {
-    if (e.target.closest('.lb-btn') || e.target.closest('.lb-caption')) return;
+    if (e.target.closest('.lb-btn') || e.target.closest('.lb-caption') || e.target.closest('.lb-dl')) return;
+    // A backdrop click closes the open menu first, the lightbox second.
+    if (!dlMenu.hidden) { closeDlMenu(); return; }
     close();
   });
 
@@ -180,7 +238,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (!lb.classList.contains('open')) return;
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') { if (!dlMenu.hidden) closeDlMenu(); else close(); }
     else if (e.key === 'ArrowLeft') prev();
     else if (e.key === 'ArrowRight') next();
   });

@@ -11,6 +11,13 @@ pub struct ImageEntry {
     pub name: String,
     pub thumb_url: String,
     pub image_url: String,
+    /// Force-download URL for the JPEG itself (served with an attachment
+    /// Content-Disposition, unlike `image_url` which displays inline).
+    pub jpg_download_url: String,
+    /// Download URL for a sibling raw/edit-master file (same basename, raw
+    /// extension, same folder), when one exists alongside the JPEG. `None`
+    /// hides the RAW choice in the per-photo download menu.
+    pub raw_download_url: Option<String>,
 }
 
 pub struct Crumb {
@@ -142,7 +149,14 @@ fn image_grid(images: &[ImageEntry]) -> Markup {
         ul.grid {
             @for img in images {
                 li.tile {
-                    a href=(img.image_url) {
+                    // Per-photo download URLs ride on the anchor as data-* so
+                    // the lightbox can surface JPG / RAW choices to the side of
+                    // the selected photo (see lightbox.js). `data-raw` is
+                    // omitted when no sibling raw exists, hiding the RAW choice.
+                    a href=(img.image_url)
+                      data-name=(img.name)
+                      data-jpg=(img.jpg_download_url)
+                      data-raw=[img.raw_download_url.as_deref()] {
                         img src=(img.thumb_url) alt=(img.name) loading="lazy";
                     }
                 }

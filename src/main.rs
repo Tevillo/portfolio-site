@@ -118,6 +118,7 @@ async fn serve() -> Result<()> {
             post(handlers::work_file_download),
         )
         .route("/image/*path", get(handlers::image))
+        .route("/download/*path", get(handlers::download))
         .route("/thumb/*path", get(handlers::thumb))
         .route("/preview/*path", get(handlers::preview))
         .route("/nether", get(nether::root))

@@ -65,7 +65,8 @@ async fn render_dir(
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
     let mut candidate_subdirs: Vec<(String, String, PathBuf)> = Vec::new();
-    let mut images = Vec::new();
+    let mut jpegs: Vec<(String, String)> = Vec::new();
+    let mut raw_by_stem: HashMap<String, String> = HashMap::new();
     while let Some(entry) = read.next_entry().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
         let name = match entry.file_name().into_string() {
             Ok(n) => n,
@@ -85,13 +86,26 @@ async fn render_dir(
             }
             candidate_subdirs.push((name, rel_child, entry.path()));
         } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
-            images.push(ImageEntry {
-                thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
-                image_url: format!("/image/{}", encode_path(&rel_child)),
-                name,
-            });
+            jpegs.push((name, rel_child));
+        } else if ftype.is_file() && is_raw_download_name(&name) {
+            raw_by_stem.insert(file_stem_lower(&name), name);
         }
     }
+    let mut images: Vec<ImageEntry> = jpegs
+        .into_iter()
+        .map(|(name, rel_child)| {
+            let raw_download_url = raw_by_stem
+                .get(&file_stem_lower(&name))
+                .map(|raw| format!("/download/{}", encode_path(&join_rel(rel, raw))));
+            ImageEntry {
+                thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
+                image_url: format!("/image/{}", encode_path(&rel_child)),
+                jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
+                raw_download_url,
+                name,
+            }
+        })
+        .collect();
 
     let mut subdirs = Vec::new();
     for (name, rel_child, path) in candidate_subdirs {
@@ -220,14 +234,29 @@ pub async fn person_photos(
     if photos.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let images: Vec<ImageEntry> = photos
-        .into_iter()
-        .map(|p| ImageEntry {
+    // People photos come from the tag DB as flat rel paths, so there's no
+    // directory walk to piggyback the raw-sibling lookup on. Scan each
+    // distinct album folder once and cache its stem->raw map.
+    let mut dir_raws: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut images: Vec<ImageEntry> = Vec::with_capacity(photos.len());
+    for p in photos {
+        let parent = parent_rel(&p.rel).to_string();
+        if !dir_raws.contains_key(&parent) {
+            let map = scan_raw_siblings(state.photos_root(), &parent).await;
+            dir_raws.insert(parent.clone(), map);
+        }
+        let raw_download_url = dir_raws
+            .get(&parent)
+            .and_then(|m| m.get(&file_stem_lower(&p.name)))
+            .map(|raw| format!("/download/{}", encode_path(&join_rel(&parent, raw))));
+        images.push(ImageEntry {
             thumb_url: format!("/thumb/{}", encode_path(&p.rel)),
             image_url: format!("/image/{}", encode_path(&p.rel)),
+            jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
+            raw_download_url,
             name: p.name,
-        })
-        .collect();
+        });
+    }
     let crumbs = vec![
         Crumb {
             label: "Home".into(),
@@ -285,7 +314,8 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
             }
         };
 
-        let mut images: Vec<ImageEntry> = Vec::new();
+        let mut jpegs: Vec<(String, String)> = Vec::new();
+        let mut raw_by_stem: HashMap<String, String> = HashMap::new();
         let mut child_dirs: Vec<(PathBuf, String)> = Vec::new();
 
         loop {
@@ -312,13 +342,27 @@ async fn walk_groups(root: &Path) -> Result<Vec<FolderGroup>, StatusCode> {
                 }
                 child_dirs.push((entry.path(), rel_child));
             } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
-                images.push(ImageEntry {
-                    thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
-                    image_url: format!("/image/{}", encode_path(&rel_child)),
-                    name,
-                });
+                jpegs.push((name, rel_child));
+            } else if ftype.is_file() && is_raw_download_name(&name) {
+                raw_by_stem.insert(file_stem_lower(&name), name);
             }
         }
+
+        let mut images: Vec<ImageEntry> = jpegs
+            .into_iter()
+            .map(|(name, rel_child)| {
+                let raw_download_url = raw_by_stem
+                    .get(&file_stem_lower(&name))
+                    .map(|raw| format!("/download/{}", encode_path(&join_rel(&rel, raw))));
+                ImageEntry {
+                    thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
+                    image_url: format!("/image/{}", encode_path(&rel_child)),
+                    jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
+                    raw_download_url,
+                    name,
+                }
+            })
+            .collect();
 
         if !images.is_empty() {
             images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -379,6 +423,39 @@ pub async fn image(
         }
     };
     image_response(bytes, &etag)
+}
+
+/// Per-photo download: GET /download/*path. Streams the file as an attachment
+/// (Content-Disposition), unlike `/image` which serves inline. Serves both the
+/// JPEG and its sibling raw/edit-master files (the URLs are minted by the
+/// gallery views), so the allowlist here is JPEG ∪ raw extensions. Hidden
+/// files stay unreachable, matching `/image`.
+pub async fn download(
+    State(state): State<AppState>,
+    AxumPath(rel): AxumPath<String>,
+) -> Response {
+    let path = match safe_resolve(state.photos_root(), &rel).await {
+        Ok(p) => p,
+        Err(e) => return map_path_err(e).into_response(),
+    };
+    let basename = match Path::new(&rel).file_name().and_then(|s| s.to_str()) {
+        Some(b) => b,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let is_jpeg_file = is_jpeg(basename);
+    if (!is_jpeg_file && !is_raw_download_name(basename)) || is_hidden(basename) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match tokio::fs::metadata(&path).await {
+        Ok(m) if m.is_file() => {}
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    }
+    let mime = if is_jpeg_file {
+        "image/jpeg"
+    } else {
+        "application/octet-stream"
+    };
+    stream_file_response(&path, mime, basename).await
 }
 
 pub async fn thumb(
@@ -456,6 +533,70 @@ fn is_jpeg(name: &str) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
         .unwrap_or(false)
+}
+
+/// Extensions offered as the "RAW" download beside a gallery photo. This is
+/// work's raw/edit-master set (camera raws + PSD/PSB) plus TIFF, which film
+/// scans and edit masters ship as alongside the JPEG here (the `positive`
+/// folders pair `*.jpg` with `*.tif`). Kept distinct from `work::is_raw_name`
+/// so the work-item zip logic is unaffected.
+fn is_raw_download_name(name: &str) -> bool {
+    work::is_raw_name(name)
+        || Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"))
+            .unwrap_or(false)
+}
+
+/// Lowercased file stem (basename without its final extension), used to pair a
+/// JPEG with a same-named raw sibling regardless of case, e.g. `Homer.JPG`
+/// matches `Homer.psd`.
+fn file_stem_lower(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// Forward-slash parent of a root-relative path, or "" for a file at the root.
+fn parent_rel(rel: &str) -> &str {
+    match rel.rfind('/') {
+        Some(i) => &rel[..i],
+        None => "",
+    }
+}
+
+/// Read `dir_rel` (relative to the photos root) and return a map from each raw
+/// file's lowercased stem to its filename, so a JPEG in that folder can find
+/// its raw sibling. Returns empty on any error (missing dir, etc).
+async fn scan_raw_siblings(root: &Path, dir_rel: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let dir = match safe_resolve(root, dir_rel).await {
+        Ok(p) => p,
+        Err(_) => return map,
+    };
+    let mut read = match tokio::fs::read_dir(&dir).await {
+        Ok(r) => r,
+        Err(_) => return map,
+    };
+    while let Ok(Some(entry)) = read.next_entry().await {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        match entry.file_type().await {
+            Ok(ft) if ft.is_file() && is_raw_download_name(&name) => {
+                map.insert(file_stem_lower(&name), name);
+            }
+            _ => {}
+        }
+    }
+    map
 }
 
 /// A file is "hidden" if its basename contains the substring "hidden"
