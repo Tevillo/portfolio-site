@@ -1,3 +1,7 @@
+use std::path::Path;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use crate::work::WorkCounts;
@@ -18,6 +22,13 @@ pub struct ImageEntry {
     /// extension, same folder), when one exists alongside the JPEG. `None`
     /// hides the RAW choice in the per-photo download menu.
     pub raw_download_url: Option<String>,
+    /// Rendered pixel dimensions of `thumb_url`, when known. Only the
+    /// natural-ratio masonry grids need this: their tiles have no CSS
+    /// `aspect-ratio`, so without `<img width height>` every image lays out
+    /// at zero height, the whole grid collapses into the viewport, and
+    /// `loading="lazy"` defers nothing. Square grids reserve their space via
+    /// `aspect-ratio: 1` in CSS and leave this `None`.
+    pub dims: Option<(u32, u32)>,
 }
 
 pub struct Crumb {
@@ -74,15 +85,218 @@ pub struct WorkFeedSection {
 
 /// One node in the Obsidian vault sidebar tree.
 pub enum NavNode {
-    Folder { name: String, children: Vec<NavNode> },
-    Note { name: String, url: String, active: bool },
+    Folder {
+        name: String,
+        children: Vec<NavNode>,
+    },
+    Note {
+        name: String,
+        url: String,
+        active: bool,
+    },
 }
 
-fn site_header() -> Markup {
+/// Which top-nav entry should render as the current section, so the header can
+/// mark it with `aria-current` and an underline. `None` for pages that hang off
+/// no nav entry (e.g. a job detail reached from Work still marks Work).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Nav {
+    Home,
+    Browse,
+    All,
+    People,
+    Work,
+    About,
+    /// Pages that belong to no nav entry — the Nether vault, which is reachable
+    /// by URL and from the About page but has no top-nav tab of its own.
+    None,
+}
+
+// ---------------------------------------------------------------------------
+// Site copy. Everything a human would want to reword lives here — the About
+// page prose, the contact links, and the name in the footer. Edit these
+// constants rather than hunting through markup.
+// ---------------------------------------------------------------------------
+
+pub const OWNER_NAME: &str = "Paul Borrego";
+pub const OWNER_EMAIL: &str = "borregopaulj@gmail.com";
+
+/// One-liner under the name on the About page and in the home page hero, and
+/// the `<meta name="description">` for both. Left empty deliberately — write
+/// your own. While it is empty both spots render nothing and the description
+/// falls back to [`DESCRIPTION_FALLBACK`].
+pub const OWNER_TAGLINE: &str = "Film photography enthusiast";
+
+/// Plain factual `<meta name="description">` used only while `OWNER_TAGLINE`
+/// is empty. Search results and link previews need *some* description; this is
+/// a placeholder, not prose.
+const DESCRIPTION_FALLBACK: &str = "Photographs by Paul Borrego.";
+
+/// About page body. Each entry is one paragraph, rendered in order. Empty
+/// means the About page shows just the name, portrait and links — add your own
+/// paragraphs here, e.g.
+///
+/// ```ignore
+/// pub const ABOUT_PARAGRAPHS: &[&str] = &[
+///     "First paragraph.",
+///     "Second paragraph.",
+/// ];
+/// ```
+pub const ABOUT_PARAGRAPHS: &[&str] = &[
+    "Self hosting enjoyer and lover of film photography. 
+    This website contains all of my photos that I have taken and scanned.",
+    "If you want to find yorself or a frind check out the \"People\" tab. 
+    Any professional work I have done is under the \"Work\" Tab.
+    And if you just want to look around \"Browse\" is a folder like system
+    sorted by year and then content and \"All\" is all of my folders that can scroll",
+];
+
+/// Links rendered as a list at the bottom of the About page. Add or remove
+/// rows freely; an empty list simply hides the section.
+pub const ABOUT_LINKS: &[(&str, &str)] = &[
+    ("Email", "mailto:borregopaulj@gmail.com"),
+    ("Notes", "/nether"),
+];
+
+/// `<meta name="description">` for the home and About pages: the owner's own
+/// tagline when they have written one, the neutral placeholder until then.
+fn site_description() -> &'static str {
+    if OWNER_TAGLINE.is_empty() {
+        DESCRIPTION_FALLBACK
+    } else {
+        OWNER_TAGLINE
+    }
+}
+
+/// Optional portrait for the About page: drop a JPEG at `<photos>/about.jpg`
+/// and it appears beside the prose. Absent, the page renders text-only.
+pub const ABOUT_PORTRAIT_REL: &str = "about.jpg";
+
+fn mtime_secs(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Newest mtime among the files in `static/`, so a CSS/JS-only deploy still
+/// mints a fresh build id even though the binary did not relink.
+fn newest_static_mtime() -> Option<u64> {
+    let dir = std::env::current_dir().ok()?.join("static");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| mtime_secs(&e.path()))
+        .max()
+}
+
+/// Identifier for the running build, in hex. Serves double duty: it is the
+/// `?v=` cache-busting stamp on every `/static/*` URL, and the value
+/// `static/version.js` compares against `GET /version` to decide whether an
+/// already-open page is running an outdated build.
+///
+/// Executable mtime rather than process start time: `reset.sh` has no
+/// `set -e`, so a failed `cargo build` still reaches `systemctl restart` and
+/// relaunches the *old* binary. A start-time version would force-reload every
+/// visitor for a deploy that never happened, and would do the same on every
+/// crash-loop restart and host reboot. Cargo only relinks when something
+/// actually changed, so exe mtime tracks real deploys.
+pub fn build_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let exe = std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(mtime_secs)
+            .unwrap_or(0);
+        let newest = exe.max(newest_static_mtime().unwrap_or(0));
+        // Never fall back to a constant. Assets are served `immutable`, so a
+        // stamp that can never change would freeze the CSS/JS in every browser
+        // with no URL left to bust — and the reload feature could not rescue
+        // it, because the asset URL would be identical. Start time at least
+        // moves on the next restart.
+        let id = if newest == 0 {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(1)
+        } else {
+            newest
+        };
+        format!("{id:x}")
+    })
+}
+
+/// A `/static/...` URL with the cache-busting stamp attached.
+fn asset(path: &str) -> String {
+    format!("{path}?v={}", build_id())
+}
+
+/// Camera-lens mark, inlined as a data URI so the favicon costs no extra
+/// request and never 404s (there is no `static/favicon.ico`).
+const FAVICON: &str = "data:image/svg+xml,\
+     %3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E\
+     %3Crect width='32' height='32' rx='7' fill='%236b8e4e'/%3E\
+     %3Ccircle cx='16' cy='16' r='7.5' fill='none' stroke='%23f6f7f1' stroke-width='2.5'/%3E\
+     %3Ccircle cx='16' cy='16' r='2.25' fill='%23f6f7f1'/%3E%3C/svg%3E";
+
+/// The one `<head>` every page shares. `scripts` lists extra `/static/*.js`
+/// files to defer-load beyond the theme handler. Previously each of the seven
+/// page functions carried its own copy of this block, so every meta/script
+/// change had to be made seven times.
+fn head_block(title: &str, description: &str, scripts: &[&str]) -> Markup {
+    head_block_with_preload(title, description, scripts, None)
+}
+
+/// `preload_image` starts the fetch of the page's Largest Contentful Paint
+/// image during HTML parse, rather than waiting for the parser to reach the
+/// `<img>` in the body.
+fn head_block_with_preload(
+    title: &str,
+    description: &str,
+    scripts: &[&str],
+    preload_image: Option<&str>,
+) -> Markup {
+    html! {
+        head {
+            meta charset="utf-8";
+            meta name="viewport" content="width=device-width, initial-scale=1";
+            title { (title) }
+            meta name="description" content=(description);
+            @if let Some(href) = preload_image {
+                link rel="preload" as="image" href=(href) fetchpriority="high";
+            }
+            // Matches --surface in each theme so mobile browser chrome blends
+            // with the site header instead of flashing white/black.
+            meta name="theme-color" content="#f6f7f1" media="(prefers-color-scheme: light)";
+            meta name="theme-color" content="#181a17" media="(prefers-color-scheme: dark)";
+            meta property="og:title" content=(title);
+            meta property="og:description" content=(description);
+            meta property="og:type" content="website";
+            link rel="icon" href=(FAVICON);
+            // The build this page was rendered by. `version.js` compares it
+            // against `GET /version` on tab refocus and reloads the page when
+            // a newer build is live, so a tab left open across a deploy does
+            // not keep showing stale markup.
+            meta name="build-version" content=(build_id());
+            (theme_head())
+            link rel="stylesheet" href=(asset("/static/style.css"));
+            script src=(asset("/static/version.js")) defer {}
+            @for src in scripts {
+                script src=(asset(src)) defer {}
+            }
+        }
+    }
+}
+
+fn site_header(active: Nav) -> Markup {
     html! {
         header.site {
             div.site-left {
-                a.brand href="/" { "Portfolio" }
+                a.brand href="/" aria-current=[(active == Nav::Home).then_some("page")] { "Portfolio" }
                 button.theme-toggle type="button" aria-label="Toggle dark mode" {
                     svg.theme-icon.theme-icon-sun viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
                         circle cx="12" cy="12" r="4" fill="currentColor" {}
@@ -103,10 +317,23 @@ fn site_header() -> Markup {
                 }
             }
             nav.topnav {
-                a href="/browse" { "Browse" }
-                a href="/all" { "All" }
-                a href="/people" { "People" }
-                a href="/work" { "Work" }
+                a href="/browse" aria-current=[(active == Nav::Browse).then_some("page")] { "Browse" }
+                a href="/all" aria-current=[(active == Nav::All).then_some("page")] { "All" }
+                a href="/people" aria-current=[(active == Nav::People).then_some("page")] { "People" }
+                a href="/work" aria-current=[(active == Nav::Work).then_some("page")] { "Work" }
+                a href="/about" aria-current=[(active == Nav::About).then_some("page")] { "About" }
+            }
+        }
+    }
+}
+
+fn site_footer() -> Markup {
+    html! {
+        footer.site-footer {
+            span.footer-name { (OWNER_NAME) }
+            nav.footer-links {
+                a href="/about" { "About" }
+                a href=(format!("mailto:{OWNER_EMAIL}")) { "Email" }
             }
         }
     }
@@ -125,7 +352,7 @@ fn theme_head() -> Markup {
                  document.documentElement.dataset.theme=t;})();"
             ))
         }
-        script src="/static/theme.js" defer {}
+        script src=(asset("/static/theme.js")) defer {}
     }
 }
 
@@ -143,13 +370,23 @@ fn crumbs_nav(crumbs: &[Crumb]) -> Markup {
     }
 }
 
+/// How many leading tiles load eagerly at high priority. These are the ones
+/// above the fold on essentially every viewport, so deferring them only delays
+/// the Largest Contentful Paint; everything after is lazy.
+///
+/// This budget is for the *page*, not for each grid — a page with several
+/// folder sections must only spend it on the first, since every later section
+/// starts well below the fold.
+const EAGER_TILES: usize = 2;
+
 /// `masonry` adds the `work-grid` class so the grid renders as a natural-ratio
 /// CSS-columns masonry (used by the work and portfolio pages) instead of the
-/// default square-cropped grid.
-fn image_grid(images: &[ImageEntry], masonry: bool) -> Markup {
+/// default square-cropped grid. `eager` is how many leading tiles skip lazy
+/// loading; pass 0 for any grid that is not the first on the page.
+fn image_grid(images: &[ImageEntry], masonry: bool, eager: usize) -> Markup {
     html! {
         ul.grid.work-grid[masonry] {
-            @for img in images {
+            @for (i, img) in images.iter().enumerate() {
                 li.tile {
                     // Per-photo download URLs ride on the anchor as data-* so
                     // the lightbox can surface JPG / RAW choices to the side of
@@ -159,7 +396,7 @@ fn image_grid(images: &[ImageEntry], masonry: bool) -> Markup {
                       data-name=(img.name)
                       data-jpg=(img.jpg_download_url)
                       data-raw=[img.raw_download_url.as_deref()] {
-                        img src=(img.thumb_url) alt=(img.name) loading="lazy";
+                        (grid_img(img, i < eager))
                     }
                 }
             }
@@ -167,24 +404,65 @@ fn image_grid(images: &[ImageEntry], masonry: bool) -> Markup {
     }
 }
 
+/// One tile's `<img>`. Intrinsic `width`/`height` are emitted whenever known so
+/// the browser reserves the tile's real height before the bytes arrive — that
+/// is what makes `loading="lazy"` able to skip off-screen photos at all, and it
+/// removes the layout shift as each image lands.
+fn grid_img(img: &ImageEntry, eager: bool) -> Markup {
+    html! {
+        @match img.dims {
+            Some((w, h)) => img
+                src=(img.thumb_url) alt=(img.name)
+                width=(w) height=(h)
+                decoding="async"
+                loading=(if eager { "eager" } else { "lazy" })
+                fetchpriority=[eager.then_some("high")];,
+            None => img
+                src=(img.thumb_url) alt=(img.name)
+                decoding="async"
+                loading=(if eager { "eager" } else { "lazy" })
+                fetchpriority=[eager.then_some("high")];,
+        }
+    }
+}
+
 /// Shared flat gallery page used by the per-folder browse views and per-person
-/// photo lists: a folder list plus a single square-cropped photo grid.
-pub fn page(title: &str, crumbs: &[Crumb], subdirs: &[DirEntry], images: &[ImageEntry]) -> Markup {
+/// photo lists: a folder list plus a single square-cropped photo grid. When
+/// `show_favs` is set, a "Favorites only" toggle is shown that filters the grid
+/// down to photos living inside a `favs` folder (used by the per-person view).
+pub fn page(
+    title: &str,
+    crumbs: &[Crumb],
+    subdirs: &[DirEntry],
+    images: &[ImageEntry],
+    show_favs: bool,
+    active: Nav,
+) -> Markup {
+    let scripts: &[&str] = if show_favs {
+        &["/static/lightbox.js", "/static/favs.js"]
+    } else {
+        &["/static/lightbox.js"]
+    };
     html! {
         (DOCTYPE)
         html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) " - Portfolio" }
-                (theme_head())
-                link rel="stylesheet" href="/static/style.css";
-                script src="/static/lightbox.js" defer {}
-            }
+            (head_block(
+                &format!("{title} - Portfolio"),
+                &format!("Photographs in {title}, by {OWNER_NAME}."),
+                scripts,
+            ))
             body {
-                (site_header())
+                (site_header(active))
                 main {
                     (crumbs_nav(crumbs))
+                    @if show_favs && !images.is_empty() {
+                        section.all-controls {
+                            button.favs-toggle type="button" aria-pressed="false" {
+                                span.favs-toggle-track { span.favs-toggle-thumb {} }
+                                span.favs-toggle-label { "Favorites only" }
+                            }
+                        }
+                    }
                     @if !subdirs.is_empty() {
                         section.dirs {
                             h2 { "Folders" }
@@ -198,13 +476,14 @@ pub fn page(title: &str, crumbs: &[Crumb], subdirs: &[DirEntry], images: &[Image
                     @if !images.is_empty() {
                         section.gallery {
                             @if !subdirs.is_empty() { h2 { "Photos" } }
-                            (image_grid(images, false))
+                            (image_grid(images, false, EAGER_TILES))
                         }
                     }
                     @if subdirs.is_empty() && images.is_empty() {
                         p.empty { "Nothing here yet." }
                     }
                 }
+                (site_footer())
             }
         }
     }
@@ -214,15 +493,13 @@ pub fn people_index_page(title: &str, crumbs: &[Crumb], people: &[PersonEntry]) 
     html! {
         (DOCTYPE)
         html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) " - Portfolio" }
-                (theme_head())
-                link rel="stylesheet" href="/static/style.css";
-            }
+            (head_block(
+                &format!("{title} - Portfolio"),
+                "Photographs indexed by the people in them.",
+                &[],
+            ))
             body {
-                (site_header())
+                (site_header(Nav::People))
                 main {
                     (crumbs_nav(crumbs))
                     @if people.is_empty() {
@@ -242,6 +519,7 @@ pub fn people_index_page(title: &str, crumbs: &[Crumb], people: &[PersonEntry]) 
                         }
                     }
                 }
+                (site_footer())
             }
         }
     }
@@ -295,15 +573,13 @@ pub fn nether_page(title: &str, crumbs: &[Crumb], nav: &[NavNode], content: Mark
     html! {
         (DOCTYPE)
         html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) " - Nether" }
-                (theme_head())
-                link rel="stylesheet" href="/static/style.css";
-            }
+            (head_block(
+                &format!("{title} - Nether"),
+                &format!("{title} — a note from {OWNER_NAME}'s vault."),
+                &[],
+            ))
             body {
-                (site_header())
+                (site_header(Nav::None))
                 main.nether {
                     div.nether-layout {
                         (nether_sidebar(nav, NetherView::Notes))
@@ -324,15 +600,9 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
     html! {
         (DOCTYPE)
         html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "Graph - Nether" }
-                (theme_head())
-                link rel="stylesheet" href="/static/style.css";
-            }
+            (head_block("Graph - Nether", "Link graph of the note vault.", &[]))
             body {
-                (site_header())
+                (site_header(Nav::None))
                 main.nether {
                     div.nether-layout {
                         (nether_sidebar(nav, NetherView::Graph))
@@ -346,7 +616,7 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
                     }
                 }
                 script #graph-data type="application/json" { (PreEscaped(graph_json)) }
-                script src="/static/graph.js" defer {}
+                script src=(asset("/static/graph.js")) defer {}
             }
         }
     }
@@ -361,24 +631,50 @@ pub fn grouped_gallery_page(
     groups: &[FolderGroup],
     natural_ratio: bool,
     show_favs: bool,
+    active: Nav,
 ) -> Markup {
+    let scripts: &[&str] = if show_favs {
+        &[
+            "/static/lightbox.js",
+            "/static/collapse.js",
+            "/static/favs.js",
+        ]
+    } else {
+        &["/static/lightbox.js", "/static/collapse.js"]
+    };
+    let is_home = active == Nav::Home;
+    // The home page's first tile is the LCP element on every viewport. Telling
+    // the browser about it in <head> starts the fetch during HTML parse instead
+    // of waiting for the image to be discovered in the body.
+    let lcp = is_home
+        .then(|| groups.first()?.images.first())
+        .flatten()
+        .map(|img| img.thumb_url.as_str());
     html! {
         (DOCTYPE)
         html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) " - Portfolio" }
-                (theme_head())
-                link rel="stylesheet" href="/static/style.css";
-                script src="/static/lightbox.js" defer {}
-                script src="/static/collapse.js" defer {}
-                @if show_favs { script src="/static/favs.js" defer {} }
-            }
+            (head_block_with_preload(
+                &format!("{title} - Portfolio"),
+                if is_home { site_description() } else { "Every photograph in the library, grouped by folder." },
+                scripts,
+                lcp,
+            ))
             body {
-                (site_header())
+                (site_header(active))
                 main.portfolio[natural_ratio] {
-                    (crumbs_nav(crumbs))
+                    // The home page's own breadcrumb only ever read "Portfolio",
+                    // duplicating the brand; a name and a line of context earn
+                    // that space better.
+                    @if is_home {
+                        section.hero {
+                            h1.hero-name { (OWNER_NAME) }
+                            @if !OWNER_TAGLINE.is_empty() {
+                                p.hero-tagline { (OWNER_TAGLINE) }
+                            }
+                        }
+                    } @else {
+                        (crumbs_nav(crumbs))
+                    }
                     @if groups.is_empty() {
                         p.empty { "Nothing here yet." }
                     } @else {
@@ -390,7 +686,7 @@ pub fn grouped_gallery_page(
                                 }
                             }
                         }
-                        @for g in groups {
+                        @for (gi, g) in groups.iter().enumerate() {
                             // When natural_ratio (Portfolio), adopt the work page's
                             // section chrome: `.work-gallery` header with a bold
                             // `.section-label` + dimmed `.section-count`, and the
@@ -407,11 +703,14 @@ pub fn grouped_gallery_page(
                                         span.section-count { "(" (g.images.len()) ")" }
                                     }
                                 }
-                                (image_grid(&g.images, natural_ratio))
+                                // Only the first section is above the fold, so it
+                                // is the only one that gets the eager budget.
+                                (image_grid(&g.images, natural_ratio, if gi == 0 { EAGER_TILES } else { 0 }))
                             }
                         }
                     }
                 }
+                (site_footer())
             }
         }
     }
@@ -421,15 +720,13 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
     html! {
         (DOCTYPE)
         html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) " - Portfolio" }
-                (theme_head())
-                link rel="stylesheet" href="/static/style.css";
-            }
+            (head_block(
+                &format!("{title} - Portfolio"),
+                "Client galleries and photo deliveries.",
+                &[],
+            ))
             body {
-                (site_header())
+                (site_header(Nav::Work))
                 main {
                     (crumbs_nav(crumbs))
                     @if items.is_empty() {
@@ -452,6 +749,7 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
                         }
                     }
                 }
+                (site_footer())
             }
         }
     }
@@ -463,8 +761,8 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
 fn work_preview_img(p: &WorkFeedPhoto) -> Markup {
     html! {
         @match p.preview_dims {
-            Some((w, h)) => img src=(p.preview_url) alt=(p.name) loading="lazy" width=(w) height=(h);,
-            None => img src=(p.preview_url) alt=(p.name) loading="lazy";,
+            Some((w, h)) => img src=(p.preview_url) alt=(p.name) loading="lazy" decoding="async" width=(w) height=(h);,
+            None => img src=(p.preview_url) alt=(p.name) loading="lazy" decoding="async";,
         }
     }
 }
@@ -519,17 +817,13 @@ pub fn work_page(
     html! {
         (DOCTYPE)
         html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (name) " - Work" }
-                (theme_head())
-                link rel="stylesheet" href="/static/style.css";
-                script src="/static/lightbox.js" defer {}
-                script src="/static/collapse.js" defer {}
-            }
+            (head_block(
+                &format!("{name} - Work"),
+                &format!("Photo delivery for {name}."),
+                &["/static/lightbox.js", "/static/collapse.js"],
+            ))
             body {
-                (site_header())
+                (site_header(Nav::Work))
                 main.work {
                     (crumbs_nav(crumbs))
                     h1.work-title { (name) }
@@ -610,6 +904,57 @@ pub fn work_page(
                         }
                     }
                 }
+                (site_footer())
+            }
+        }
+    }
+}
+
+/// About page: the prose from `ABOUT_PARAGRAPHS` in a single readable column,
+/// with an optional portrait alongside. `portrait` is the preview URL for
+/// `ABOUT_PORTRAIT_REL` plus its rendered dimensions, or `None` when that file
+/// does not exist under the photos root.
+pub fn about_page(portrait: Option<(&str, (u32, u32))>) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block(
+                &format!("About - {OWNER_NAME}"),
+                site_description(),
+                &[],
+            ))
+            body {
+                (site_header(Nav::About))
+                main.about {
+                    div.about-layout {
+                        @if let Some((src, (w, h))) = portrait {
+                            img.about-portrait
+                                src=(src)
+                                alt=(format!("Portrait of {OWNER_NAME}"))
+                                width=(w) height=(h)
+                                decoding="async"
+                                fetchpriority="high";
+                        }
+                        div.about-body {
+                            h1.about-name { (OWNER_NAME) }
+                            @if !OWNER_TAGLINE.is_empty() {
+                                p.about-tagline { (OWNER_TAGLINE) }
+                            }
+                            @for para in ABOUT_PARAGRAPHS {
+                                p { (para) }
+                            }
+                            @if !ABOUT_LINKS.is_empty() {
+                                h2.about-links-heading { "Elsewhere" }
+                                ul.about-links {
+                                    @for (label, href) in ABOUT_LINKS {
+                                        li { a href=(href) { (label) } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                (site_footer())
             }
         }
     }

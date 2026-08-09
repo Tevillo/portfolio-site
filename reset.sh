@@ -1,3 +1,9 @@
+#!/bin/sh
+# Abort on the first failure. Without this a failed `cargo build` still fell
+# through to `systemctl restart`, relaunching the *old* binary as if the deploy
+# had succeeded.
+set -eu
+
 git pull
 cargo build --release
 # Pre-generate grid + preview renditions so the first visitor after a deploy

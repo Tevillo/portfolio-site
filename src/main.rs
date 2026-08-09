@@ -16,8 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -106,8 +110,36 @@ async fn serve() -> Result<()> {
 
     let state = AppState::new(photos_root, cache_root, db_path, nether_root);
 
-    let app = Router::new()
+    let app = build_router(state, static_dir)
+        // HTML/CSS/JS go out compressed; the default predicate already skips
+        // image/* so JPEG responses aren't recompressed for nothing.
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http());
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    info!("listening on http://{addr}");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// The route table, split by cache policy.
+///
+/// `pages` are the HTML views: they must never be reused without checking with
+/// the server, so a deploy is visible on the next navigation.
+///
+/// `assets` set their own `Cache-Control` (images `max-age=3600` + ETag, static
+/// files `immutable`) and must be left alone. The header layer is deliberately
+/// *not* applied router-wide: `/image`, `/thumb` and `/preview` answer
+/// `If-None-Match` with a 304, and per RFC 9111 §4.3.4 a cache updates its
+/// stored entry's headers from that 304. Stamping `no-cache` onto those bare
+/// 304s would rewrite the cached image's `max-age=3600`, turning every one of
+/// the ~1400 thumbnails on `/all` into a revalidation on every page load.
+fn build_router(state: AppState, static_dir: PathBuf) -> Router {
+    let pages = Router::new()
         .route("/", get(handlers::index))
+        .route("/about", get(handlers::about))
+        .route("/about/", get(handlers::about))
         .route("/browse", get(handlers::browse_root))
         .route("/browse/", get(handlers::browse_root))
         .route("/browse/*path", get(handlers::browse))
@@ -119,6 +151,22 @@ async fn serve() -> Result<()> {
         .route("/work/", get(handlers::work_index))
         .route("/work/:name", get(handlers::work_detail))
         .route("/work/:name/auth", post(handlers::work_auth))
+        .route("/nether", get(nether::root))
+        .route("/nether/", get(nether::root))
+        .route("/nether/graph", get(nether::graph))
+        .route("/nether/*path", get(nether::note))
+        // `private` because /work/:name renders differently pre- vs post-auth
+        // off a path-scoped cookie; a shared cache must not reuse the unlocked
+        // variant for another visitor. `no-cache` rather than `no-store` so
+        // back/forward navigation still restores instantly from bfcache —
+        // `no-store` would disable it.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, private"),
+        ));
+
+    let assets = Router::new()
+        .route("/version", get(handlers::version))
         .route("/work/:name/download", post(handlers::work_download))
         .route(
             "/work/:name/file/*filename",
@@ -128,19 +176,21 @@ async fn serve() -> Result<()> {
         .route("/download/*path", get(handlers::download))
         .route("/thumb/*path", get(handlers::thumb))
         .route("/preview/*path", get(handlers::preview))
-        .route("/nether", get(nether::root))
-        .route("/nether/", get(nether::root))
-        .route("/nether/graph", get(nether::graph))
-        .route("/nether/*path", get(nether::note))
-        .nest_service("/static", ServeDir::new(static_dir))
-        .with_state(state)
-        .layer(TraceLayer::new_for_http());
+        .nest_service(
+            "/static",
+            // Asset URLs carry a `?v=<build id>` stamp (see views::asset), so a
+            // given URL's bytes never change and the response can be cached
+            // hard instead of revalidated on every page load. A deploy mints a
+            // new stamp, so returning visitors pick up new CSS/JS immediately.
+            ServiceBuilder::new()
+                .layer(SetResponseHeaderLayer::overriding(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
+                ))
+                .service(ServeDir::new(static_dir)),
+        );
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    info!("listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    pages.merge(assets).with_state(state)
 }
 
 /// `portfolio-site warm [--prune]`
@@ -460,5 +510,159 @@ fn human_bytes(n: u64) -> String {
         format!("{} B", n)
     } else {
         format!("{:.1} {}", v, UNITS[i])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Cache-policy tests.
+    //!
+    //! The split in `build_router` is exactly the kind of thing that regresses
+    //! silently: moving the `Cache-Control` layer up one level still compiles,
+    //! still serves every page correctly, and quietly destroys image caching
+    //! for every visitor. These assertions pin the four cases that matter.
+
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    /// Minimal photos/cache/static tree with one real JPEG in it.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        router: Router,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let photos = root.join("photos");
+        let cache = root.join("cache");
+        let static_dir = root.join("static");
+        std::fs::create_dir_all(photos.join("portfolio")).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&static_dir).unwrap();
+        std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
+
+        // A real JPEG, so the thumbnail pipeline actually runs.
+        image::RgbImage::from_pixel(16, 16, image::Rgb([120, 140, 100]))
+            .save(photos.join("portfolio/test.jpg"))
+            .expect("write test jpeg");
+
+        let state = AppState::new(photos, cache, None, root.join("nether"));
+        Fixture {
+            router: build_router(state, static_dir),
+            _dir: dir,
+        }
+    }
+
+    async fn get(router: &Router, uri: &str) -> axum::response::Response {
+        router
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn cache_control(resp: &axum::response::Response) -> String {
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn html_pages_are_revalidated() {
+        let f = fixture();
+        for uri in ["/", "/about", "/browse", "/all", "/work"] {
+            let cc = cache_control(&get(&f.router, uri).await);
+            assert!(cc.contains("no-cache"), "{uri} cache-control was {cc:?}");
+            assert!(cc.contains("private"), "{uri} cache-control was {cc:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn static_assets_stay_immutable() {
+        let f = fixture();
+        let cc = cache_control(&get(&f.router, "/static/style.css").await);
+        assert!(cc.contains("immutable"), "was {cc:?}");
+        // The page layer must not reach the static service.
+        assert!(!cc.contains("no-cache"), "was {cc:?}");
+    }
+
+    #[tokio::test]
+    async fn thumb_200_is_cacheable() {
+        let f = fixture();
+        let resp = get(&f.router, "/thumb/portfolio/test.jpg").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(cache_control(&resp).contains("max-age=3600"));
+        assert!(resp.headers().contains_key(header::ETAG));
+    }
+
+    /// The regression this whole split exists to prevent. A cache updates its
+    /// stored entry's headers from a 304 (RFC 9111 §4.3.4), so a `no-cache`
+    /// leaking onto this response would rewrite the cached image's `max-age`
+    /// and force every thumbnail to revalidate on every page load.
+    #[tokio::test]
+    async fn thumb_304_preserves_cache_control() {
+        let f = fixture();
+        let first = get(&f.router, "/thumb/portfolio/test.jpg").await;
+        let etag = first.headers()[header::ETAG].clone();
+
+        let resp = f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/thumb/portfolio/test.jpg")
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        let cc = cache_control(&resp);
+        assert!(cc.contains("max-age=3600"), "304 cache-control was {cc:?}");
+        assert!(!cc.contains("no-cache"), "304 cache-control was {cc:?}");
+        assert_eq!(resp.headers().get(header::ETAG), Some(&etag));
+    }
+
+    #[tokio::test]
+    async fn version_is_never_cached() {
+        let f = fixture();
+        let resp = get(&f.router, "/version").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(cache_control(&resp).contains("no-store"));
+
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        let id = String::from_utf8(body.to_vec()).unwrap();
+        // version.js only accepts lowercase hex; anything else is treated as a
+        // proxy error page and ignored.
+        assert!(
+            !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "build id {id:?} would not match version.js's regex"
+        );
+    }
+
+    /// The page's own meta tag and the endpoint must agree, or every client
+    /// would reload on first focus.
+    #[tokio::test]
+    async fn page_meta_matches_version_endpoint() {
+        let f = fixture();
+        let resp = get(&f.router, "/version").await;
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        let id = String::from_utf8(body.to_vec()).unwrap();
+
+        let page = get(&f.router, "/").await;
+        let html = axum::body::to_bytes(page.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&html);
+        assert!(
+            html.contains(&format!(r#"<meta name="build-version" content="{id}">"#)),
+            "page meta did not carry build id {id:?}"
+        );
     }
 }

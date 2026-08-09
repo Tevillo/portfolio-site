@@ -52,7 +52,39 @@ pub async fn index(State(state): State<AppState>) -> Response {
         };
     }
     let crumbs = breadcrumbs(FRONT_PAGE_DIR, PageKind::Index);
-    views::grouped_gallery_page("Portfolio", &crumbs, &groups, true, false).into_response()
+    views::grouped_gallery_page("Portfolio", &crumbs, &groups, true, false, views::Nav::Home).into_response()
+}
+
+/// About page. The prose is a compile-time constant in `views`; the only
+/// dynamic part is the optional portrait at `<photos>/about.jpg`, which is
+/// served through the normal preview rendition pipeline so it gets the same
+/// downscaling, EXIF orientation and caching as any other photo.
+pub async fn about(State(state): State<AppState>) -> Response {
+    let rel = views::ABOUT_PORTRAIT_REL;
+    let portrait = match safe_resolve(state.photos_root(), rel).await {
+        Ok(path) if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) => {
+            let url = format!("/preview/{}", encode_path(rel));
+            let dims = tokio::task::spawn_blocking(move || thumbs::preview_dimensions(&path).ok())
+                .await
+                .unwrap_or(None);
+            dims.map(|d| (url, d))
+        }
+        _ => None,
+    };
+    views::about_page(portrait.as_ref().map(|(url, d)| (url.as_str(), *d))).into_response()
+}
+
+/// Current build identifier, polled by `static/version.js` when a tab regains
+/// focus. `no-store` so neither the browser nor any intermediary can answer
+/// from cache — a stale answer here would either mask a deploy or, worse,
+/// disagree with the page's own meta tag forever and drive a reload loop.
+pub async fn version() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(views::build_id()))
+        .unwrap()
 }
 
 pub async fn browse_root(State(state): State<AppState>) -> Response {
@@ -86,6 +118,9 @@ async fn render_dir(
     let mut candidate_subdirs: Vec<(String, String, PathBuf)> = Vec::new();
     let mut jpegs: Vec<(String, String)> = Vec::new();
     let mut raw_by_stem: HashMap<String, String> = HashMap::new();
+    // A "favs" subfolder is not listed as a browsable folder; its photos are
+    // inlined ahead of this folder's own so favorites lead the grid.
+    let mut favs_rel: Option<String> = None;
     while let Some(entry) = read.next_entry().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
         let name = match entry.file_name().into_string() {
             Ok(n) => n,
@@ -101,6 +136,10 @@ async fn render_dir(
         let rel_child = join_rel(rel, &name);
         if ftype.is_dir() {
             if is_skipped_dir(&name) || is_work_root(rel, &name) {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("favs") {
+                favs_rel = Some(rel_child);
                 continue;
             }
             candidate_subdirs.push((name, rel_child, entry.path()));
@@ -121,6 +160,7 @@ async fn render_dir(
                 image_url: format!("/image/{}", encode_path(&rel_child)),
                 jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                 raw_download_url,
+                dims: None,
                 name,
             }
         })
@@ -139,6 +179,16 @@ async fn render_dir(
     subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
+    // Prepend any "favs" subfolder's photos so favorites lead this folder's grid.
+    if let Some(favs_rel) = favs_rel {
+        let mut fav_images = read_dir_images(state.photos_root(), &favs_rel).await;
+        fav_images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        if !fav_images.is_empty() {
+            fav_images.append(&mut images);
+            images = fav_images;
+        }
+    }
+
     if images.is_empty() && subdirs.len() == 1 {
         let target = subdirs.into_iter().next().unwrap().url;
         return Ok(Redirect::to(&target).into_response());
@@ -155,7 +205,57 @@ async fn render_dir(
             .unwrap_or("")
             .to_string(),
     };
-    Ok(views::page(&title, &crumbs, &subdirs, &images).into_response())
+    Ok(views::page(&title, &crumbs, &subdirs, &images, false, views::Nav::Browse).into_response())
+}
+
+/// Read the JPEGs directly inside `root`/`rel` (non-recursive) as gallery
+/// entries, pairing each with its sibling raw download when present. Used to
+/// inline a `favs` subfolder's photos into its parent's browse view.
+async fn read_dir_images(root: &Path, rel: &str) -> Vec<ImageEntry> {
+    let dir = match safe_resolve(root, rel).await {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut read = match tokio::fs::read_dir(&dir).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut jpegs: Vec<(String, String)> = Vec::new();
+    let mut raw_by_stem: HashMap<String, String> = HashMap::new();
+    while let Ok(Some(entry)) = read.next_entry().await {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        let ftype = match entry.file_type().await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+            jpegs.push((name.clone(), join_rel(rel, &name)));
+        } else if ftype.is_file() && is_raw_download_name(&name) {
+            raw_by_stem.insert(file_stem_lower(&name), name);
+        }
+    }
+    jpegs
+        .into_iter()
+        .map(|(name, rel_child)| {
+            let raw_download_url = raw_by_stem
+                .get(&file_stem_lower(&name))
+                .map(|raw| format!("/download/{}", encode_path(&join_rel(rel, raw))));
+            ImageEntry {
+                thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
+                image_url: format!("/image/{}", encode_path(&rel_child)),
+                jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
+                raw_download_url,
+                dims: None,
+                name,
+            }
+        })
+        .collect()
 }
 
 async fn subtree_has_jpeg(root: &Path) -> bool {
@@ -273,6 +373,7 @@ pub async fn person_photos(
             image_url: format!("/image/{}", encode_path(&p.rel)),
             jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
             raw_download_url,
+            dims: None,
             name: p.name,
         });
     }
@@ -290,7 +391,7 @@ pub async fn person_photos(
             url: None,
         },
     ];
-    views::page(&name, &crumbs, &[], &images).into_response()
+    views::page(&name, &crumbs, &[], &images, true, views::Nav::People).into_response()
 }
 
 fn people_unavailable_response() -> Response {
@@ -314,7 +415,7 @@ pub async fn all_photos(State(state): State<AppState>) -> Response {
                     url: None,
                 },
             ];
-            views::grouped_gallery_page("All", &crumbs, &groups, false, true).into_response()
+            views::grouped_gallery_page("All", &crumbs, &groups, false, true, views::Nav::All).into_response()
         }
         Err(status) => status.into_response(),
     }
@@ -339,6 +440,10 @@ async fn walk_groups(
     };
     let mut stack: Vec<(PathBuf, String)> = vec![(start_abs, start_rel.to_string())];
     let mut groups: Vec<FolderGroup> = Vec::new();
+    // Absolute source path of every image pushed into `groups`, kept in the
+    // same flattened order so `fill_preview_dims` can zip the two together
+    // without having to reverse the URL encoding.
+    let mut sources: Vec<PathBuf> = Vec::new();
 
     while let Some((abs, rel)) = stack.pop() {
         let mut read = match tokio::fs::read_dir(&abs).await {
@@ -394,6 +499,7 @@ async fn walk_groups(
                     image_url: format!("/image/{}", encode_path(&rel_child)),
                     jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                     raw_download_url,
+                    dims: None,
                     name,
                 }
             })
@@ -406,6 +512,7 @@ async fn walk_groups(
             } else {
                 (rel.clone(), format!("/browse/{}", encode_path(&rel)))
             };
+            sources.extend(images.iter().map(|img| abs.join(&img.name)));
             groups.push(FolderGroup {
                 label,
                 path: rel.clone(),
@@ -423,7 +530,49 @@ async fn walk_groups(
         }
     }
 
+    // The preview rendition feeds the natural-ratio masonry, whose tiles carry
+    // no CSS aspect-ratio. Without intrinsic dimensions every <img> lays out at
+    // zero height, so the browser thinks the entire grid is in the viewport and
+    // `loading="lazy"` fetches all of it up front. Fill them in one blocking
+    // batch: `preview_dimensions` only reads JPEG/EXIF headers, no decode.
+    if thumb_route == "preview" {
+        fill_preview_dims(&sources, &mut groups).await;
+    }
+
     Ok(groups)
+}
+
+/// Populate `ImageEntry::dims` for every image in `groups`, off the async
+/// runtime since the underlying reads are synchronous file I/O. `sources` is
+/// the absolute path of each image, in the same order the images appear when
+/// `groups` is flattened. Photos whose headers can't be read keep `None` and
+/// simply render without the attributes.
+async fn fill_preview_dims(sources: &[PathBuf], groups: &mut [FolderGroup]) {
+    if sources.is_empty() {
+        return;
+    }
+    let sources = sources.to_vec();
+    let dims = match tokio::task::spawn_blocking(move || {
+        sources
+            .into_iter()
+            .map(|p| thumbs::preview_dimensions(&p).ok())
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, "preview dimension batch panicked");
+            return;
+        }
+    };
+    for (img, dim) in groups
+        .iter_mut()
+        .flat_map(|g| g.images.iter_mut())
+        .zip(dims)
+    {
+        img.dims = dim;
+    }
 }
 
 pub async fn image(
@@ -448,7 +597,7 @@ pub async fn image(
     };
     let etag = build_etag(mtime, meta.len());
     if matches_etag(&headers, &etag) {
-        return StatusCode::NOT_MODIFIED.into_response();
+        return not_modified(&etag);
     }
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => b,
@@ -533,7 +682,7 @@ async fn render_thumb_response(
         };
     let etag = build_etag(info.mtime, info.size);
     if matches_etag(headers, &etag) {
-        return StatusCode::NOT_MODIFIED.into_response();
+        return not_modified(&etag);
     }
     let bytes = match tokio::fs::read(&info.path).await {
         Ok(b) => b,
@@ -543,6 +692,21 @@ async fn render_thumb_response(
         }
     };
     image_response(bytes, &etag)
+}
+
+/// A 304 that echoes the validator and freshness of the 200 it stands in for.
+/// A bare `StatusCode::NOT_MODIFIED.into_response()` carries no headers at
+/// all, and per RFC 9111 §4.3.4 a cache *updates its stored entry's headers*
+/// from the 304 — so a middleware that stamps `Cache-Control` onto a bare 304
+/// silently rewrites the cached image's `max-age`. Sending the real values
+/// here makes that whole class of bug impossible.
+fn not_modified(etag: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .header(header::ETAG, etag)
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn image_response(bytes: Vec<u8>, etag: &str) -> Response {
@@ -898,7 +1062,13 @@ async fn render_work_page(
         &auth_action,
         error,
     );
-    (status, body).into_response()
+    // This page renders materially different markup pre- vs post-auth, keyed
+    // off the path-scoped auth cookie. Without `Vary: Cookie` a shared cache
+    // could store the unlocked variant and hand it to a different visitor.
+    let mut resp = (status, body).into_response();
+    resp.headers_mut()
+        .insert(header::VARY, header::HeaderValue::from_static("Cookie"));
+    resp
 }
 
 /// Verify the submitted password and issue a path-scoped cookie. On success

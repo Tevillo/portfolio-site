@@ -132,6 +132,40 @@ header.site .topnav a:hover {
   text-decoration: none;
 }
 
+/* Current section: a quiet underline rather than a colour change, so the
+   marker reads as position rather than as a hover state. */
+header.site .topnav a[aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Keyboard focus rings. Previously nothing here was focus-visible, so
+   tabbing through the nav or a gallery gave no indication of position. */
+a:focus-visible,
+button:focus-visible,
+li.tile a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respect the OS "reduce motion" setting: keep the state changes, drop the
+   animation. Tile lift is removed outright since its point is the movement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  li.tile a:hover {
+    transform: none;
+  }
+}
+
 main {
   margin: 2rem 0;
   padding: 0 1.5rem;
@@ -212,6 +246,10 @@ section.gallery.hidden-by-ancestor {
 }
 
 section.gallery.favs-hidden {
+  display: none;
+}
+
+li.tile.favs-hidden {
   display: none;
 }
 
@@ -1088,4 +1126,165 @@ main.portfolio ul.work-grid li.tile img {
 
 .lb-dl-option[hidden] {
   display: none;
+}
+
+/* ---- Home hero ---- */
+/* Replaces the home page's old breadcrumb, which only ever read "Portfolio"
+   and duplicated the brand in the header. */
+.hero {
+  margin-bottom: 2.25rem;
+}
+
+.hero-name {
+  margin: 0;
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.hero-tagline {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 1rem;
+  max-width: 46ch;
+}
+
+/* ---- About ---- */
+main.about {
+  max-width: 900px;
+  margin: 2.5rem auto;
+}
+
+.about-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 2.5rem;
+}
+
+.about-portrait {
+  flex: 0 0 260px;
+  width: 260px;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  /* The element is 260px wide at 1x; hint the decoder so it doesn't hand
+     back a needlessly large bitmap on standard-density screens. */
+  object-fit: cover;
+}
+
+.about-body {
+  flex: 1 1 0;
+  min-width: 0;
+  /* A measure this side of ~70 characters is what keeps long prose readable. */
+  max-width: 62ch;
+}
+
+.about-name {
+  margin: 0;
+  font-size: clamp(1.6rem, 4vw, 2.1rem);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+  color: var(--text);
+}
+
+.about-tagline {
+  margin: 0.35rem 0 1.5rem;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+
+.about-body p {
+  margin: 0 0 1rem;
+  line-height: 1.65;
+}
+
+.about-links-heading {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 2rem 0 0.75rem;
+}
+
+ul.about-links {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+ul.about-links a {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+
+ul.about-links a:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  text-decoration: none;
+}
+
+@media (max-width: 700px) {
+  .about-layout {
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .about-portrait {
+    flex-basis: auto;
+    width: min(100%, 260px);
+  }
+}
+
+/* ---- Footer ---- */
+/* body is a flex column so the footer sits at the bottom of short pages
+   (an empty People list, the About page) instead of floating mid-screen. */
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+body > main {
+  flex: 1 0 auto;
+}
+
+.site-footer {
+  flex: 0 0 auto;
+  margin-top: 3rem;
+  padding: 1.25rem 1.5rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1.5rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.footer-links {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.footer-links a {
+  color: var(--muted);
+}
+
+.footer-links a:hover {
+  color: var(--accent-hover);
+  text-decoration: none;
 }
