@@ -235,14 +235,6 @@ fn asset(path: &str) -> String {
     format!("{path}?v={}", build_id())
 }
 
-/// Camera-lens mark, inlined as a data URI so the favicon costs no extra
-/// request and never 404s (there is no `static/favicon.ico`).
-const FAVICON: &str = "data:image/svg+xml,\
-     %3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E\
-     %3Crect width='32' height='32' rx='7' fill='%236b8e4e'/%3E\
-     %3Ccircle cx='16' cy='16' r='7.5' fill='none' stroke='%23f6f7f1' stroke-width='2.5'/%3E\
-     %3Ccircle cx='16' cy='16' r='2.25' fill='%23f6f7f1'/%3E%3C/svg%3E";
-
 /// The one `<head>` every page shares. `scripts` lists extra `/static/*.js`
 /// files to defer-load beyond the theme handler. Previously each of the seven
 /// page functions carried its own copy of this block, so every meta/script
@@ -276,7 +268,9 @@ fn head_block_with_preload(
             meta property="og:title" content=(title);
             meta property="og:description" content=(description);
             meta property="og:type" content="website";
-            link rel="icon" href=(FAVICON);
+            // Carries the `?v=` stamp like the other static assets, so the
+            // `immutable` cache entry is replaced when the icon is swapped.
+            link rel="icon" type="image/png" href=(asset("/static/icon.png"));
             // The build this page was rendered by. `version.js` compares it
             // against `GET /version` on tab refocus and reloads the page when
             // a newer build is live, so a tab left open across a deploy does
