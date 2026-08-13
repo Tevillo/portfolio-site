@@ -27,9 +27,25 @@
     try { return decodeURIComponent(p); } catch (e) { return p; }
   }
 
+  // A tree row survives the filter if it is itself inside a favs folder or if
+  // any folder below it is one — otherwise the sidebar would keep listing
+  // branches whose sections have all just been hidden.
+  const treeNodes = Array.from(document.querySelectorAll('li.tree-node[data-path]'));
+  const favPaths = Array.from(document.querySelectorAll('section.gallery[data-path]'))
+    .map((sec) => sec.dataset.path)
+    .filter(isFav);
+
+  function hasFavBelow(path) {
+    if (isFav(path)) return true;
+    return favPaths.some((p) => path === '' || p.startsWith(path + '/'));
+  }
+
   function apply(on) {
     document.querySelectorAll('section.gallery[data-path]').forEach((sec) => {
       sec.classList.toggle('favs-hidden', on && !isFav(sec.dataset.path));
+    });
+    treeNodes.forEach((node) => {
+      node.classList.toggle('favs-hidden', on && !hasFavBelow(node.dataset.path));
     });
     document.querySelectorAll('li.tile').forEach((tile) => {
       tile.classList.toggle('favs-hidden', on && !isFav(tilePath(tile)));

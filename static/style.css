@@ -10,6 +10,10 @@
      decoupled from --surface so a dark-theme can flip the card surface
      without inverting the legibility of accent buttons and the lightbox. */
   --on-accent: #f6f7f1;
+  /* Accent at low opacity, for marking a selected row without printing text
+     on top of the accent itself. Translucent so it composites over whichever
+     surface it lands on. */
+  --accent-soft: rgba(107, 142, 78, 0.2);
 }
 
 /* Dark theme — opt-in site-wide. The inline head script in views.rs sets
@@ -24,6 +28,7 @@ html[data-theme="dark"] {
   --border: #2a2e26;
   --accent: #8db168;
   --accent-hover: #a8c884;
+  --accent-soft: rgba(141, 177, 104, 0.26);
 }
 
 * {
@@ -256,6 +261,16 @@ li.tile.favs-hidden {
 /* "Favorites only" toggle bar on /all. */
 section.all-controls {
   margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+}
+
+.all-controls-actions {
+  display: flex;
+  gap: 0.4rem;
 }
 
 .favs-toggle {
@@ -310,6 +325,273 @@ section.all-controls {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 600;
+}
+
+/* ---- /all: folder tree + gallery column ------------------------------------
+   Two presentations of one collapse state. Wide viewports get the sticky tree
+   on the left; narrow ones drop it entirely and lean on the inline section
+   headers, which exist at every folder level (including folders holding no
+   photos of their own) precisely so a whole year can be folded on a phone. */
+
+main.all-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.75rem;
+  /* `width` is not redundant: body is a flex column, and the `auto` side
+     margins that centre this would otherwise make it shrink to its contents
+     instead of stretching. */
+  width: 100%;
+  max-width: 1900px;
+  margin: 2rem auto;
+}
+
+.all-column {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.all-column section.gallery {
+  margin-bottom: 2rem;
+}
+
+/* A folded section is nothing but its heading, and so is a container folder.
+   Both drop to the tighter rhythm so a mostly-collapsed page reads as an
+   evenly spaced list rather than a set of randomly gapped headings. */
+.all-column section.gallery.folder-node,
+.all-column section.gallery.collapsed {
+  margin-bottom: 1rem;
+}
+
+/* Nesting depth as a left inset on the heading only — the grids stay full
+   width, which matters most on the narrow screens this is here for. */
+.all-column section.gallery > h2 {
+  margin-left: calc(min(var(--depth, 0), 5) * 0.7rem);
+}
+
+.tree-action {
+  font: inherit;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.25rem 0.55rem;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.tree-action:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Phones: no sidebar. The inline headers are the collapse affordance. */
+.tree-sidebar {
+  display: none;
+}
+
+@media (min-width: 900px) {
+  .tree-sidebar {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 17rem;
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+
+  /* The duplicate expand/collapse pair lives in the sidebar head up here. */
+  .all-controls-actions {
+    display: none;
+  }
+}
+
+.tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.tree-head-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.tree-head .tree-action {
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.tree-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.5rem 0.4rem;
+}
+
+ul.tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Indent guides: one border per nesting level, the vertical rules running
+   down the left of each child list in the reference design. */
+ul.tree-list ul.tree-list {
+  margin-left: 0.72rem;
+  padding-left: 0.6rem;
+  border-left: 1px solid var(--border);
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  border-radius: 5px;
+  padding: 0.1rem 0.25rem 0.1rem 0;
+}
+
+.tree-row:hover {
+  background: rgba(127, 133, 118, 0.14);
+}
+
+.tree-twisty {
+  flex: 0 0 auto;
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tree-twisty svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  display: block;
+  transition: transform 0.15s ease;
+}
+
+.tree-twisty-leaf {
+  cursor: default;
+}
+
+.tree-node.collapsed > .tree-row .tree-twisty svg {
+  transform: rotate(-90deg);
+}
+
+.tree-node.collapsed > ul.tree-list {
+  display: none;
+}
+
+.tree-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text);
+  padding: 0.1rem 0.15rem;
+  border-radius: 4px;
+}
+
+.tree-link:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.tree-icon {
+  flex: 0 0 auto;
+  width: 0.95rem;
+  height: 0.95rem;
+  color: var(--accent);
+}
+
+.tree-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-count {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Current section, mirrored from the gallery's scroll position. A tint plus an
+   accent edge rather than a solid fill: --accent is light in the dark theme,
+   so filled rows would leave the label at ~2:1 against it. This also matches
+   how the top nav marks the current page. */
+.tree-node.active > .tree-row {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tree-node.active > .tree-row .tree-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tree-search {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding: 0.4rem;
+}
+
+.tree-search-input {
+  width: 100%;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.3rem 0.5rem;
+}
+
+.tree-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* While filtering, matches must be reachable regardless of how the tree was
+   left folded, so the search state outranks `.collapsed`. */
+.tree-sidebar.searching .tree-node.collapsed > ul.tree-list {
+  display: block;
+}
+
+.tree-node.filtered-out,
+.tree-node.favs-hidden {
+  display: none;
 }
 
 ul.dirlist {

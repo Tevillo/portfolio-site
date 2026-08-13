@@ -26,7 +26,12 @@ pub async fn list_person_photos(db_path: PathBuf, person_name: String) -> Result
         .context("person photo listing task panicked")?
 }
 
-fn open_readonly(db_path: &Path) -> Result<Connection> {
+// The three items below are the generic half of this module — opening the
+// digiKam database, deciding which rows are publishable, and turning an
+// (album, filename) pair back into a path. `portfolio` queries the same
+// database for a different tag tree and shares them so the two pages cannot
+// drift apart on what counts as a visible photo.
+pub(crate) fn open_readonly(db_path: &Path) -> Result<Connection> {
     Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -37,7 +42,7 @@ fn open_readonly(db_path: &Path) -> Result<Connection> {
 // Same rules as the filesystem walker: only .jpg/.jpeg, no "hidden" filenames,
 // and skip any album path with a "negative" segment. SQLite LIKE is ASCII
 // case-insensitive by default, which mirrors the Rust helpers in handlers.rs.
-const VISIBLE_IMAGE_FILTER: &str = "
+pub(crate) const VISIBLE_IMAGE_FILTER: &str = "
     (i.name LIKE '%.jpg' OR i.name LIKE '%.jpeg')
     AND i.name NOT LIKE '%hidden%'
     AND a.relativePath NOT LIKE '%/negative/%'
@@ -121,7 +126,7 @@ fn list_person_photos_blocking(db_path: &Path, person_name: &str) -> Result<Vec<
     Ok(out)
 }
 
-fn combine_rel(album_rel: &str, name: &str) -> String {
+pub(crate) fn combine_rel(album_rel: &str, name: &str) -> String {
     let trimmed = album_rel.trim_start_matches('/').trim_end_matches('/');
     if trimmed.is_empty() {
         name.to_string()

@@ -2,6 +2,7 @@ mod handlers;
 mod nether;
 mod paths;
 mod people;
+mod portfolio;
 mod state;
 mod thumbs;
 mod views;

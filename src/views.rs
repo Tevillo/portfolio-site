@@ -622,91 +622,334 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
     }
 }
 
-/// Directory-grouped gallery: one collapsible section per folder, all on a
-/// single page. Used by `/all` (square tiles + a "Favorites only" filter) and
-/// the Portfolio home page (`natural_ratio` masonry, no favorites control).
-pub fn grouped_gallery_page(
-    title: &str,
-    crumbs: &[Crumb],
-    groups: &[FolderGroup],
-    natural_ratio: bool,
-    show_favs: bool,
-    active: Nav,
-) -> Markup {
-    let scripts: &[&str] = if show_favs {
-        &[
-            "/static/lightbox.js",
-            "/static/collapse.js",
-            "/static/favs.js",
-        ]
-    } else {
-        &["/static/lightbox.js", "/static/collapse.js"]
-    };
-    let is_home = active == Nav::Home;
+/// Portfolio home page: one collapsible section per `portfolio/*` tag, photos at
+/// their natural aspect ratio in the work page's masonry chrome. `/all` renders
+/// the same [`FolderGroup`] shape through [`all_photos_page`] instead, which adds
+/// the folder tree.
+pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
     // The home page's first tile is the LCP element on every viewport. Telling
     // the browser about it in <head> starts the fetch during HTML parse instead
     // of waiting for the image to be discovered in the body.
-    let lcp = is_home
-        .then(|| groups.first()?.images.first())
-        .flatten()
+    let lcp = groups
+        .first()
+        .and_then(|g| g.images.first())
         .map(|img| img.thumb_url.as_str());
     html! {
         (DOCTYPE)
         html lang="en" {
             (head_block_with_preload(
-                &format!("{title} - Portfolio"),
-                if is_home { site_description() } else { "Every photograph in the library, grouped by folder." },
-                scripts,
+                "Portfolio - Portfolio",
+                site_description(),
+                &["/static/lightbox.js", "/static/collapse.js"],
                 lcp,
             ))
             body {
-                (site_header(active))
-                main.portfolio[natural_ratio] {
+                (site_header(Nav::Home))
+                main.portfolio {
                     // The home page's own breadcrumb only ever read "Portfolio",
                     // duplicating the brand; a name and a line of context earn
                     // that space better.
-                    @if is_home {
-                        section.hero {
-                            h1.hero-name { (OWNER_NAME) }
-                            @if !OWNER_TAGLINE.is_empty() {
-                                p.hero-tagline { (OWNER_TAGLINE) }
-                            }
+                    section.hero {
+                        h1.hero-name { (OWNER_NAME) }
+                        @if !OWNER_TAGLINE.is_empty() {
+                            p.hero-tagline { (OWNER_TAGLINE) }
                         }
-                    } @else {
-                        (crumbs_nav(crumbs))
                     }
                     @if groups.is_empty() {
                         p.empty { "Nothing here yet." }
                     } @else {
-                        @if show_favs {
+                        @for (gi, g) in groups.iter().enumerate() {
+                            section.gallery.work-gallery data-path=(g.path) {
+                                h2 {
+                                    button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
+                                        (chevron())
+                                    }
+                                    // A tag-driven section's photos are spread
+                                    // across the tree, so it has no folder to
+                                    // link to and renders as plain text — the
+                                    // shared `.section-label` styling is
+                                    // element-agnostic, so the heading looks the
+                                    // same either way.
+                                    @if g.browse_url.is_empty() {
+                                        span.section-label { (g.label) }
+                                    } @else {
+                                        a.section-label href=(g.browse_url) { (g.label) }
+                                    }
+                                    span.section-count { "(" (g.images.len()) ")" }
+                                }
+                                // Only the first section is above the fold, so it
+                                // is the only one that gets the eager budget.
+                                (image_grid(&g.images, true, if gi == 0 { EAGER_TILES } else { 0 }))
+                            }
+                        }
+                    }
+                }
+                (site_footer())
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /all — folder tree sidebar
+// ---------------------------------------------------------------------------
+
+/// One directory in the `/all` sidebar tree.
+///
+/// `walk_groups` only emits a [`FolderGroup`] for directories that *directly*
+/// hold JPEGs, so a year folder whose photos all live in subfolders never got a
+/// section — and therefore had nothing to collapse. The tree is rebuilt here
+/// from the group paths, so every level becomes a node the reader can fold,
+/// image-bearing or not.
+struct TreeNode {
+    /// Last path segment. The root carries a display name instead.
+    name: String,
+    /// Folder path relative to the photos root; `""` is the root.
+    path: String,
+    /// DOM id of this folder's section, so a tree row can link to it.
+    id: String,
+    browse_url: String,
+    /// Images directly in this folder.
+    direct: usize,
+    /// Images in this folder and every descendant.
+    total: usize,
+    /// Distance from the root, used to indent the inline section headings that
+    /// stand in for the tree on narrow screens.
+    depth: usize,
+    children: Vec<TreeNode>,
+}
+
+impl TreeNode {
+    fn new(name: &str, path: &str) -> Self {
+        let browse_url = if path.is_empty() {
+            "/browse".to_string()
+        } else {
+            format!("/browse/{}", crate::handlers::encode_path(path))
+        };
+        Self {
+            name: name.to_string(),
+            path: path.to_string(),
+            id: String::new(),
+            browse_url,
+            direct: 0,
+            total: 0,
+            depth: 0,
+            children: Vec::new(),
+        }
+    }
+
+    /// Pre-order pass that mints DOM ids, records depth, and rolls the image
+    /// counts up the tree. Ids are positional rather than derived from the
+    /// path: folder names may contain anything, and two distinct paths must
+    /// never collide on one id.
+    fn finish(&mut self, next_id: &mut usize, depth: usize) -> usize {
+        self.id = format!("folder-{}", *next_id);
+        *next_id += 1;
+        self.depth = depth;
+        self.total = self.direct;
+        for child in &mut self.children {
+            self.total += child.finish(next_id, depth + 1);
+        }
+        self.total
+    }
+}
+
+/// Rebuild the directory hierarchy from the flat group list. Children keep the
+/// order in which `walk_groups` first mentioned them, which is alphabetical
+/// pre-order, so the tree and the page scroll in the same sequence.
+fn build_tree(groups: &[FolderGroup]) -> TreeNode {
+    let mut root = TreeNode::new("All photos", "");
+    for g in groups {
+        let node = if g.path.is_empty() {
+            &mut root
+        } else {
+            let mut cur = &mut root;
+            let mut acc = String::new();
+            for seg in g.path.split('/') {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(seg);
+                let idx = match cur.children.iter().position(|c| c.name == seg) {
+                    Some(i) => i,
+                    None => {
+                        cur.children.push(TreeNode::new(seg, &acc));
+                        cur.children.len() - 1
+                    }
+                };
+                cur = &mut cur.children[idx];
+            }
+            cur
+        };
+        node.direct = g.images.len();
+    }
+    root.finish(&mut 0, 0);
+    root
+}
+
+/// Chevron shared by the tree twisties and the inline section headers, so both
+/// rotate identically when their folder closes.
+fn chevron() -> Markup {
+    html! {
+        svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+            polyline points="6,9 12,15 18,9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" {}
+        }
+    }
+}
+
+fn folder_icon() -> Markup {
+    html! {
+        svg.tree-icon viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
+            path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.8 2h8.1a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"
+                fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" {}
+        }
+    }
+}
+
+/// The sticky left-hand tree. Hidden below the desktop breakpoint, where the
+/// inline section headers carry the same collapse state instead.
+fn folder_tree_sidebar(root: &TreeNode) -> Markup {
+    html! {
+        aside.tree-sidebar aria-label="Folder tree" {
+            div.tree-head {
+                span.tree-title { "Albums" }
+                div.tree-head-actions {
+                    button.tree-action type="button" data-tree-all="open" title="Expand all" { "Expand" }
+                    button.tree-action type="button" data-tree-all="close" title="Collapse all" { "Collapse" }
+                }
+            }
+            div.tree-scroll {
+                ul.tree-list.tree-root {
+                    (tree_row(root))
+                }
+            }
+            div.tree-search {
+                input.tree-search-input type="search" placeholder="Search folders…" aria-label="Search folders" autocomplete="off";
+            }
+        }
+    }
+}
+
+fn tree_row(node: &TreeNode) -> Markup {
+    let has_children = !node.children.is_empty();
+    html! {
+        li.tree-node data-path=(node.path) data-name=(node.name.to_lowercase()) data-target=(node.id) {
+            div.tree-row {
+                @if has_children {
+                    button.tree-twisty type="button" aria-expanded="true"
+                        aria-label=(format!("Collapse {}", node.name)) {
+                        (chevron())
+                    }
+                } @else {
+                    span.tree-twisty.tree-twisty-leaf aria-hidden="true" {}
+                }
+                a.tree-link href=(format!("#{}", node.id)) {
+                    (folder_icon())
+                    span.tree-name { (node.name) }
+                    span.tree-count { (node.total) }
+                }
+            }
+            @if has_children {
+                ul.tree-list {
+                    @for child in &node.children {
+                        (tree_row(child))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Heading for one `/all` section. Folders with no photos of their own still
+/// get one: on narrow screens, where the sidebar is hidden, it is the only
+/// handle for collapsing a whole year or trip.
+fn tree_section_heading(node: &TreeNode, group: Option<&FolderGroup>) -> Markup {
+    let label = if node.path.is_empty() {
+        "Photos (root)"
+    } else {
+        node.path.as_str()
+    };
+    let count = match group {
+        Some(g) => g.images.len(),
+        None => node.total,
+    };
+    html! {
+        h2 {
+            button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
+                (chevron())
+            }
+            a.section-label href=(group.map_or(node.browse_url.as_str(), |g| g.browse_url.as_str())) { (label) }
+            span.section-count { "(" (count) ")" }
+        }
+    }
+}
+
+/// Emit one section per tree node, in the same pre-order the sidebar lists, so
+/// clicking a row always scrolls to a target that exists. `eager` is the
+/// remaining above-the-fold image budget: the first section that actually has
+/// photos consumes it, everything below stays lazy.
+fn tree_sections(node: &TreeNode, groups: &[FolderGroup], eager: &mut usize) -> Markup {
+    let group = groups.iter().find(|g| g.path == node.path);
+    html! {
+        @match group {
+            Some(g) => {
+                section.gallery data-path=(node.path) id=(node.id) style=(format!("--depth:{}", node.depth)) {
+                    (tree_section_heading(node, Some(g)))
+                    (image_grid(&g.images, false, std::mem::take(eager)))
+                }
+            }
+            None => {
+                section.gallery.folder-node data-path=(node.path) id=(node.id) style=(format!("--depth:{}", node.depth)) {
+                    (tree_section_heading(node, None))
+                }
+            }
+        }
+        @for child in &node.children {
+            (tree_sections(child, groups, eager))
+        }
+    }
+}
+
+/// `/all`: the whole library on one page, with a collapsible folder tree down
+/// the left on desktop and inline collapsible headers on narrow screens. Both
+/// drive the same per-path open/closed state in `collapse.js`.
+pub fn all_photos_page(crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup {
+    let root = build_tree(groups);
+    let mut eager = EAGER_TILES;
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block(
+                "All - Portfolio",
+                "Every photograph in the library, grouped by folder.",
+                &["/static/lightbox.js", "/static/collapse.js", "/static/favs.js"],
+            ))
+            body {
+                (site_header(Nav::All))
+                main.all-layout {
+                    @if groups.is_empty() {
+                        div.all-column {
+                            (crumbs_nav(crumbs))
+                            p.empty { "Nothing here yet." }
+                        }
+                    } @else {
+                        (folder_tree_sidebar(&root))
+                        div.all-column {
+                            (crumbs_nav(crumbs))
                             section.all-controls {
                                 button.favs-toggle type="button" aria-pressed="false" {
                                     span.favs-toggle-track { span.favs-toggle-thumb {} }
                                     span.favs-toggle-label { "Favorites only" }
                                 }
-                            }
-                        }
-                        @for (gi, g) in groups.iter().enumerate() {
-                            // When natural_ratio (Portfolio), adopt the work page's
-                            // section chrome: `.work-gallery` header with a bold
-                            // `.section-label` + dimmed `.section-count`, and the
-                            // `.work-grid` masonry. `/all` keeps the plain header.
-                            section.gallery.work-gallery[natural_ratio] data-path=(g.path) {
-                                h2 {
-                                    button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
-                                        svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
-                                            polyline points="6,9 12,15 18,9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" {}
-                                        }
-                                    }
-                                    a.section-label[natural_ratio] href=(g.browse_url) { (g.label) }
-                                    @if natural_ratio {
-                                        span.section-count { "(" (g.images.len()) ")" }
-                                    }
+                                // Duplicated from the sidebar head so the same
+                                // reach exists on phones, where the tree is not
+                                // rendered at all.
+                                div.all-controls-actions {
+                                    button.tree-action type="button" data-tree-all="open" { "Expand all" }
+                                    button.tree-action type="button" data-tree-all="close" { "Collapse all" }
                                 }
-                                // Only the first section is above the fold, so it
-                                // is the only one that gets the eager budget.
-                                (image_grid(&g.images, natural_ratio, if gi == 0 { EAGER_TILES } else { 0 }))
                             }
+                            (tree_sections(&root, groups, &mut eager))
                         }
                     }
                 }

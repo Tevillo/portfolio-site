@@ -13,6 +13,7 @@ use tracing::warn;
 use crate::work::{self, DownloadKind, Scope};
 use crate::paths::{PathError, safe_resolve};
 use crate::people;
+use crate::portfolio;
 use crate::state::AppState;
 use crate::thumbs::{self, ThumbKind};
 use crate::views::{
@@ -20,39 +21,104 @@ use crate::views::{
     PersonEntry,
 };
 
-const FRONT_PAGE_DIR: &str = "portfolio";
-
 #[derive(Clone, Copy)]
 enum PageKind {
-    Index,
     BrowseRoot,
     BrowseSub,
 }
 
-/// Home page: every folder under `portfolio/` rendered as its own section on a
-/// single page (grouped by directory), with photos shown at their natural
-/// aspect ratio. Reuses the `/all` grouping machinery, scoped to the portfolio
-/// subtree.
+/// Home page: one section per `portfolio/<label>` tag in the digiKam database,
+/// photos shown at their natural aspect ratio. The curation lives in the tags
+/// (see [`crate::portfolio`]) rather than in a folder, so the photos themselves
+/// come from all over the tree.
 pub async fn index(State(state): State<AppState>) -> Response {
-    // The portfolio shows large tiles, so load the 1600px preview rendition
-    // rather than the 400px grid thumb used by dense listings.
-    let mut groups = match walk_groups(state.photos_root(), FRONT_PAGE_DIR, "preview").await {
-        Ok(g) => g,
-        Err(status) => return status.into_response(),
+    // Every failure mode here — no database, unreadable database, no
+    // `portfolio` tag — collapses to an empty group list, which the view renders
+    // as "Nothing here yet.". The front page of the site is the wrong place to
+    // surface an infrastructure problem, and the log line is the actionable half
+    // anyway.
+    let groups = portfolio_groups(&state).await;
+    views::grouped_gallery_page(&groups).into_response()
+}
+
+/// Resolve the `portfolio/*` tags into renderable sections, dropping anything
+/// that cannot be turned into a live URL.
+async fn portfolio_groups(state: &AppState) -> Vec<FolderGroup> {
+    let Some(db) = state.db_path().cloned() else {
+        warn!("portfolio tag database not available; rendering empty home page");
+        return Vec::new();
     };
-    // Label each section relative to the portfolio root: the top-level folder
-    // becomes "Portfolio", subfolders show just their sub-path (e.g.
-    // "portfolio/street" -> "street"). `path` stays the full rel so collapse.js
-    // keeps unique per-section state.
-    let prefix = format!("{FRONT_PAGE_DIR}/");
-    for g in &mut groups {
-        g.label = match g.path.strip_prefix(&prefix) {
-            Some(sub) => sub.to_string(),
-            None => "Portfolio".to_string(),
-        };
+    let sections = match portfolio::list_sections(db).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = ?e, "listing portfolio sections failed");
+            return Vec::new();
+        }
+    };
+
+    // Tagged photos arrive as flat rel paths scattered across the tree, so —
+    // exactly as in `person_photos` — there is no directory walk to piggyback
+    // the raw-sibling lookup on. Cache each album folder's stem->raw map, which
+    // pays off here because whole sections tend to share one folder.
+    let mut dir_raws: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut groups: Vec<FolderGroup> = Vec::new();
+    // Absolute source paths in flattened `groups` order, the shape
+    // `fill_preview_dims` expects.
+    let mut sources: Vec<PathBuf> = Vec::new();
+
+    for section in sections {
+        let mut images: Vec<ImageEntry> = Vec::with_capacity(section.photos.len());
+        for p in section.photos {
+            // `safe_resolve` doubles as the existence check: a tag can outlive
+            // the file it points at (renamed outside digiKam, moved to a folder
+            // the site skips), and a tile whose source is gone would render as a
+            // broken image with no dimensions to reserve space with.
+            let Ok(abs) = safe_resolve(state.photos_root(), &p.rel).await else {
+                warn!(rel = %p.rel, "portfolio-tagged photo missing on disk; skipping");
+                continue;
+            };
+            let parent = parent_rel(&p.rel).to_string();
+            if !dir_raws.contains_key(&parent) {
+                let map = scan_raw_siblings(state.photos_root(), &parent).await;
+                dir_raws.insert(parent.clone(), map);
+            }
+            let raw_download_url = dir_raws
+                .get(&parent)
+                .and_then(|m| m.get(&file_stem_lower(&p.name)))
+                .map(|raw| format!("/download/{}", encode_path(&join_rel(&parent, raw))));
+            sources.push(abs);
+            images.push(ImageEntry {
+                // The portfolio shows large tiles, so it loads the 1600px
+                // preview rendition rather than the 400px grid thumb that dense
+                // listings use.
+                thumb_url: format!("/preview/{}", encode_path(&p.rel)),
+                image_url: format!("/image/{}", encode_path(&p.rel)),
+                jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
+                raw_download_url,
+                dims: None,
+                name: p.name,
+            });
+        }
+        if images.is_empty() {
+            continue;
+        }
+        groups.push(FolderGroup {
+            label: section.label.clone(),
+            // Namespaced so collapse.js keeps per-section state that cannot
+            // collide with a real folder path of the same name.
+            path: format!("portfolio/{}", section.label),
+            // A tag's photos span many folders, so there is no single folder to
+            // browse to; the view renders a plain heading when this is empty.
+            browse_url: String::new(),
+            images,
+        });
     }
-    let crumbs = breadcrumbs(FRONT_PAGE_DIR, PageKind::Index);
-    views::grouped_gallery_page("Portfolio", &crumbs, &groups, true, false, views::Nav::Home).into_response()
+
+    // Same reason as the folder walk: the natural-ratio masonry carries no CSS
+    // aspect-ratio, so without intrinsic dimensions every tile lays out at zero
+    // height and `loading="lazy"` defers nothing.
+    fill_preview_dims(&sources, &mut groups).await;
+    groups
 }
 
 /// About page. The prose is a compile-time constant in `views`; the only
@@ -196,7 +262,6 @@ async fn render_dir(
 
     let crumbs = breadcrumbs(rel, kind);
     let title = match kind {
-        PageKind::Index => "Portfolio".to_string(),
         PageKind::BrowseRoot => "Browse".to_string(),
         PageKind::BrowseSub => rel
             .trim_end_matches('/')
@@ -415,7 +480,7 @@ pub async fn all_photos(State(state): State<AppState>) -> Response {
                     url: None,
                 },
             ];
-            views::grouped_gallery_page("All", &crumbs, &groups, false, true, views::Nav::All).into_response()
+            views::all_photos_page(&crumbs, &groups).into_response()
         }
         Err(status) => status.into_response(),
     }
@@ -426,8 +491,9 @@ pub async fn all_photos(State(state): State<AppState>) -> Response {
 /// (empty = the whole photos tree, as `/all` uses); paths and URLs stay
 /// rooted at `root` so thumbnail/image links resolve regardless of where the
 /// walk starts. `thumb_route` selects which rendition the displayed tile loads
-/// — `"thumb"` (400px grid) for dense listings, `"preview"` (1600px) for the
-/// portfolio showcase where tiles render larger.
+/// — `"thumb"` (400px grid) for dense listings, `"preview"` (1600px) where tiles
+/// render larger. Only `/all` walks the tree now; the home page is driven by the
+/// `portfolio/*` tags instead.
 async fn walk_groups(
     root: &Path,
     start_rel: &str,
@@ -870,13 +936,6 @@ fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
 fn breadcrumbs(rel: &str, kind: PageKind) -> Vec<Crumb> {
     let mut out = Vec::new();
     match kind {
-        PageKind::Index => {
-            out.push(Crumb {
-                label: "Portfolio".into(),
-                url: None,
-            });
-            return out;
-        }
         PageKind::BrowseRoot => {
             out.push(Crumb {
                 label: "Home".into(),
