@@ -174,6 +174,9 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
             post(handlers::work_file_download),
         )
         .route("/image/*path", get(handlers::image))
+        // Images embedded in vault notes. Sits with the assets rather than
+        // under /nether so it keeps its own ETag/max-age handling.
+        .route("/nether-media/*path", get(nether::media))
         .route("/download/*path", get(handlers::download))
         .route("/thumb/*path", get(handlers::thumb))
         .route("/preview/*path", get(handlers::preview))

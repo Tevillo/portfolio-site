@@ -4,24 +4,35 @@
 //! note name against the whole vault, mirroring Obsidian's own link behaviour.
 //! A folder-tree sidebar listing every note is rendered alongside each page.
 //! No links into `/nether` are exposed elsewhere on the site.
+//!
+//! Embedded images are the one kind of vault *file* served as bytes, and only
+//! from [`MEDIA_DIR`] — see [`resolve_media`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
 use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use maud::PreEscaped;
-use pulldown_cmark::{Event, Options, Parser, html as md_html};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html as md_html};
 
-use crate::handlers::encode_path;
+use crate::handlers::{build_etag, encode_path, matches_etag, not_modified};
 use crate::paths::safe_resolve;
 use crate::state::AppState;
 use crate::views::{self, Crumb, NavNode};
 
 /// The note rendered at `/nether` (the vault's home note).
 const HOME_NOTE: &str = "Vault";
+
+/// The only vault folder whose files are servable as bytes: recipe cards. The
+/// rest of the vault is private notes, so an image pointing anywhere else is
+/// dropped from the rendered page rather than linked.
+const MEDIA_DIR: &str = "Home/Cooking/Recipes/Engineer";
+
+/// URL prefix the rewritten `<img src>` values point at, handled by [`media`].
+const MEDIA_URL: &str = "/nether-media";
 
 pub async fn root(State(state): State<AppState>) -> Response {
     render(&state, HOME_NOTE, true).await
@@ -54,6 +65,138 @@ pub async fn graph(State(state): State<AppState>) -> Response {
     views::nether_graph_page(&crumbs, &nav, &data.to_json()).into_response()
 }
 
+/// GET /nether-media/*path — an image embedded in a note, resolved against
+/// [`MEDIA_DIR`] and nothing above it. Paths are minted by [`resolve_media`],
+/// but this handler re-checks the folder, the extension and hidden names so a
+/// hand-typed URL can't reach the rest of the vault either.
+pub async fn media(
+    State(state): State<AppState>,
+    AxumPath(rel): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(mime) = image_mime(&rel) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if rel.split('/').any(|c| c.starts_with('.')) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Canonicalize the media root itself so the containment check in
+    // `safe_resolve` holds even if a component of it is a symlink.
+    let Ok(root) = tokio::fs::canonicalize(state.nether_root().join(MEDIA_DIR)).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(path) = safe_resolve(&root, &rel).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(meta) = tokio::fs::metadata(&path).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !meta.is_file() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let etag = build_etag(meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
+    if matches_etag(&headers, &etag) {
+        return not_modified(&etag);
+    }
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+            (header::ETAG, etag.as_str()),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Content type for a servable image name, or `None` if the extension isn't one
+/// we serve. SVG is excluded deliberately: it can carry script, and these are
+/// photos of recipe cards.
+fn image_mime(name: &str) -> Option<&'static str> {
+    let ext = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
+/// Resolve an image `src` written in a note to its path *relative to*
+/// [`MEDIA_DIR`], or `None` when it points anywhere else.
+///
+/// A src containing `/` is taken as relative to the note's own folder, the way
+/// Obsidian and any markdown renderer read it. A bare filename is looked up
+/// directly in [`MEDIA_DIR`], which is how Obsidian's `![[image.png]]` embeds
+/// name their target. Absolute paths, remote URLs and `..` escapes all fail
+/// the containment check and so return `None`.
+fn resolve_media(note_dir: &str, dest: &str) -> Option<String> {
+    if dest.is_empty() || dest.starts_with('/') || dest.contains("://") {
+        return None;
+    }
+    let dest = percent_decode(dest);
+    let base = if dest.contains('/') { note_dir } else { MEDIA_DIR };
+
+    // Normalize lexically; `..` popping past the start means the src reaches
+    // outside the vault, which can never land in MEDIA_DIR.
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in base.split('/').chain(dest.split('/')) {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            c => parts.push(c),
+        }
+    }
+
+    let rel = parts
+        .join("/")
+        .strip_prefix(MEDIA_DIR)?
+        .strip_prefix('/')?
+        .to_string();
+    if rel.split('/').any(|c| c.starts_with('.')) || image_mime(&rel).is_none() {
+        return None;
+    }
+    Some(rel)
+}
+
+/// Decode `%XX` escapes; malformed escapes are left as written. Note authors
+/// write spaces literally, but Obsidian percent-encodes them when it rewrites
+/// a link after a rename.
+fn percent_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
     let root = state.nether_root();
 
@@ -72,7 +215,10 @@ async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    let body = render_markdown(&expand_wikilinks(&source, &index));
+    // Image srcs are resolved relative to the note's own folder.
+    let note_dir = rel_no_ext.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let expanded = expand_wikilinks(&expand_embeds(&source), &index);
+    let body = render_markdown(&expanded, note_dir);
     let nav = build_nav(&notes, rel_no_ext);
     let crumbs = build_crumbs(rel_no_ext, is_home);
     let title = rel_no_ext.rsplit('/').next().unwrap_or(rel_no_ext);
@@ -144,6 +290,44 @@ fn build_index(notes: &[String]) -> HashMap<String, String> {
         map.entry(stem).or_insert_with(|| no_ext.to_string());
     }
     map
+}
+
+/// Rewrite Obsidian image embeds — `![[image.png]]`, optionally with a
+/// `|caption` or `|300` size hint — into standard markdown images, so both
+/// spellings reach the image handling in [`render_markdown`]. Embeds of
+/// anything else (note transclusions) are left for `expand_wikilinks`.
+fn expand_embeds(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(start) = rest.find("![[") {
+        let after = &rest[start + 3..];
+        let Some(end) = after.find("]]") else {
+            out.push_str(&rest[..start + 3]);
+            rest = after;
+            continue;
+        };
+        let inner = &after[..end];
+        let (target, alias) = match inner.split_once('|') {
+            Some((t, a)) => (t.trim(), a.trim()),
+            None => (inner.trim(), ""),
+        };
+        if image_mime(target).is_none() {
+            // Not an image; emit as written and let the wikilink pass see it.
+            out.push_str(&rest[..start + 3 + end + 2]);
+            rest = &after[end + 2..];
+            continue;
+        }
+        out.push_str(&rest[..start]);
+        let _ = write!(
+            out,
+            "![{}]({})",
+            escape_link_text(alias),
+            encode_path(target)
+        );
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Replace Obsidian `[[target]]` / `[[target|alias]]` links with standard
@@ -346,19 +530,47 @@ fn html_escape(s: &str) -> String {
 
 /// Render markdown to HTML. Single newlines become `<br>` to match Obsidian's
 /// reading view, where source line breaks are preserved.
-fn render_markdown(md: &str) -> String {
+///
+/// Images are pointed at `/nether-media`; one whose src doesn't resolve into
+/// [`MEDIA_DIR`] is dropped entirely (alt text included) rather than left as a
+/// broken `<img>`, since a note's other embeds are vault-private files that
+/// were never servable in the first place.
+fn render_markdown(md: &str, note_dir: &str) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_FOOTNOTES);
 
-    let parser = Parser::new_ext(md, opts).map(|ev| match ev {
-        Event::SoftBreak => Event::HardBreak,
-        other => other,
-    });
+    let mut events = Vec::new();
+    let mut dropping = false;
+    for ev in Parser::new_ext(md, opts) {
+        if dropping {
+            dropping = !matches!(ev, Event::End(TagEnd::Image));
+            continue;
+        }
+        match ev {
+            Event::SoftBreak => events.push(Event::HardBreak),
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => match resolve_media(note_dir, &dest_url) {
+                Some(rel) => events.push(Event::Start(Tag::Image {
+                    link_type,
+                    dest_url: format!("{MEDIA_URL}/{}", encode_path(&rel)).into(),
+                    title,
+                    id,
+                })),
+                None => dropping = true,
+            },
+            other => events.push(other),
+        }
+    }
+
     let mut html = String::new();
-    md_html::push_html(&mut html, parser);
+    md_html::push_html(&mut html, events.into_iter());
     html
 }
 
@@ -431,4 +643,89 @@ fn build_crumbs(rel_no_ext: &str, is_home: bool) -> Vec<Crumb> {
         });
     }
     crumbs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RECIPE_DIR: &str = "Home/Cooking/Recipes";
+
+    #[test]
+    fn resolves_relative_to_the_note() {
+        assert_eq!(
+            resolve_media(RECIPE_DIR, "Engineer/card.png").as_deref(),
+            Some("card.png")
+        );
+        assert_eq!(
+            resolve_media("Home/Cooking", "Recipes/Engineer/sub/card.jpg").as_deref(),
+            Some("sub/card.jpg")
+        );
+        assert_eq!(
+            resolve_media(RECIPE_DIR, "Engineer/chili%20noodles.png").as_deref(),
+            Some("chili noodles.png")
+        );
+    }
+
+    /// Obsidian's `![[card.png]]` embeds name the file, not its path.
+    #[test]
+    fn resolves_a_bare_filename_in_the_media_dir() {
+        assert_eq!(resolve_media("", "card.png").as_deref(), Some("card.png"));
+        assert_eq!(
+            resolve_media("Programming", "card.png").as_deref(),
+            Some("card.png")
+        );
+    }
+
+    #[test]
+    fn rejects_anything_outside_the_media_dir() {
+        assert_eq!(resolve_media(RECIPE_DIR, "Engineering/card.png"), None);
+        assert_eq!(resolve_media(RECIPE_DIR, "../secret.png"), None);
+        assert_eq!(resolve_media(RECIPE_DIR, "Engineer/../../card.png"), None);
+        assert_eq!(resolve_media(RECIPE_DIR, "/home/pborrego/card.png"), None);
+        assert_eq!(resolve_media(RECIPE_DIR, "https://example.com/card.png"), None);
+        // Escaping the vault entirely, as a note written against a filesystem
+        // path outside it would.
+        assert_eq!(
+            resolve_media(RECIPE_DIR, "../../../../nether/Home/card.png"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_non_image_and_hidden_files() {
+        assert_eq!(resolve_media(RECIPE_DIR, "Engineer/card.pdf"), None);
+        assert_eq!(resolve_media(RECIPE_DIR, "Engineer/card.svg"), None);
+        assert_eq!(resolve_media(RECIPE_DIR, "Engineer/notes.md"), None);
+        assert_eq!(resolve_media(RECIPE_DIR, "Engineer/.hidden.png"), None);
+    }
+
+    #[test]
+    fn rewrites_allowed_images_and_drops_the_rest() {
+        let html = render_markdown(
+            "![card](Engineer/card.png)\n![nope](Engineering/card.png)\n![out](/etc/card.png)",
+            RECIPE_DIR,
+        );
+        assert!(
+            html.contains(r#"<img src="/nether-media/card.png" alt="card""#),
+            "{html}"
+        );
+        assert_eq!(html.matches("<img").count(), 1, "{html}");
+        assert!(!html.contains("nope") && !html.contains("out"), "{html}");
+    }
+
+    #[test]
+    fn expands_obsidian_image_embeds_only() {
+        assert_eq!(expand_embeds("![[card.png]]"), "![](card.png)");
+        assert_eq!(expand_embeds("![[card.png|A card]]"), "![A card](card.png)");
+        assert_eq!(expand_embeds("![[my card.png]]"), "![](my%20card.png)");
+        // Note transclusions stay untouched for the wikilink pass.
+        assert_eq!(expand_embeds("![[Some Note]]"), "![[Some Note]]");
+    }
+
+    #[test]
+    fn embed_syntax_renders_through_to_an_img() {
+        let html = render_markdown(&expand_embeds("![[card.png]]"), "Programming");
+        assert!(html.contains(r#"src="/nether-media/card.png""#), "{html}");
+    }
 }

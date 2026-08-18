@@ -766,7 +766,7 @@ async fn render_thumb_response(
 /// from the 304 — so a middleware that stamps `Cache-Control` onto a bare 304
 /// silently rewrites the cached image's `max-age`. Sending the real values
 /// here makes that whole class of bug impossible.
-fn not_modified(etag: &str) -> Response {
+pub(crate) fn not_modified(etag: &str) -> Response {
     Response::builder()
         .status(StatusCode::NOT_MODIFIED)
         .header(header::CACHE_CONTROL, "public, max-age=3600")
@@ -917,7 +917,7 @@ pub(crate) fn encode_path(s: &str) -> String {
     out
 }
 
-fn build_etag(mtime: SystemTime, size: u64) -> String {
+pub(crate) fn build_etag(mtime: SystemTime, size: u64) -> String {
     let secs = mtime
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -925,7 +925,7 @@ fn build_etag(mtime: SystemTime, size: u64) -> String {
     format!("\"{:x}-{:x}\"", secs, size)
 }
 
-fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
+pub(crate) fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
