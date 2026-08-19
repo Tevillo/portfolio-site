@@ -121,16 +121,70 @@ pub enum Nav {
 pub const OWNER_NAME: &str = "Paul Borrego";
 pub const OWNER_EMAIL: &str = "borregopaulj@gmail.com";
 
-/// One-liner under the name on the About page and in the home page hero, and
-/// the `<meta name="description">` for both. Left empty deliberately — write
-/// your own. While it is empty both spots render nothing and the description
-/// falls back to [`DESCRIPTION_FALLBACK`].
-pub const OWNER_TAGLINE: &str = "Film photography enthusiast";
+/// Absolute origin this site is served from, no trailing slash. Every
+/// `<link rel="canonical">`, `og:url` and `sitemap.xml` entry is built from it.
+///
+/// It must match the spelling visitors actually reach, scheme and host exactly.
+/// A search engine treats `http://x`, `https://x`, `https://www.x` and
+/// `https://x/` as four candidate addresses for the same bytes; naming one here
+/// is what tells it which is real. Change this and the canonical URLs move with
+/// it — there is no second place to edit.
+pub const SITE_ORIGIN: &str = "https://paulborrego.com";
 
-/// Plain factual `<meta name="description">` used only while `OWNER_TAGLINE`
-/// is empty. Search results and link previews need *some* description; this is
-/// a placeholder, not prose.
-const DESCRIPTION_FALLBACK: &str = "Photographs by Paul Borrego.";
+/// One-liner under the name on the About page and in the home page hero. Kept
+/// short because it is display copy; the longer sentence search results show
+/// is [`SITE_DESCRIPTION`]. Empty renders nothing in either spot.
+pub const OWNER_TAGLINE: &str = "Full stack film photographer";
+
+/// The home page's opening paragraph, rendered under the name and tagline.
+///
+/// The owner's own words. This is the prose a search engine reaches for when it
+/// builds the snippet: before it existed the first prose-shaped text on the page
+/// was the gallery headings, so the result for this site read "Misc (7) Portrait
+/// (12) Pastel (4)". Keep it in the owner's voice — a generated paragraph here
+/// is both worse to read and worse at the job. While it is empty the paragraph
+/// is simply not rendered, so the page is correct either way.
+///
+/// Renders as a single `<p>`; there is no markup and no paragraph break here.
+pub const HOME_INTRO: &str = "I do all my own shooting, developing, and \
+scanning. This site is my own repository of my photos, sorted by year and roll. \
+Have a look through the portfolio below, or if you are a friend, look for photos \
+of you and others in the People tab.";
+
+/// Extra home page links out to the rest of the site, as (href, label) pairs.
+///
+/// Empty: the header already links every section, so this only earns its space
+/// with labels written in your own words. An empty list hides the row entirely.
+pub const HOME_LINKS: &[(&str, &str)] = &[];
+
+/// The `<meta name="description">` and `og:description` for the home and About
+/// pages — the sentence that appears under the link in search results.
+///
+/// The owner's own words, trimmed to survive truncation: Google cuts this around
+/// 155 characters, so the first sentence has to stand on its own. Shorter than
+/// [`HOME_INTRO`] for that reason, and it drops the closing invitation, which
+/// asks for a click that a search result has already offered.
+///
+/// Must contain no `"` or `\`: it is interpolated into the JSON-LD in
+/// [`person_jsonld`] unescaped, where a quote would silently invalidate the
+/// whole block. Apostrophes are fine.
+const SITE_DESCRIPTION: &str = "Full stack film photographer — I do all my own \
+shooting, developing, and scanning. My film photos, sorted by year and roll.";
+
+/// Subjects claimed in the JSON-LD `knowsAbout` field — the terms a search
+/// engine associates with the person beyond the job title.
+///
+/// Photography only, and drawn from words the site itself uses. The site is a
+/// photography portfolio; software and self-hosting are deliberately not
+/// claimed here, and belong in whatever section eventually covers that work.
+///
+/// The three entries are the three stages the home page claims: shooting,
+/// developing, scanning.
+const KNOWS_ABOUT: &[&str] = &[
+    "Film photography",
+    "Film developing",
+    "Film scanning",
+];
 
 /// About page body. Each entry is one paragraph, rendered in order. Empty
 /// means the About page shows just the name, portrait and links — add your own
@@ -145,7 +199,7 @@ const DESCRIPTION_FALLBACK: &str = "Photographs by Paul Borrego.";
 pub const ABOUT_PARAGRAPHS: &[&str] = &[
     "Self hosting enjoyer and lover of film photography. 
     This website contains all of my photos that I have taken and scanned.",
-    "If you want to find yorself or a frind check out the \"People\" tab. 
+    "If you want to find yourself or a friend check out the \"People\" tab. 
     Any professional work I have done is under the \"Work\" Tab.
     And if you just want to look around \"Browse\" is a folder like system
     sorted by year and then content and \"All\" is all of my folders that can scroll",
@@ -158,14 +212,75 @@ pub const ABOUT_LINKS: &[(&str, &str)] = &[
     ("Notes", "/nether"),
 ];
 
-/// `<meta name="description">` for the home and About pages: the owner's own
-/// tagline when they have written one, the neutral placeholder until then.
-fn site_description() -> &'static str {
-    if OWNER_TAGLINE.is_empty() {
-        DESCRIPTION_FALLBACK
+/// `<title>` for the home and About pages: the owner's name, followed by the
+/// owner's own tagline when there is one.
+///
+/// The tagline rather than a separate roles string, so the title says exactly
+/// what the page says and stays in the owner's words — one place to edit, and
+/// no second description of who he is to drift out of sync. `prefix` is the
+/// page's own word ("About"); empty for the home page, which is the name.
+fn owner_title(prefix: &str) -> String {
+    let stem = if prefix.is_empty() {
+        OWNER_NAME.to_string()
     } else {
-        OWNER_TAGLINE
+        format!("{prefix} {OWNER_NAME}")
+    };
+    if OWNER_TAGLINE.is_empty() {
+        stem
+    } else {
+        format!("{stem} \u{2014} {OWNER_TAGLINE}")
     }
+}
+
+/// `<meta name="description">` for the home and About pages.
+fn site_description() -> &'static str {
+    SITE_DESCRIPTION
+}
+
+/// Absolute URL for a site-root-relative path, e.g. `/about` ->
+/// `https://paulborrego.com/about`. Canonical links, `og:url` and the sitemap
+/// all need the full origin; relative paths are legal in a canonical tag but
+/// ambiguous in a sitemap and useless in an Open Graph card.
+pub fn abs_url(path: &str) -> String {
+    format!("{SITE_ORIGIN}{path}")
+}
+
+/// `application/ld+json` describing the site owner, emitted on the home and
+/// About pages.
+///
+/// Prose leaves a search engine to infer that "Paul Borrego" names a person and
+/// to guess what he does. This states both in the vocabulary Google parses
+/// directly, which is what lets a query for the bare name resolve to a person
+/// rather than to whichever page happened to rank.
+///
+/// Hand-rolled rather than serialised: every interpolated value is a `const` in
+/// this file containing no `"` and no `\`, so there is nothing to escape and no
+/// dependency to add. Keep it that way — one stray quote makes the whole block
+/// invalid JSON-LD and it is silently ignored, and a literal `</script>` inside
+/// it would end the element early.
+fn person_jsonld() -> String {
+    let home = abs_url("/");
+    let about = abs_url("/about");
+    let knows = KNOWS_ABOUT
+        .iter()
+        .map(|k| format!("\"{k}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        concat!(
+            r#"{{"@context":"https://schema.org","@type":"Person","#,
+            r#""@id":"{home}#person","name":"{name}","jobTitle":"Photographer","#,
+            r#""description":"{desc}","url":"{home}","mainEntityOfPage":"{about}","#,
+            r#""email":"mailto:{email}","image":"{image}","knowsAbout":[{knows}]}}"#,
+        ),
+        home = home,
+        about = about,
+        name = OWNER_NAME,
+        desc = SITE_DESCRIPTION,
+        email = OWNER_EMAIL,
+        image = abs_url("/static/icon.png"),
+        knows = knows,
+    )
 }
 
 /// Optional portrait for the About page: drop a JPEG at `<photos>/about.jpg`
@@ -235,39 +350,119 @@ fn asset(path: &str) -> String {
     format!("{path}?v={}", build_id())
 }
 
-/// The one `<head>` every page shares. `scripts` lists extra `/static/*.js`
-/// files to defer-load beyond the theme handler. Previously each of the seven
-/// page functions carried its own copy of this block, so every meta/script
-/// change had to be made seven times.
-fn head_block(title: &str, description: &str, scripts: &[&str]) -> Markup {
-    head_block_with_preload(title, description, scripts, None)
+/// Everything the shared `<head>` needs, grouped into a struct because the list
+/// outgrew a readable argument list once canonical URLs, robots policy and
+/// structured data joined the title, description and scripts. Build one with
+/// [`Head::new`] and add the optional parts with the builder methods.
+struct Head<'a> {
+    title: &'a str,
+    description: &'a str,
+    /// Root-relative path this page should be indexed under, e.g.
+    /// `/people/sarah`. Rendered as an absolute `<link rel="canonical">`.
+    /// Required rather than optional: a page with no canonical is exactly the
+    /// state Search Console flags, so there is no sensible default to omit.
+    canonical: &'a str,
+    /// Extra `/static/*.js` to defer-load beyond the theme handler.
+    scripts: &'a [&'a str],
+    /// Starts the fetch of the page's Largest Contentful Paint image during
+    /// HTML parse, rather than waiting for the parser to reach the `<img>`.
+    preload_image: Option<&'a str>,
+    /// Absolute URL of the image link previews should show. Defaults to the
+    /// site icon; pages with a real photograph on them pass one.
+    og_image: Option<String>,
+    /// Keeps this page out of search results while still letting the crawler
+    /// follow its links.
+    noindex: bool,
+    /// Serialised `application/ld+json` for the page's subject.
+    jsonld: Option<String>,
 }
 
-/// `preload_image` starts the fetch of the page's Largest Contentful Paint
-/// image during HTML parse, rather than waiting for the parser to reach the
-/// `<img>` in the body.
-fn head_block_with_preload(
-    title: &str,
-    description: &str,
-    scripts: &[&str],
-    preload_image: Option<&str>,
-) -> Markup {
+impl<'a> Head<'a> {
+    fn new(title: &'a str, description: &'a str, canonical: &'a str) -> Self {
+        Self {
+            title,
+            description,
+            canonical,
+            scripts: &[],
+            preload_image: None,
+            og_image: None,
+            noindex: false,
+            jsonld: None,
+        }
+    }
+
+    fn scripts(mut self, scripts: &'a [&'a str]) -> Self {
+        self.scripts = scripts;
+        self
+    }
+
+    fn preload(mut self, image: Option<&'a str>) -> Self {
+        self.preload_image = image;
+        self
+    }
+
+    fn og_image(mut self, url: String) -> Self {
+        self.og_image = Some(url);
+        self
+    }
+
+    fn noindex(mut self) -> Self {
+        self.noindex = true;
+        self
+    }
+
+    fn jsonld(mut self, json: String) -> Self {
+        self.jsonld = Some(json);
+        self
+    }
+}
+
+/// The one `<head>` every page shares. Previously each of the seven page
+/// functions carried its own copy of this block, so every meta/script change
+/// had to be made seven times.
+fn head_block(h: Head) -> Markup {
+    let canonical = abs_url(h.canonical);
+    let og_image = h.og_image.unwrap_or_else(|| abs_url("/static/icon.png"));
     html! {
         head {
             meta charset="utf-8";
             meta name="viewport" content="width=device-width, initial-scale=1";
-            title { (title) }
-            meta name="description" content=(description);
-            @if let Some(href) = preload_image {
+            title { (h.title) }
+            meta name="description" content=(h.description);
+            // The single URL this content should be indexed under.
+            //
+            // Without it, one page reachable at more than one address — /about
+            // and /about/, or any path with a tracking query stuck on the end —
+            // is filed as a set of duplicates with no stated original, and the
+            // crawler either picks a winner itself or indexes none of them. The
+            // latter is what Search Console reports as "Duplicate without
+            // user-selected canonical". Absolute, because a relative canonical
+            // resolves against the current URL and so cannot correct the
+            // host-level duplicates (www vs bare, http vs https).
+            link rel="canonical" href=(canonical);
+            @if h.noindex {
+                meta name="robots" content="noindex, follow";
+            }
+            @if let Some(href) = h.preload_image {
                 link rel="preload" as="image" href=(href) fetchpriority="high";
             }
             // Matches --surface in each theme so mobile browser chrome blends
             // with the site header instead of flashing white/black.
             meta name="theme-color" content="#f6f7f1" media="(prefers-color-scheme: light)";
             meta name="theme-color" content="#181a17" media="(prefers-color-scheme: dark)";
-            meta property="og:title" content=(title);
-            meta property="og:description" content=(description);
+            meta property="og:title" content=(h.title);
+            meta property="og:description" content=(h.description);
             meta property="og:type" content="website";
+            // Open Graph resolves nothing relatively, so both of these are
+            // absolute. og:url doubles as a canonical hint for the crawlers
+            // that read it and not the link element.
+            meta property="og:url" content=(canonical);
+            meta property="og:site_name" content=(OWNER_NAME);
+            meta property="og:image" content=(og_image);
+            meta name="twitter:card" content="summary_large_image";
+            meta name="twitter:title" content=(h.title);
+            meta name="twitter:description" content=(h.description);
+            meta name="twitter:image" content=(og_image);
             // Carries the `?v=` stamp like the other static assets, so the
             // `immutable` cache entry is replaced when the icon is swapped.
             link rel="icon" type="image/png" href=(asset("/static/icon.png"));
@@ -279,8 +474,14 @@ fn head_block_with_preload(
             (theme_head())
             link rel="stylesheet" href=(asset("/static/style.css"));
             script src=(asset("/static/version.js")) defer {}
-            @for src in scripts {
+            @for src in h.scripts {
                 script src=(asset(src)) defer {}
+            }
+            // PreEscaped because JSON-LD is not HTML: escaping its quotes into
+            // &quot; would make the block unparseable. Safe only because every
+            // value in it comes from a const in this file — see person_jsonld.
+            @if let Some(json) = h.jsonld {
+                script type="application/ld+json" { (PreEscaped(json)) }
             }
         }
     }
@@ -290,7 +491,12 @@ fn site_header(active: Nav) -> Markup {
     html! {
         header.site {
             div.site-left {
-                a.brand href="/" aria-current=[(active == Nav::Home).then_some("page")] { "Portfolio" }
+                // The owner's name, not the word "Portfolio". This is the most
+                // prominent link on every page and the one a crawler weighs
+                // most heavily as the site's name; spending it on a generic
+                // noun told a search engine nothing and told a visitor who had
+                // arrived from a search result even less.
+                a.brand href="/" aria-current=[(active == Nav::Home).then_some("page")] { (OWNER_NAME) }
                 button.theme-toggle type="button" aria-label="Toggle dark mode" {
                     svg.theme-icon.theme-icon-sun viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
                         circle cx="12" cy="12" r="4" fill="currentColor" {}
@@ -348,6 +554,20 @@ fn theme_head() -> Markup {
         }
         script src=(asset("/static/theme.js")) defer {}
     }
+}
+
+/// The single `<h1>` naming what a listing page contains.
+///
+/// These pages opened straight into a breadcrumb and a grid, with no heading at
+/// all: a crawler (and a screen reader tabbing through landmarks) got no
+/// statement of what the page was. Rendered visually hidden because the grids
+/// were laid out without a heading and adding a visible one would move
+/// everything down — the text is the same one a sighted visitor infers from the
+/// breadcrumb, so it is describing the page, not hiding keywords in it.
+///
+/// Not for the vault notes: their markdown already supplies its own headings.
+fn page_heading(text: &str) -> Markup {
+    html! { h1.page-heading { (text) } }
 }
 
 fn crumbs_nav(crumbs: &[Crumb]) -> Markup {
@@ -424,8 +644,12 @@ fn grid_img(img: &ImageEntry, eager: bool) -> Markup {
 /// photo lists: a folder list plus a single square-cropped photo grid. When
 /// `show_favs` is set, a "Favorites only" toggle is shown that filters the grid
 /// down to photos living inside a `favs` folder (used by the per-person view).
+/// `canonical` is the request path this listing lives at — `/browse/2024/rolls`
+/// or `/people/sarah`. It cannot be derived from `title` (two folders in
+/// different years share a name) so the handler passes it in.
 pub fn page(
     title: &str,
+    canonical: &str,
     crumbs: &[Crumb],
     subdirs: &[DirEntry],
     images: &[ImageEntry],
@@ -437,18 +661,29 @@ pub fn page(
     } else {
         &["/static/lightbox.js"]
     };
+    let page_title = format!("{title} — Photographs by {OWNER_NAME}");
+    let description = format!("Film photographs in {title}, shot and scanned by {OWNER_NAME}.");
+    // A listing's first tile is its largest image; showing it in a link preview
+    // beats showing the site icon.
+    let og = images.first().map(|img| abs_url(&img.image_url));
     html! {
         (DOCTYPE)
         html lang="en" {
-            (head_block(
-                &format!("{title} - Portfolio"),
-                &format!("Photographs in {title}, by {OWNER_NAME}."),
-                scripts,
-            ))
+            (head_block({
+                let h = Head::new(&page_title, &description, canonical).scripts(scripts);
+                match og {
+                    Some(url) => h.og_image(url),
+                    None => h,
+                }
+            }))
             body {
                 (site_header(active))
                 main {
                     (crumbs_nav(crumbs))
+                    (page_heading(&match active {
+                        Nav::People => format!("Photographs of {title}"),
+                        _ => format!("Photographs in {title}"),
+                    }))
                     @if show_favs && !images.is_empty() {
                         section.all-controls {
                             button.favs-toggle type="button" aria-pressed="false" {
@@ -487,15 +722,16 @@ pub fn people_index_page(title: &str, crumbs: &[Crumb], people: &[PersonEntry]) 
     html! {
         (DOCTYPE)
         html lang="en" {
-            (head_block(
-                &format!("{title} - Portfolio"),
-                "Photographs indexed by the people in them.",
-                &[],
-            ))
+            (head_block(Head::new(
+                &format!("{title} — Photographs by {OWNER_NAME}"),
+                "Every photograph on this site, indexed by the people in it.",
+                "/people",
+            )))
             body {
                 (site_header(Nav::People))
                 main {
                     (crumbs_nav(crumbs))
+                    (page_heading("People in Paul Borrego's photographs"))
                     @if people.is_empty() {
                         p.empty { "No people tagged yet." }
                     } @else {
@@ -563,15 +799,21 @@ fn nether_sidebar(nav: &[NavNode], view: NetherView) -> Markup {
 
 /// Render a single vault note: portfolio chrome, a folder-tree sidebar, and the
 /// already-rendered note HTML as the main column. `content` is trusted markup.
-pub fn nether_page(title: &str, crumbs: &[Crumb], nav: &[NavNode], content: Markup) -> Markup {
+pub fn nether_page(
+    title: &str,
+    canonical: &str,
+    crumbs: &[Crumb],
+    nav: &[NavNode],
+    content: Markup,
+) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
-            (head_block(
-                &format!("{title} - Nether"),
-                &format!("{title} — a note from {OWNER_NAME}'s vault."),
-                &[],
-            ))
+            (head_block(Head::new(
+                &format!("{title} — Notes by {OWNER_NAME}"),
+                &format!("{title} — a note from {OWNER_NAME}'s vault on software and self-hosting."),
+                canonical,
+            )))
             body {
                 (site_header(Nav::None))
                 main.nether {
@@ -579,6 +821,15 @@ pub fn nether_page(title: &str, crumbs: &[Crumb], nav: &[NavNode], content: Mark
                         (nether_sidebar(nav, NetherView::Notes))
                         article.nether-content {
                             (crumbs_nav(crumbs))
+                            // Most notes open with a `# Heading`, which becomes
+                            // this page's h1; plenty do not, and those went out
+                            // with no heading at all. Supply the note's name only
+                            // in that case — emitting it unconditionally would
+                            // give the ones that do have a heading two competing
+                            // h1s.
+                            @if !content.0.contains("<h1") {
+                                (page_heading(title))
+                            }
                             div.note-body { (content) }
                         }
                     }
@@ -594,10 +845,15 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
     html! {
         (DOCTYPE)
         html lang="en" {
-            (head_block("Graph - Nether", "Link graph of the note vault.", &[]))
+            (head_block(Head::new(
+                &format!("Note Graph — {OWNER_NAME}"),
+                "Link graph of the note vault.",
+                "/nether/graph",
+            )))
             body {
                 (site_header(Nav::None))
                 main.nether {
+                    (page_heading("Note graph"))
                     div.nether-layout {
                         (nether_sidebar(nav, NetherView::Graph))
                         article.nether-content.graph-content {
@@ -628,15 +884,33 @@ pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
         .first()
         .and_then(|g| g.images.first())
         .map(|img| img.thumb_url.as_str());
+    // Full-size rather than the thumbnail: link previews crop their own, and a
+    // 400px tile renders as a blurry card.
+    let og = groups
+        .first()
+        .and_then(|g| g.images.first())
+        .map(|img| abs_url(&img.image_url));
+    // Bound outside the `html!` block: `Head` borrows its title, so a `format!`
+    // temporary built inline would be dropped at the end of the builder chain
+    // while the borrow is still live.
+    let page_title = owner_title("");
     html! {
         (DOCTYPE)
         html lang="en" {
-            (head_block_with_preload(
-                "Portfolio - Portfolio",
-                site_description(),
-                &["/static/lightbox.js", "/static/collapse.js"],
-                lcp,
-            ))
+            (head_block({
+                let h = Head::new(
+                    &page_title,
+                    site_description(),
+                    "/",
+                )
+                .scripts(&["/static/lightbox.js", "/static/collapse.js"])
+                .preload(lcp)
+                .jsonld(person_jsonld());
+                match og {
+                    Some(url) => h.og_image(url),
+                    None => h,
+                }
+            }))
             body {
                 (site_header(Nav::Home))
                 main.portfolio {
@@ -647,6 +921,16 @@ pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
                         h1.hero-name { (OWNER_NAME) }
                         @if !OWNER_TAGLINE.is_empty() {
                             p.hero-tagline { (OWNER_TAGLINE) }
+                        }
+                        @if !HOME_INTRO.is_empty() {
+                            p.hero-intro { (HOME_INTRO) }
+                        }
+                        @if !HOME_LINKS.is_empty() {
+                            nav.hero-links aria-label="Sections of this site" {
+                                @for (href, label) in HOME_LINKS {
+                                    a href=(href) { (label) }
+                                }
+                            }
                         }
                     }
                     @if groups.is_empty() {
@@ -748,9 +1032,21 @@ impl TreeNode {
     }
 }
 
-/// Rebuild the directory hierarchy from the flat group list. Children keep the
-/// order in which `walk_groups` first mentioned them, which is alphabetical
-/// pre-order, so the tree and the page scroll in the same sequence.
+/// Sort key for a top-level `/all` folder: the leading run of digits in its
+/// name, when it parses as a number. Top-level folders are years, so "2024"
+/// keys on 2024 and "2024-summer" keys on 2024 too; a folder with no leading
+/// digits (or a digit run too long to be a year) has no key. Returning `None`
+/// rather than a fallback number keeps such folders out of the numeric order
+/// entirely instead of pretending they are year 0.
+fn leading_year(name: &str) -> Option<u32> {
+    let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Rebuild the directory hierarchy from the flat group list. Below the top
+/// level, children keep the order in which `walk_groups` first mentioned them,
+/// which is alphabetical pre-order, so the tree and the page scroll in the same
+/// sequence. The top level is re-sorted newest year first — see below.
 fn build_tree(groups: &[FolderGroup]) -> TreeNode {
     let mut root = TreeNode::new("All photos", "");
     for g in groups {
@@ -777,6 +1073,22 @@ fn build_tree(groups: &[FolderGroup]) -> TreeNode {
         };
         node.direct = g.images.len();
     }
+    // Years read newest-first: the library is browsed from the most recent work
+    // backwards, so 2026 belongs above 2025. Compare the parsed number rather
+    // than the string — string order only happens to work while every year has
+    // the same digit count, and it would put "999" above "2026". Folders whose
+    // name has no year in it (one-off buckets like "misc") sink below every year
+    // instead of interleaving with the timeline; `sort_by_key` is stable, so
+    // among themselves they keep the alphabetical order `walk_groups` produced.
+    // Only the top level is touched: the plan item is about years, and a year's
+    // subfolders are names, not dates, so alphabetical still reads best there.
+    // This runs before `finish` so the positional DOM ids, the sidebar rows and
+    // the page sections are all minted in this one order.
+    root.children
+        .sort_by_key(|c| match leading_year(&c.name) {
+            Some(year) => (0, std::cmp::Reverse(year)),
+            None => (1, std::cmp::Reverse(0)),
+        });
     root.finish(&mut 0, 0);
     root
 }
@@ -914,13 +1226,17 @@ pub fn all_photos_page(crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup {
         (DOCTYPE)
         html lang="en" {
             (head_block(
-                "All - Portfolio",
-                "Every photograph in the library, grouped by folder.",
-                &["/static/lightbox.js", "/static/collapse.js", "/static/favs.js"],
+                Head::new(
+                    &format!("All Photographs — {OWNER_NAME}"),
+                    &format!("Every photograph by {OWNER_NAME}, grouped by folder — the complete scanned film archive on one page."),
+                    "/all",
+                )
+                .scripts(&["/static/lightbox.js", "/static/collapse.js", "/static/favs.js"]),
             ))
             body {
                 (site_header(Nav::All))
                 main.all-layout {
+                    (page_heading("Every photograph by Paul Borrego"))
                     @if groups.is_empty() {
                         div.all-column {
                             (crumbs_nav(crumbs))
@@ -957,15 +1273,16 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
     html! {
         (DOCTYPE)
         html lang="en" {
-            (head_block(
-                &format!("{title} - Portfolio"),
-                "Client galleries and photo deliveries.",
-                &[],
-            ))
+            (head_block(Head::new(
+                &format!("Photography {title} — {OWNER_NAME}"),
+                &format!("Professional photography by {OWNER_NAME} — client galleries and photo deliveries."),
+                "/work",
+            )))
             body {
                 (site_header(Nav::Work))
                 main {
                     (crumbs_nav(crumbs))
+                    (page_heading("Professional photography work by Paul Borrego"))
                     @if items.is_empty() {
                         p.empty { "No work yet." }
                     } @else {
@@ -1054,10 +1371,17 @@ pub fn work_page(
     html! {
         (DOCTYPE)
         html lang="en" {
+            // noindex: this is a password-gated client delivery. To a crawler
+            // every one of these is the same login stub with a different name —
+            // near-duplicates that dilute the site and offer a searcher nothing.
             (head_block(
-                &format!("{name} - Work"),
-                &format!("Photo delivery for {name}."),
-                &["/static/lightbox.js", "/static/collapse.js"],
+                Head::new(
+                    &format!("{name} — Photo Delivery — {OWNER_NAME}"),
+                    &format!("Private photo delivery for {name}."),
+                    &format!("/work/{name}"),
+                )
+                .scripts(&["/static/lightbox.js", "/static/collapse.js"])
+                .noindex(),
             ))
             body {
                 (site_header(Nav::Work))
@@ -1156,9 +1480,12 @@ pub fn about_page(portrait: Option<(&str, (u32, u32))>) -> Markup {
         (DOCTYPE)
         html lang="en" {
             (head_block(
-                &format!("About - {OWNER_NAME}"),
-                site_description(),
-                &[],
+                Head::new(
+                    &owner_title("About"),
+                    site_description(),
+                    "/about",
+                )
+                .jsonld(person_jsonld()),
             ))
             body {
                 (site_header(Nav::About))

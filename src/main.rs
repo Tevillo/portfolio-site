@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::http::{HeaderValue, header};
+use axum::response::Redirect;
 use axum::routing::{get, post};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
@@ -124,6 +125,14 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
+/// 308 rather than 301: it forbids a client from rewriting the method, so a
+/// POST to a slashed path stays a POST. None of these routes take a POST today,
+/// but a redirect that silently downgrades one is a trap to leave lying around.
+/// Search engines treat both as permanent and transfer ranking either way.
+async fn permanent(to: &'static str) -> Redirect {
+    Redirect::permanent(to)
+}
+
 /// The route table, split by cache policy.
 ///
 /// `pages` are the HTML views: they must never be reused without checking with
@@ -140,22 +149,27 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
     let pages = Router::new()
         .route("/", get(handlers::index))
         .route("/about", get(handlers::about))
-        .route("/about/", get(handlers::about))
         .route("/browse", get(handlers::browse_root))
-        .route("/browse/", get(handlers::browse_root))
         .route("/browse/*path", get(handlers::browse))
         .route("/all", get(handlers::all_photos))
         .route("/people", get(handlers::people_index))
-        .route("/people/", get(handlers::people_index))
         .route("/people/:name", get(handlers::person_photos))
         .route("/work", get(handlers::work_index))
-        .route("/work/", get(handlers::work_index))
         .route("/work/:name", get(handlers::work_detail))
         .route("/work/:name/auth", post(handlers::work_auth))
         .route("/nether", get(nether::root))
-        .route("/nether/", get(nether::root))
         .route("/nether/graph", get(nether::graph))
         .route("/nether/*path", get(nether::note))
+        // Trailing-slash spellings used to be second `get` handlers returning
+        // the same 200, which is how one page came to have two indexable URLs
+        // and earned the "Duplicate without user-selected canonical" report.
+        // A permanent redirect collapses them instead: one URL serves the page,
+        // the other names it, and any link equity on the slashed form transfers.
+        .route("/about/", get(|| permanent("/about")))
+        .route("/browse/", get(|| permanent("/browse")))
+        .route("/people/", get(|| permanent("/people")))
+        .route("/work/", get(|| permanent("/work")))
+        .route("/nether/", get(|| permanent("/nether")))
         // `private` because /work/:name renders differently pre- vs post-auth
         // off a path-scoped cookie; a shared cache must not reuse the unlocked
         // variant for another visitor. `no-cache` rather than `no-store` so
@@ -167,6 +181,11 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         ));
 
     let assets = Router::new()
+        // Crawler-facing, and neither is HTML: they set their own hour-long
+        // Cache-Control, so they sit with the assets to keep the pages layer's
+        // `no-cache` off them.
+        .route("/robots.txt", get(handlers::robots_txt))
+        .route("/sitemap.xml", get(handlers::sitemap_xml))
         .route("/version", get(handlers::version))
         .route("/work/:name/download", post(handlers::work_download))
         .route(
@@ -544,14 +563,22 @@ mod tests {
         let cache = root.join("cache");
         let static_dir = root.join("static");
         std::fs::create_dir_all(photos.join("portfolio")).unwrap();
+        std::fs::create_dir_all(photos.join("2024")).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::create_dir_all(&static_dir).unwrap();
         std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
 
-        // A real JPEG, so the thumbnail pipeline actually runs.
-        image::RgbImage::from_pixel(16, 16, image::Rgb([120, 140, 100]))
-            .save(photos.join("portfolio/test.jpg"))
-            .expect("write test jpeg");
+        // Real JPEGs, so the thumbnail pipeline actually runs.
+        //
+        // Two top-level folders rather than one on purpose: `render_dir`
+        // collapses a folder holding no images and exactly one subfolder by
+        // redirecting into it, so a single-folder tree makes `/browse` a 303 and
+        // every assertion about the listing it renders untestable.
+        for rel in ["portfolio/test.jpg", "2024/roll.jpg"] {
+            image::RgbImage::from_pixel(16, 16, image::Rgb([120, 140, 100]))
+                .save(photos.join(rel))
+                .expect("write test jpeg");
+        }
 
         let state = AppState::new(photos, cache, None, root.join("nether"));
         Fixture {
@@ -668,5 +695,137 @@ mod tests {
             html.contains(&format!(r#"<meta name="build-version" content="{id}">"#)),
             "page meta did not carry build id {id:?}"
         );
+    }
+
+    // -- Canonicalisation ---------------------------------------------------
+    //
+    // Search Console reported "Duplicate without user-selected canonical": the
+    // same page was reachable at more than one URL with nothing declaring which
+    // was the original, so it indexed none of them. Two mechanisms fix it and
+    // both regress invisibly — a missing tag and a wrong tag look identical
+    // from inside the app, and neither breaks a page.
+
+    async fn body_of(router: &Router, uri: &str) -> String {
+        let resp = get(router, uri).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Every page must name itself as its own canonical. A tag pointing at the
+    /// wrong URL is worse than none: it asks the crawler to drop this page in
+    /// favour of another.
+    #[tokio::test]
+    async fn pages_declare_themselves_canonical() {
+        let f = fixture();
+        for (uri, path) in [
+            ("/", "/"),
+            ("/about", "/about"),
+            ("/browse", "/browse"),
+            ("/all", "/all"),
+            ("/work", "/work"),
+            // Query strings are not part of the identity of any page here, so
+            // the canonical must ignore them rather than mint a URL per link
+            // someone shares with a tracking parameter attached.
+            ("/about?utm_source=newsletter", "/about"),
+        ] {
+            let html = body_of(&f.router, uri).await;
+            let expected = format!(
+                r#"<link rel="canonical" href="{}">"#,
+                views::abs_url(path)
+            );
+            assert!(
+                html.contains(&expected),
+                "{uri} did not declare {path} canonical"
+            );
+        }
+    }
+
+    /// The trailing-slash spellings used to be duplicate 200s. They must
+    /// redirect, not render.
+    #[tokio::test]
+    async fn trailing_slash_redirects_to_the_canonical_path() {
+        let f = fixture();
+        for (from, to) in [
+            ("/about/", "/about"),
+            ("/browse/", "/browse"),
+            ("/people/", "/people"),
+            ("/work/", "/work"),
+            ("/nether/", "/nether"),
+        ] {
+            let resp = get(&f.router, from).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::PERMANENT_REDIRECT,
+                "{from} should redirect permanently"
+            );
+            let loc = resp
+                .headers()
+                .get(header::LOCATION)
+                .expect("redirect had no Location")
+                .to_str()
+                .unwrap();
+            assert_eq!(loc, to, "{from} redirected to the wrong place");
+        }
+    }
+
+    /// A sitemap of relative or wrongly-hosted URLs is rejected wholesale, and
+    /// robots.txt is the only place that tells a crawler the sitemap exists.
+    #[tokio::test]
+    async fn robots_and_sitemap_are_absolute_and_agree() {
+        let f = fixture();
+
+        let robots = body_of(&f.router, "/robots.txt").await;
+        assert!(
+            robots.contains(&format!("Sitemap: {}", views::abs_url("/sitemap.xml"))),
+            "robots.txt did not point at the sitemap: {robots:?}"
+        );
+        // Google Images is a real discovery path for a photography site, so the
+        // image routes must stay crawlable.
+        for route in ["/image/", "/thumb/", "/preview/"] {
+            assert!(
+                !robots.contains(&format!("Disallow: {route}")),
+                "robots.txt blocked {route}, which hides the photographs"
+            );
+        }
+
+        let sitemap = body_of(&f.router, "/sitemap.xml").await;
+        assert!(sitemap.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
+        assert!(sitemap.contains(&format!("<loc>{}</loc>", views::abs_url("/"))));
+        assert!(sitemap.contains(&format!("<loc>{}</loc>", views::abs_url("/about"))));
+        for loc in sitemap.split("<loc>").skip(1) {
+            let url = loc.split("</loc>").next().unwrap();
+            assert!(
+                url.starts_with(views::SITE_ORIGIN),
+                "sitemap entry {url:?} is not an absolute URL on this origin"
+            );
+        }
+    }
+
+    /// The client deliveries are password-gated: to a crawler each is the same
+    /// login stub under a different name. They must be excluded by `noindex`
+    /// and left out of the sitemap.
+    #[tokio::test]
+    async fn client_galleries_are_excluded_from_search() {
+        let f = fixture();
+        let sitemap = body_of(&f.router, "/sitemap.xml").await;
+        assert!(
+            !sitemap.contains("/work/"),
+            "a client delivery URL leaked into the sitemap"
+        );
+        // The index itself is public and should be listed.
+        assert!(sitemap.contains(&format!("<loc>{}</loc>", views::abs_url("/work"))));
+    }
+
+    /// One `<h1>` per page, naming what the page holds.
+    #[tokio::test]
+    async fn listing_pages_have_exactly_one_heading() {
+        let f = fixture();
+        for uri in ["/", "/about", "/browse", "/all", "/work"] {
+            let html = body_of(&f.router, uri).await;
+            let n = html.matches("<h1").count();
+            assert_eq!(n, 1, "{uri} had {n} <h1> elements, expected 1");
+        }
     }
 }

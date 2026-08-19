@@ -223,12 +223,31 @@ async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
     let crumbs = build_crumbs(rel_no_ext, is_home);
     let title = rel_no_ext.rsplit('/').next().unwrap_or(rel_no_ext);
 
-    views::nether_page(title, &crumbs, &nav, PreEscaped(body)).into_response()
+    // The vault home is reachable as both /nether and /nether/<home note>;
+    // both spellings name /nether as the original so only one gets indexed.
+    let canonical = if is_home {
+        "/nether".to_string()
+    } else {
+        format!("/nether/{}", encode_path(rel_no_ext))
+    };
+    views::nether_page(title, &canonical, &crumbs, &nav, PreEscaped(body)).into_response()
 }
 
 /// Walk the vault and return every note's path relative to the root, including
 /// the `.md` suffix, using `/` separators. Dotfiles/dirs (`.obsidian`,
 /// `.trash`, `.git`) are skipped.
+/// Canonical `/nether/...` paths for every note in the vault, for the sitemap.
+/// Lives here rather than in `handlers` so the vault's layout rules — which
+/// files count as notes, how a path becomes a URL — stay in one module.
+pub(crate) async fn sitemap_paths(root: &Path) -> Vec<String> {
+    let mut out = vec!["/nether".to_string(), "/nether/graph".to_string()];
+    for rel in collect_notes(root).await {
+        let no_ext = rel.strip_suffix(".md").unwrap_or(&rel);
+        out.push(format!("/nether/{}", encode_path(no_ext)));
+    }
+    out
+}
+
 async fn collect_notes(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![(root.to_path_buf(), String::new())];

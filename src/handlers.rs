@@ -144,6 +144,131 @@ pub async fn about(State(state): State<AppState>) -> Response {
 /// focus. `no-store` so neither the browser nor any intermediary can answer
 /// from cache — a stale answer here would either mask a deploy or, worse,
 /// disagree with the page's own meta tag forever and drive a reload loop.
+/// `GET /robots.txt`. Two jobs: point crawlers at the sitemap, and keep them
+/// out of the routes that transfer bytes rather than serve pages.
+///
+/// Deliberately leaves `/image/`, `/thumb/` and `/preview/` crawlable. Blocking
+/// them is the reflex, but Google Images is a real discovery path for a
+/// photographer and those routes are what it would index; only `/download/`
+/// (full-resolution originals and RAW siblings, served as attachments) is worth
+/// refusing.
+///
+/// The password-gated `/work/<job>` pages are *not* disallowed here on purpose.
+/// A `Disallow` stops the crawl but not the indexing — a disallowed URL that is
+/// linked can still be listed, just with no description, and the crawler can no
+/// longer read the `noindex` that would have excluded it properly. Letting it
+/// fetch the page and honour the tag is what actually keeps those out.
+pub async fn robots_txt() -> Response {
+    let body = format!(
+        "User-agent: *\n\
+         Allow: /\n\
+         \n\
+         # Byte transfers, not pages: originals, RAW siblings and job zips.\n\
+         Disallow: /download/\n\
+         Disallow: /work/*/download\n\
+         Disallow: /work/*/file/\n\
+         # Build-id probe behind the client-side reload check.\n\
+         Disallow: /version\n\
+         \n\
+         Sitemap: {}\n",
+        views::abs_url("/sitemap.xml"),
+    );
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// `GET /sitemap.xml`. Every indexable page, so a crawler does not have to
+/// discover the archive by following links through the folder tree — which is
+/// how deep galleries end up uncrawled.
+///
+/// Lists only canonical URLs, and only pages that render for an anonymous
+/// visitor: the `/work/<job>` deliveries are `noindex` (see
+/// [`views::work_page`]) and are left out, as are the asset routes.
+///
+/// `walk_groups` is the same tree walk `/all` runs per request, and it only
+/// reads directory entries — no image decoding — so reusing it here costs a
+/// crawler-frequency directory scan rather than justifying a second walker.
+pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
+    let mut paths: Vec<String> = vec![
+        "/".to_string(),
+        "/about".to_string(),
+        "/all".to_string(),
+        "/browse".to_string(),
+        "/people".to_string(),
+        "/work".to_string(),
+    ];
+
+    // Every folder that directly holds photos, i.e. every /browse page with
+    // something on it. Intermediate folders come along as each group's parents
+    // are themselves groups only when they hold photos too; listing the leaves
+    // is what matters, since the crawler reaches the rest from /browse.
+    if let Ok(groups) = walk_groups(state.photos_root(), "", "thumb").await {
+        paths.extend(
+            groups
+                .iter()
+                .map(|g| g.browse_url.clone())
+                .filter(|u| u != "/browse"),
+        );
+    }
+
+    if let Some(db) = state.db_path() {
+        match people::list_people(db.clone()).await {
+            Ok(people) => paths.extend(
+                people
+                    .iter()
+                    .map(|p| format!("/people/{}", encode_path(&p.name))),
+            ),
+            Err(e) => warn!(error = ?e, "listing people for sitemap failed"),
+        }
+    }
+
+    paths.extend(crate::nether::sitemap_paths(state.nether_root()).await);
+
+    let mut xml = String::with_capacity(paths.len() * 80 + 200);
+    xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    xml.push('\n');
+    xml.push_str(r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">"#);
+    xml.push('\n');
+    for path in &paths {
+        // Every path here was built by `encode_path`, which percent-encodes
+        // everything outside `[A-Za-z0-9-_.~/]` — so none of the five XML
+        // predefined entities can appear and the escape below is belt-and-braces
+        // against a future caller that forgets.
+        let _ = writeln!(xml, "  <url><loc>{}</loc></url>", xml_escape(&views::abs_url(path)));
+    }
+    xml.push_str("</urlset>\n");
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        xml,
+    )
+        .into_response()
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub async fn version() -> Response {
     Response::builder()
         .status(StatusCode::OK)
@@ -270,7 +395,17 @@ async fn render_dir(
             .unwrap_or("")
             .to_string(),
     };
-    Ok(views::page(&title, &crumbs, &subdirs, &images, false, views::Nav::Browse).into_response())
+    // Matches the URL the crawler followed to get here: same encoding as the
+    // subdirectory links, and no trailing slash, which is the spelling the
+    // trailing-slash redirects in main.rs funnel everything toward.
+    let canonical = match kind {
+        PageKind::BrowseRoot => "/browse".to_string(),
+        PageKind::BrowseSub => format!("/browse/{}", encode_path(rel.trim_end_matches('/'))),
+    };
+    Ok(
+        views::page(&title, &canonical, &crumbs, &subdirs, &images, false, views::Nav::Browse)
+            .into_response(),
+    )
 }
 
 /// Read the JPEGs directly inside `root`/`rel` (non-recursive) as gallery
@@ -456,7 +591,8 @@ pub async fn person_photos(
             url: None,
         },
     ];
-    views::page(&name, &crumbs, &[], &images, true, views::Nav::People).into_response()
+    let canonical = format!("/people/{}", encode_path(&name));
+    views::page(&name, &canonical, &crumbs, &[], &images, true, views::Nav::People).into_response()
 }
 
 fn people_unavailable_response() -> Response {
