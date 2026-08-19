@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use tokio_util::io::ReaderStream;
@@ -14,6 +14,8 @@ use crate::work::{self, DownloadKind, Scope};
 use crate::paths::{PathError, safe_resolve};
 use crate::people;
 use crate::portfolio;
+use crate::notify;
+use crate::recent;
 use crate::state::AppState;
 use crate::thumbs::{self, ThumbKind};
 use crate::views::{
@@ -111,6 +113,8 @@ async fn portfolio_groups(state: &AppState) -> Vec<FolderGroup> {
             // browse to; the view renders a plain heading when this is empty.
             browse_url: String::new(),
             images,
+            // Tag-driven sections have no folder, so no favs/ folder to fold in.
+            favs_count: 0,
         });
     }
 
@@ -200,6 +204,7 @@ pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
         "/about".to_string(),
         "/all".to_string(),
         "/browse".to_string(),
+        "/recent".to_string(),
         "/people".to_string(),
         "/work".to_string(),
     ];
@@ -458,7 +463,7 @@ async fn read_dir_images(root: &Path, rel: &str) -> Vec<ImageEntry> {
         .collect()
 }
 
-async fn subtree_has_jpeg(root: &Path) -> bool {
+pub(crate) async fn subtree_has_jpeg(root: &Path) -> bool {
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let mut read = match tokio::fs::read_dir(&dir).await {
@@ -622,6 +627,322 @@ pub async fn all_photos(State(state): State<AppState>) -> Response {
     }
 }
 
+// ---------------------------------------------------------------------------
+// /notify — subscribing to photos of a person
+// ---------------------------------------------------------------------------
+
+/// At most this many submissions per client address per hour.
+const NOTIFY_RATE_MAX: u32 = 5;
+const NOTIFY_RATE_WINDOW_SECS: u64 = 60 * 60;
+
+/// Hard ceiling on confirmed subscriptions. A personal photography site does
+/// not have thousands of subjects, so a number far above the plausible audience
+/// still bounds the damage if the honeypot and the rate limit are both beaten.
+const NOTIFY_MAX_SUBSCRIBERS: usize = 500;
+
+/// Longest accepted contact handle, matching the field's `maxlength`. Checked
+/// again here because `maxlength` is advice to a browser, not a constraint on a
+/// request.
+const NOTIFY_MAX_HANDLE_LEN: usize = 254;
+
+async fn person_entries(state: &AppState) -> Result<Vec<PersonEntry>, Response> {
+    let db = match state.db_path() {
+        Some(p) => p.clone(),
+        None => return Err(people_unavailable_response()),
+    };
+    match people::list_people(db).await {
+        Ok(list) => Ok(list
+            .into_iter()
+            .map(|p| PersonEntry {
+                url: format!("/people/{}", encode_path(&p.name)),
+                name: p.name,
+                photo_count: p.photo_count,
+            })
+            .collect()),
+        Err(e) => {
+            warn!(error = ?e, "listing people for /notify failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+    }
+}
+
+/// `GET /notify`. `?person=Name` pre-ticks a row, so the link from a person page
+/// lands on a form that is already half filled in.
+pub async fn notify_form(
+    State(state): State<AppState>,
+    AxumQuery(query): AxumQuery<HashMap<String, String>>,
+) -> Response {
+    let people_list = match person_entries(&state).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let selected: Vec<String> = query
+        .get("person")
+        .filter(|name| people_list.iter().any(|p| &p.name == *name))
+        .cloned()
+        .into_iter()
+        .collect();
+    views::notify_page(&people_list, &selected, false, None).into_response()
+}
+
+/// The address to rate-limit against.
+///
+/// The server binds `127.0.0.1`, so every real request arrives through the
+/// reverse proxy and the peer address is always the proxy — `X-Forwarded-For`
+/// is the only place the client is named. Trusting a client-settable header is
+/// normally wrong; here the header cannot reach the process except through the
+/// proxy that rewrites it. Its first entry is the original client.
+///
+/// With no header at all (a direct request in development) everything shares one
+/// bucket, which throttles too much rather than too little.
+fn client_key(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `POST /notify`. Stages the signup and sends exactly one confirmation message;
+/// nothing is added to the subscriber log until that link is followed.
+pub async fn notify_subscribe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let people_list = match person_entries(&state).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let form = parse_urlencoded_multi(&body);
+    let one = |key: &str| -> String {
+        form.get(key)
+            .and_then(|v| v.last())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let selected: Vec<String> = form.get("person").cloned().unwrap_or_default();
+    let all_rolls = !one("all_rolls").is_empty();
+    let render = |msg: &str, is_error: bool, status: StatusCode| -> Response {
+        (
+            status,
+            views::notify_page(&people_list, &selected, all_rolls, Some((msg, is_error))),
+        )
+            .into_response()
+    };
+
+    // The honeypot is invisible to people, so a filled one is a bot. Answering
+    // with the same success page it would have got tells it nothing about why
+    // nothing happened.
+    if !one("website").is_empty() {
+        return render(views::NOTIFY_SENT_MSG, false, StatusCode::OK);
+    }
+
+    if !state.notify_limiter().allow(
+        &client_key(&headers),
+        NOTIFY_RATE_MAX,
+        NOTIFY_RATE_WINDOW_SECS,
+    ) {
+        return render(
+            views::NOTIFY_ERR_RATE,
+            true,
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+    }
+
+    let Some(channel) = notify::Channel::parse(&one("channel")) else {
+        return render(views::NOTIFY_ERR_CHANNEL, true, StatusCode::BAD_REQUEST);
+    };
+
+    // Both handle fields are submitted when JavaScript is off; take the one the
+    // chosen channel needs and ignore the other.
+    let handle = match channel {
+        notify::Channel::Email => one("handle_email"),
+        notify::Channel::Discord => one("handle_discord"),
+    };
+    if handle.len() > NOTIFY_MAX_HANDLE_LEN || !channel.handle_looks_valid(&handle) {
+        return render(
+            match channel {
+                notify::Channel::Email => views::NOTIFY_ERR_EMAIL,
+                notify::Channel::Discord => views::NOTIFY_ERR_DISCORD,
+            },
+            true,
+            StatusCode::BAD_REQUEST,
+        );
+    }
+
+    // Following every roll is a subscription in its own right, so it is the one
+    // case where naming nobody is still a valid choice.
+    if selected.is_empty() && !all_rolls {
+        return render(views::NOTIFY_ERR_NO_PEOPLE, true, StatusCode::BAD_REQUEST);
+    }
+    // Every name has to be one this site actually publishes. The form only ever
+    // offers real tags, so a name that is not in the list came from a
+    // hand-built request.
+    if selected
+        .iter()
+        .any(|name| !people_list.iter().any(|p| &p.name == name))
+    {
+        return render(views::NOTIFY_ERR_UNKNOWN_PERSON, true, StatusCode::BAD_REQUEST);
+    }
+
+    let data_root = state.data_root();
+    let sender = match notify::Sender::load(data_root).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = ?e, "building notify sender failed");
+            return render(views::NOTIFY_UNAVAILABLE_MSG, true, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    // Refused rather than stored: a subscription on a channel that cannot even
+    // deliver its own confirmation would sit in `pending.log` forever, and the
+    // person would be left believing they had signed up.
+    if !sender.configured(channel) {
+        return render(views::NOTIFY_UNAVAILABLE_MSG, true, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    if notify::current_subscriptions(data_root).await.len() >= NOTIFY_MAX_SUBSCRIBERS {
+        return render(views::NOTIFY_UNAVAILABLE_MSG, true, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let token = match notify::stage_pending(data_root, channel, &handle, &selected, all_rolls).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = ?e, "staging a notify signup failed");
+            return render(views::NOTIFY_UNAVAILABLE_MSG, true, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let confirm_url = views::abs_url(&format!("/notify/confirm?t={token}"));
+    let (subject, message) = notify::compose_confirmation(&selected, all_rolls, &confirm_url);
+    if let Err(e) = sender.send(channel, &handle, &subject, &message).await {
+        // The pending row stays. It expires on its own, and re-submitting the
+        // form issues a fresh token, so a transient failure here costs the
+        // person one retry rather than locking them out.
+        warn!(error = ?e, channel = channel.as_str(), "sending a confirmation failed");
+        return render(views::NOTIFY_UNDELIVERABLE_MSG, true, StatusCode::BAD_GATEWAY);
+    }
+    render(views::NOTIFY_SENT_MSG, false, StatusCode::OK)
+}
+
+/// `GET /notify/confirm?t=…`. Following the link is what actually subscribes.
+pub async fn notify_confirm(
+    State(state): State<AppState>,
+    AxumQuery(query): AxumQuery<HashMap<String, String>>,
+) -> Response {
+    let people_list = match person_entries(&state).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let token = query.get("t").map(String::as_str).unwrap_or_default();
+    match notify::confirm(state.data_root(), token).await {
+        // Both of these say the same thing, because from the subscriber's side
+        // they are the same thing: the link worked, and this is what they now
+        // get. Re-rendered with their choices ticked, so the page doubles as
+        // the place to change them.
+        Ok(notify::Confirmation::Confirmed(sub))
+        | Ok(notify::Confirmation::AlreadyConfirmed(sub)) => views::notify_page(
+            &people_list,
+            &sub.people,
+            sub.all_rolls,
+            Some((&notify::subscription_sentence(&sub.people, sub.all_rolls), false)),
+        )
+        .into_response(),
+        Ok(notify::Confirmation::Unknown) => (
+            StatusCode::NOT_FOUND,
+            views::notify_page(&people_list, &[], false, Some((views::NOTIFY_BAD_LINK_MSG, true))),
+        )
+            .into_response(),
+        Err(e) => {
+            warn!(error = ?e, "confirming a subscription failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::notify_page(
+                    &people_list,
+                    &[],
+                    false,
+                    Some((views::NOTIFY_UNAVAILABLE_MSG, true)),
+                ),
+            )
+                .into_response()
+        }
+    }
+}
+
+
+/// The parent folder of a `favs/` directory, or `None` for anything else.
+///
+/// Case-insensitive on the last segment, matching how `render_dir` and
+/// `walk_groups` already recognise the folder.
+fn favs_parent(path: &str) -> Option<&str> {
+    let (parent, last) = path.rsplit_once('/')?;
+    last.eq_ignore_ascii_case("favs").then_some(parent)
+}
+
+/// Fold each `favs/` group into the roll it belongs to, favorites first.
+///
+/// `walk_groups` emits one group per directory holding photos, so a roll with a
+/// `favs/` subfolder arrives as two sections — which is right for `/all`, where
+/// the point is to mirror the folder tree, and wrong for `/recent`, where the
+/// point is one section per roll. Merging keeps the favorites at the front and
+/// records how many there are, so `image_grid` can draw the line between them
+/// and the rest instead of splitting the grid in two.
+///
+/// One grid rather than two matters beyond looks: `lightbox.js` builds its
+/// next/previous ring per `ul.grid`, so a second list would strand a viewer at
+/// the last favorite instead of carrying them on into the roll.
+///
+/// A `favs/` folder whose parent holds no photos of its own has no group to
+/// merge into and is left standing alone — there is no roll for it to lead.
+fn fold_favs_into_rolls(groups: Vec<FolderGroup>) -> Vec<FolderGroup> {
+    let mut out: Vec<FolderGroup> = Vec::with_capacity(groups.len());
+    for group in groups {
+        // The walk is a pre-order DFS, so a folder always precedes its
+        // children and the parent is already in `out` by the time its `favs/`
+        // is reached.
+        let parent = favs_parent(&group.path).map(str::to_string);
+        match parent.and_then(|p| out.iter_mut().find(|g| g.path == p)) {
+            Some(roll) => {
+                let mut merged = group.images;
+                roll.favs_count += merged.len();
+                merged.append(&mut roll.images);
+                roll.images = merged;
+            }
+            None => out.push(group),
+        }
+    }
+    out
+}
+
+/// `/recent` — only the folders named in `photos/.recent`, in that file's order.
+///
+/// One `walk_groups` per declared folder rather than one walk of the whole tree
+/// with a filter: the set is a handful of folders, and walking each directly
+/// costs nothing for the folders that are not in it.
+///
+/// `"preview"` rather than `"thumb"`: these sections render as natural-ratio
+/// masonry, whose tiles carry no CSS `aspect-ratio` and so need `ImageEntry::dims`
+/// to reserve their space — and `walk_groups` only fills those in for the preview
+/// rendition. Passing `"thumb"` here would collapse the whole grid into the
+/// viewport and defeat `loading="lazy"`.
+pub async fn recent_photos(State(state): State<AppState>) -> Response {
+    let folders = recent::load(state.photos_root()).await;
+    let mut groups: Vec<FolderGroup> = Vec::new();
+    for folder in &folders {
+        match walk_groups(state.photos_root(), folder, "preview").await {
+            Ok(mut g) => groups.append(&mut g),
+            // One unreadable folder drops out of the page instead of 500ing the
+            // whole drop, matching how `recent::load` treats an entry that no
+            // longer resolves.
+            Err(status) => {
+                warn!(folder = %folder, ?status, "walking a recent folder failed; skipping")
+            }
+        }
+    }
+    views::recent_page(&fold_favs_into_rolls(groups)).into_response()
+}
+
 /// Pre-order DFS from `root`/`start_rel`, emitting one `FolderGroup` per
 /// directory that directly contains JPEGs. `start_rel` is relative to `root`
 /// (empty = the whole photos tree, as `/all` uses); paths and URLs stay
@@ -720,6 +1041,7 @@ async fn walk_groups(
                 path: rel.clone(),
                 browse_url,
                 images,
+                favs_count: 0,
             });
         }
 
@@ -1590,8 +1912,25 @@ fn sanitize_attachment(s: &str) -> String {
 
 /// Minimal `application/x-www-form-urlencoded` parser — keeps the dep tree
 /// lean (no serde just for two fields). Last value wins on duplicates.
+/// Single-valued view of a form body: the last occurrence of a repeated key
+/// wins. Fine for every form that has one field per name.
 fn parse_urlencoded(body: &[u8]) -> HashMap<String, String> {
-    let mut out = HashMap::new();
+    parse_urlencoded_multi(body)
+        .into_iter()
+        .filter_map(|(k, mut v)| v.pop().map(|last| (k, last)))
+        .collect()
+}
+
+/// Every value for every key, in submission order.
+///
+/// A group of checkboxes sharing one name is the one shape `parse_urlencoded`
+/// cannot represent: `person=Alice&person=Bob` collapses to `Bob` in a
+/// `HashMap<String, String>`, which on `/notify` would silently discard all but
+/// the last person a subscriber ticked. Both functions decode the same way —
+/// the single-valued one is a fold over this one — so there is one decoder to
+/// get right.
+fn parse_urlencoded_multi(body: &[u8]) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
     let s = match std::str::from_utf8(body) {
         Ok(s) => s,
         Err(_) => return out,
@@ -1604,7 +1943,7 @@ fn parse_urlencoded(body: &[u8]) -> HashMap<String, String> {
             Some(t) => t,
             None => (pair, ""),
         };
-        out.insert(url_decode(k), url_decode(v));
+        out.entry(url_decode(k)).or_default().push(url_decode(v));
     }
     out
 }
@@ -1649,3 +1988,111 @@ fn hex_nibble(c: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(path: &str, names: &[&str]) -> FolderGroup {
+        FolderGroup {
+            label: path.to_string(),
+            path: path.to_string(),
+            browse_url: format!("/browse/{path}"),
+            images: names
+                .iter()
+                .map(|n| ImageEntry {
+                    name: (*n).to_string(),
+                    thumb_url: String::new(),
+                    image_url: String::new(),
+                    jpg_download_url: String::new(),
+                    raw_download_url: None,
+                    dims: None,
+                })
+                .collect(),
+            favs_count: 0,
+        }
+    }
+
+    #[test]
+    fn favs_parent_matches_only_a_trailing_favs_segment() {
+        assert_eq!(favs_parent("2026/roll/favs"), Some("2026/roll"));
+        assert_eq!(favs_parent("2026/roll/FAVS"), Some("2026/roll"));
+        assert_eq!(favs_parent("2026/roll"), None);
+        assert_eq!(favs_parent("2026/favs-of-mine"), None);
+        assert_eq!(favs_parent("favs"), None);
+    }
+
+    /// On `/recent` a roll is one section: the favorites lead it, the rest
+    /// follow, and `favs_count` marks the boundary the grid draws its line at.
+    #[test]
+    fn favs_fold_into_the_front_of_their_roll() {
+        let folded = fold_favs_into_rolls(vec![
+            group("2026/roll", &["b.jpg", "c.jpg"]),
+            group("2026/roll/favs", &["a.jpg"]),
+            group("2026/other", &["d.jpg"]),
+        ]);
+        assert_eq!(folded.len(), 3 - 1, "the favs group should not survive alone");
+        let roll = &folded[0];
+        assert_eq!(roll.path, "2026/roll");
+        assert_eq!(roll.favs_count, 1);
+        let names: Vec<&str> = roll.images.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["a.jpg", "b.jpg", "c.jpg"]);
+        assert_eq!(folded[1].path, "2026/other");
+        assert_eq!(folded[1].favs_count, 0);
+    }
+
+    /// A favs folder whose parent holds no photos of its own has no roll to
+    /// lead, so it stays a section rather than vanishing.
+    #[test]
+    fn an_orphan_favs_group_is_kept() {
+        let folded = fold_favs_into_rolls(vec![group("2026/roll/favs", &["a.jpg"])]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].path, "2026/roll/favs");
+        assert_eq!(folded[0].favs_count, 0, "nothing was folded, so no line");
+    }
+
+    /// The regression this function exists to prevent: a group of checkboxes
+    /// sharing one name is the whole people-picker on `/notify`, and folding it
+    /// into a `HashMap<String, String>` would keep only the last person ticked.
+    #[test]
+    fn repeated_form_keys_keep_every_value() {
+        let multi = parse_urlencoded_multi(b"person=Alice&person=Bob&person=Carol&channel=email");
+        assert_eq!(
+            multi.get("person").unwrap(),
+            &vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Carol".to_string()
+            ]
+        );
+        assert_eq!(multi.get("channel").unwrap(), &vec!["email".to_string()]);
+    }
+
+    /// The single-valued view is a fold over the multi one, so the existing
+    /// callers keep the last-wins behaviour they were written against.
+    #[test]
+    fn the_single_valued_view_still_takes_the_last() {
+        let single = parse_urlencoded(b"password=first&password=second");
+        assert_eq!(single.get("password").unwrap(), "second");
+    }
+
+    /// Names arrive percent-encoded; a person tag with a space in it has to
+    /// survive the round trip or the server rejects a name the form offered.
+    #[test]
+    fn form_values_are_percent_decoded() {
+        let multi = parse_urlencoded_multi(b"person=Parker%20Brown&person=Al+Green");
+        assert_eq!(
+            multi.get("person").unwrap(),
+            &vec!["Parker Brown".to_string(), "Al Green".to_string()]
+        );
+    }
+
+    /// Behind the proxy the client is only named in the header; its first entry
+    /// is the original client, and the rest are hops.
+    #[test]
+    fn the_rate_limit_key_is_the_original_client() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.7, 10.0.0.1".parse().unwrap());
+        assert_eq!(client_key(&headers), "203.0.113.7");
+        assert_eq!(client_key(&HeaderMap::new()), "unknown");
+    }
+}

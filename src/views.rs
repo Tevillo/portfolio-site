@@ -41,6 +41,12 @@ pub struct FolderGroup {
     pub path: String,
     pub browse_url: String,
     pub images: Vec<ImageEntry>,
+    /// How many of the *leading* images in `images` came from a `favs/`
+    /// subfolder. `/recent` folds favorites into the front of the roll they
+    /// belong to rather than showing them as a separate section, and this is
+    /// where the rule ends and the rest of the roll begins — the grid draws a
+    /// line there. Zero means no favorites were folded in and no line is drawn.
+    pub favs_count: usize,
 }
 
 pub struct PersonEntry {
@@ -102,6 +108,7 @@ pub enum NavNode {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Nav {
     Home,
+    Recent,
     Browse,
     All,
     People,
@@ -180,11 +187,7 @@ shooting, developing, and scanning. My film photos, sorted by year and roll.";
 ///
 /// The three entries are the three stages the home page claims: shooting,
 /// developing, scanning.
-const KNOWS_ABOUT: &[&str] = &[
-    "Film photography",
-    "Film developing",
-    "Film scanning",
-];
+const KNOWS_ABOUT: &[&str] = &["Film photography", "Film developing", "Film scanning"];
 
 /// About page body. Each entry is one paragraph, rendered in order. Empty
 /// means the About page shows just the name, portrait and links — add your own
@@ -199,16 +202,121 @@ const KNOWS_ABOUT: &[&str] = &[
 pub const ABOUT_PARAGRAPHS: &[&str] = &[
     "Self hosting enjoyer and lover of film photography. 
     This website contains all of my photos that I have taken and scanned.",
-    "If you want to find yourself or a friend check out the \"People\" tab. 
+    "If you want to find yourself or a friend check out the \"People\" tab, 
+    and you can sign up there to get a message when new photos of you go up.
     Any professional work I have done is under the \"Work\" Tab.
-    And if you just want to look around \"Browse\" is a folder like system
-    sorted by year and then content and \"All\" is all of my folders that can scroll",
+    And if you just want to look around \"Recent\" is the latest rolls I have
+    scanned and \"All\" is all of my folders that can scroll",
 ];
+
+// Status and error messages on `/notify`.
+//
+// Functional UI text rather than prose — a form that reports nothing back is
+// broken, so unlike [`NOTIFY_INTRO`] these cannot be empty — but they are still
+// words a visitor reads, so they live here with the rest of the copy and are the
+// owner's to reword.
+pub const NOTIFY_SENT_MSG: &str = "Check your messages for a link to confirm.";
+pub const NOTIFY_CONFIRM_SUBJECT: &str = "Confirm your photo notifications";
+/// Label on the "every new roll" toggle at the top of the people list.
+pub const NOTIFY_ALL_ROLLS_LABEL: &str = "Any new set of photos";
+
+// The notification itself, in the owner's format:
+//
+//     Photos of Guin and Eliana have been uploaded!
+//     Look at
+//       https://paulborrego.com/people/Guin
+//       https://paulborrego.com/people/Eliana
+//     or check out the whole roll at
+//       https://paulborrego.com/browse/2026/utopia
+//
+// The URLs are generated; these three lines are the words around them.
+
+/// Opening line, where `{}` is replaced by the names. Move the `{}` and the
+/// names move with it; a rewrite that drops it would silently send a message
+/// naming nobody, so a test asserts it is still there.
+pub const NOTIFY_DIGEST_PEOPLE: &str = "Photos of {} have been uploaded!";
+
+/// Introduces the per-person links.
+pub const NOTIFY_DIGEST_LOOK_AT: &str = "Look at";
+
+/// Introduces the folder links, after the per-person ones.
+pub const NOTIFY_DIGEST_WHOLE_ROLL: &str = "or check out the whole roll at";
+
+/// Opening line of a digest sent to an all-rolls subscriber when none of their
+/// people are in the new photos.
+///
+/// The owner's format ("Photos of [people] have been uploaded!") has nobody to
+/// name in that case, so this stands in for it. Mine, not the owner's — worth
+/// rewording.
+pub const NOTIFY_DIGEST_ROLLS_ONLY: &str = "New photos have been uploaded!";
+
+/// Text of the link to `/notify` from the People pages.
+pub const NOTIFY_LINK_LABEL: &str = "Get notified about new photos";
+// What someone reads once the confirmation link has been followed. Assembled
+// from these three pieces, because which of them applies depends on what they
+// ticked: the people half, the all-rolls half, or both.
+//
+// The wording is the owner's, from the request that added the all-rolls option.
+pub const NOTIFY_CONFIRMED_PEOPLE: &str =
+    "You have subscribed to receive notifications for photos of these people: ";
+/// Follows the people sentence as a sentence of its own. Appending it to the
+/// list instead produced "Guin, Eliana, and you will receive notifications…",
+/// which reads as a third item in the list rather than a new clause.
+pub const NOTIFY_CONFIRMED_ALSO_ROLLS: &str =
+    "You will also receive notifications on any new sets of photos I post.";
+/// Stands alone when someone subscribed to every roll and no one person, so it
+/// opens the sentence instead of continuing one.
+pub const NOTIFY_CONFIRMED_ROLLS_ONLY: &str =
+    "You will receive notifications on any new sets of photos I post.";
+pub const NOTIFY_BAD_LINK_MSG: &str = "That confirmation link is not valid, or has expired.";
+pub const NOTIFY_UNAVAILABLE_MSG: &str = "Notifications are not available right now.";
+pub const NOTIFY_UNDELIVERABLE_MSG: &str = "Could not send to that address.";
+pub const NOTIFY_ERR_CHANNEL: &str = "Choose email or Discord.";
+pub const NOTIFY_ERR_EMAIL: &str = "That does not look like an email address.";
+pub const NOTIFY_ERR_DISCORD: &str = "A Discord user ID is 17 to 20 digits.";
+pub const NOTIFY_ERR_NO_PEOPLE: &str = "Pick at least one person, or choose every new roll.";
+pub const NOTIFY_ERR_UNKNOWN_PERSON: &str = "Unknown person.";
+pub const NOTIFY_ERR_RATE: &str = "Too many attempts. Try again later.";
+
+/// Paragraph at the top of `/notify`, explaining what subscribing does.
+///
+/// **Empty, and waiting for the owner's words.** The page works without it —
+/// the guard below renders nothing — but a stranger arriving at a form that
+/// asks for their email address deserves a sentence about who is asking and
+/// what they will get. It wants to say: whose site this is, that a message
+/// arrives only when a new photo carrying one of the ticked names is posted,
+/// and that they can stop at any time.
+pub const NOTIFY_INTRO: &str = "";
+
+/// Note under the Discord field on `/notify`.
+///
+/// Written by the assistant on request, unlike the rest of this block — it is a
+/// procedure rather than prose, and the form is unusable without it. Reword it
+/// freely; it is the one hint standing between a non-technical visitor and an
+/// 18-digit number they have never had to look for.
+///
+/// Names the bot, so it needs an edit if the bot is ever renamed.
+pub const NOTIFY_DISCORD_HINT: &str = "Not the @name — Discord hides this one. \
+Open Discord settings and search \"developer\", turn on Developer Mode, then \
+right click your own name and pick \"Copy User ID\". You also need to share a \
+server with Photo-Bot so it can message you.";
+
+/// Opening line of the confirmation message, above the list of names and the
+/// confirmation link.
+///
+/// **Empty, and waiting for the owner's words.** The message is still correct
+/// while it is empty — the names and the link are generated — but this is the
+/// first thing a subscriber ever receives from the site, and the one that has
+/// to make an unexpected message look legitimate rather than like spam.
+pub const NOTIFY_CONFIRM_INTRO: &str = "";
 
 /// Links rendered as a list at the bottom of the About page. Add or remove
 /// rows freely; an empty list simply hides the section.
 pub const ABOUT_LINKS: &[(&str, &str)] = &[
     ("Email", "mailto:borregopaulj@gmail.com"),
+    // Shares its label with the People pages' link, so rewording
+    // `NOTIFY_LINK_LABEL` moves all three at once.
+    (NOTIFY_LINK_LABEL, "/notify"),
     ("Notes", "/nether"),
 ];
 
@@ -516,12 +624,17 @@ fn site_header(active: Nav) -> Markup {
                     }
                 }
             }
+            // Alphabetical by label, not by importance: with five one-word
+            // tabs there is no reading order to communicate, and a rule a
+            // visitor can infer beats one only the author knows. Adding a tab
+            // later means slotting it in by name rather than re-deciding the
+            // whole order.
             nav.topnav {
-                a href="/browse" aria-current=[(active == Nav::Browse).then_some("page")] { "Browse" }
+                a href="/about" aria-current=[(active == Nav::About).then_some("page")] { "About" }
                 a href="/all" aria-current=[(active == Nav::All).then_some("page")] { "All" }
                 a href="/people" aria-current=[(active == Nav::People).then_some("page")] { "People" }
+                a href="/recent" aria-current=[(active == Nav::Recent).then_some("page")] { "Recent" }
                 a href="/work" aria-current=[(active == Nav::Work).then_some("page")] { "Work" }
-                a href="/about" aria-current=[(active == Nav::About).then_some("page")] { "About" }
             }
         }
     }
@@ -597,10 +710,20 @@ const EAGER_TILES: usize = 2;
 /// CSS-columns masonry (used by the work and portfolio pages) instead of the
 /// default square-cropped grid. `eager` is how many leading tiles skip lazy
 /// loading; pass 0 for any grid that is not the first on the page.
-fn image_grid(images: &[ImageEntry], masonry: bool, eager: usize) -> Markup {
+/// `favs_count` splits the grid: that many tiles lead, then a hairline, then
+/// the rest. Zero (or a count covering every image) draws no line — there is
+/// nothing to separate.
+fn image_grid(images: &[ImageEntry], masonry: bool, eager: usize, favs_count: usize) -> Markup {
+    let divider_at = (favs_count > 0 && favs_count < images.len()).then_some(favs_count);
     html! {
         ul.grid.work-grid[masonry] {
             @for (i, img) in images.iter().enumerate() {
+                @if divider_at == Some(i) {
+                    // Presentational only: the tiles either side are already in
+                    // document order, so announcing a rule would add noise
+                    // without adding information.
+                    li.fav-divider aria-hidden="true" {}
+                }
                 li.tile {
                     // Per-photo download URLs ride on the anchor as data-* so
                     // the lightbox can surface JPG / RAW choices to the side of
@@ -684,6 +807,13 @@ pub fn page(
                         Nav::People => format!("Photographs of {title}"),
                         _ => format!("Photographs in {title}"),
                     }))
+                    // On a person's own page the link pre-ticks them, so the
+                    // form arrives half filled in.
+                    @if active == Nav::People {
+                        p.notify-link {
+                            a href=(format!("/notify?person={}", crate::handlers::encode_path(title))) { (NOTIFY_LINK_LABEL) }
+                        }
+                    }
                     @if show_favs && !images.is_empty() {
                         section.all-controls {
                             button.favs-toggle type="button" aria-pressed="false" {
@@ -705,7 +835,7 @@ pub fn page(
                     @if !images.is_empty() {
                         section.gallery {
                             @if !subdirs.is_empty() { h2 { "Photos" } }
-                            (image_grid(images, false, EAGER_TILES))
+                            (image_grid(images, false, EAGER_TILES, 0))
                         }
                     }
                     @if subdirs.is_empty() && images.is_empty() {
@@ -747,6 +877,11 @@ pub fn people_index_page(title: &str, crumbs: &[Crumb], people: &[PersonEntry]) 
                                 }
                             }
                         }
+                        // The form is reachable from nowhere else — it is
+                        // deliberately absent from the top nav, since it is a
+                        // thing a handful of people do once, not a section of
+                        // the site.
+                        p.notify-link { a href="/notify" { (NOTIFY_LINK_LABEL) } }
                     }
                 }
                 (site_footer())
@@ -876,6 +1011,42 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
 /// their natural aspect ratio in the work page's masonry chrome. `/all` renders
 /// the same [`FolderGroup`] shape through [`all_photos_page`] instead, which adds
 /// the folder tree.
+/// Collapsible, labelled folder sections — the shared body of the home page and
+/// `/recent`. Both render the same thing (a list of folders, each with its own
+/// grid); only the header above them differs, so the markup lives here once and
+/// the two page functions supply their own surroundings.
+fn gallery_sections(groups: &[FolderGroup]) -> Markup {
+    html! {
+        @if groups.is_empty() {
+            p.empty { "Nothing here yet." }
+        } @else {
+            @for (gi, g) in groups.iter().enumerate() {
+                section.gallery.work-gallery data-path=(g.path) {
+                    h2 {
+                        button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
+                            (chevron())
+                        }
+                        // A tag-driven section's photos are spread across the
+                        // tree, so it has no folder to link to and renders as
+                        // plain text — the shared `.section-label` styling is
+                        // element-agnostic, so the heading looks the same either
+                        // way.
+                        @if g.browse_url.is_empty() {
+                            span.section-label { (g.label) }
+                        } @else {
+                            a.section-label href=(g.browse_url) { (g.label) }
+                        }
+                        span.section-count { "(" (g.images.len()) ")" }
+                    }
+                    // Only the first section is above the fold, so it is the
+                    // only one that gets the eager budget.
+                    (image_grid(&g.images, true, if gi == 0 { EAGER_TILES } else { 0 }, g.favs_count))
+                }
+            }
+        }
+    }
+}
+
 pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
     // The home page's first tile is the LCP element on every viewport. Telling
     // the browser about it in <head> starts the fetch during HTML parse instead
@@ -933,33 +1104,200 @@ pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
                             }
                         }
                     }
-                    @if groups.is_empty() {
-                        p.empty { "Nothing here yet." }
-                    } @else {
-                        @for (gi, g) in groups.iter().enumerate() {
-                            section.gallery.work-gallery data-path=(g.path) {
-                                h2 {
-                                    button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
-                                        (chevron())
+                    (gallery_sections(groups))
+                }
+                (site_footer())
+            }
+        }
+    }
+}
+
+/// `/recent` — the folders named in `photos/.recent`, newest drop first.
+///
+/// Same body as the home page (see [`gallery_sections`]) without the hero: this
+/// page is a listing, so it opens on a breadcrumb like every other listing
+/// rather than reintroducing the site. The section order is the order of the
+/// lines in `.recent`, which is deliberate — that file is the owner's statement
+/// of what the current drop is, ordering included.
+pub fn recent_page(groups: &[FolderGroup]) -> Markup {
+    let lcp = groups
+        .first()
+        .and_then(|g| g.images.first())
+        .map(|img| img.thumb_url.as_str());
+    let og = groups
+        .first()
+        .and_then(|g| g.images.first())
+        .map(|img| abs_url(&img.image_url));
+    // Bound outside `html!` for the same reason as in `grouped_gallery_page`:
+    // `Head` borrows its title, so an inline `format!` temporary would be
+    // dropped while the borrow is still live.
+    let page_title = format!("Recent — Photographs by {OWNER_NAME}");
+    let crumbs = [
+        Crumb {
+            label: "Home".into(),
+            url: Some("/".into()),
+        },
+        Crumb {
+            label: "Recent".into(),
+            url: None,
+        },
+    ];
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block({
+                let h = Head::new(&page_title, site_description(), "/recent")
+                    .scripts(&["/static/lightbox.js", "/static/collapse.js"])
+                    .preload(lcp);
+                match og {
+                    Some(url) => h.og_image(url),
+                    None => h,
+                }
+            }))
+            body {
+                (site_header(Nav::Recent))
+                // `recent` rather than `portfolio`: this page lays its photos
+                // out at Browse's density and full width, not the home page's
+                // two wide columns with deep side margins.
+                main.recent {
+                    (crumbs_nav(&crumbs))
+                    (page_heading("Recent photographs"))
+                    (gallery_sections(groups))
+                }
+                (site_footer())
+            }
+        }
+    }
+}
+
+/// `/notify` — pick the people you want to hear about, and where.
+///
+/// Checkboxes rather than the `aria-pressed` button the `/all` favorites control
+/// uses: this is a real form that has to submit, and a native checkbox does that
+/// with JavaScript disabled and lands in the tab order for free. The switch
+/// *look* is shared with that control through `.switch-track`/`.switch-thumb`.
+///
+/// Both handle fields are rendered. `notify.js` hides whichever one the selected
+/// channel does not need; with no JavaScript both stay visible and the server
+/// reads the one matching the chosen radio, so the page never becomes unusable.
+///
+/// `message` is `(text, is_error)` — the outcome of a submission or a
+/// confirmation, shown above the form. The form is rendered either way so a
+/// subscriber can immediately correct a mistake.
+pub fn notify_page(
+    people: &[PersonEntry],
+    selected: &[String],
+    all_rolls: bool,
+    message: Option<(&str, bool)>,
+) -> Markup {
+    let page_title = format!("Notifications — Photographs by {OWNER_NAME}");
+    let crumbs = [
+        Crumb {
+            label: "Home".into(),
+            url: Some("/".into()),
+        },
+        Crumb {
+            label: "People".into(),
+            url: Some("/people".into()),
+        },
+        Crumb {
+            label: "Notifications".into(),
+            url: None,
+        },
+    ];
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block(
+                // Kept out of search results: it is a form, not content, and an
+                // indexed signup page is a magnet for form spam.
+                Head::new(&page_title, site_description(), "/notify")
+                    .scripts(&["/static/notify.js"])
+                    .noindex(),
+            ))
+            body {
+                (site_header(Nav::People))
+                main {
+                    (crumbs_nav(&crumbs))
+                    (page_heading("Photo notifications"))
+                    @if let Some((text, is_error)) = message {
+                        p.notify-message.is-error[is_error] { (text) }
+                    }
+                    form.notify-form method="post" action="/notify" {
+                        @if !NOTIFY_INTRO.is_empty() {
+                            p.notify-intro { (NOTIFY_INTRO) }
+                        }
+                        // Honeypot: invisible to people, irresistible to the
+                        // bots that fill every field they can see. A non-empty
+                        // value is the cheapest possible spam signal.
+                        label.notify-hp aria-hidden="true" {
+                            "Website"
+                            // `tabindex="-1"` as well as the aria-hidden on the
+                            // wrapper: hiding a focusable element from the
+                            // accessibility tree while leaving it in the tab
+                            // order strands a keyboard user on a field their
+                            // screen reader never announced.
+                            input type="text" name="website" tabindex="-1"
+                                  autocomplete="off" aria-hidden="true";
+                        }
+                        fieldset.notify-fieldset {
+                            legend { "People" }
+                            // Above the list and set apart, because it is not a
+                            // person: ticking it means every new roll whoever is
+                            // in it, and it composes with any names below rather
+                            // than replacing them.
+                            label.person-toggle.all-rolls-toggle {
+                                input type="checkbox" name="all_rolls" value="on" checked[all_rolls];
+                                span.switch-track { span.switch-thumb {} }
+                                span.person-name { (NOTIFY_ALL_ROLLS_LABEL) }
+                            }
+                            @if people.is_empty() {
+                                p.empty { "Nothing here yet." }
+                            } @else {
+                                ul.person-list {
+                                    @for person in people {
+                                        li {
+                                            label.person-toggle {
+                                                input type="checkbox"
+                                                      name="person"
+                                                      value=(person.name)
+                                                      checked[selected.iter().any(|s| s == &person.name)];
+                                                span.switch-track { span.switch-thumb {} }
+                                                span.person-name { (person.name) }
+                                                span.person-count { (person.photo_count) }
+                                            }
+                                        }
                                     }
-                                    // A tag-driven section's photos are spread
-                                    // across the tree, so it has no folder to
-                                    // link to and renders as plain text — the
-                                    // shared `.section-label` styling is
-                                    // element-agnostic, so the heading looks the
-                                    // same either way.
-                                    @if g.browse_url.is_empty() {
-                                        span.section-label { (g.label) }
-                                    } @else {
-                                        a.section-label href=(g.browse_url) { (g.label) }
-                                    }
-                                    span.section-count { "(" (g.images.len()) ")" }
                                 }
-                                // Only the first section is above the fold, so it
-                                // is the only one that gets the eager budget.
-                                (image_grid(&g.images, true, if gi == 0 { EAGER_TILES } else { 0 }))
                             }
                         }
+                        fieldset.notify-fieldset {
+                            legend { "Where" }
+                            div.channel-choice {
+                                label.channel-option {
+                                    input type="radio" name="channel" value="email" checked;
+                                    span { "Email" }
+                                }
+                                label.channel-option {
+                                    input type="radio" name="channel" value="discord";
+                                    span { "Discord" }
+                                }
+                            }
+                            label.handle-field data-channel="email" {
+                                span.handle-label { "Email address" }
+                                input.handle-input type="email" name="handle_email"
+                                      autocomplete="email" maxlength="254";
+                            }
+                            label.handle-field data-channel="discord" {
+                                span.handle-label { "Discord user ID" }
+                                input.handle-input type="text" name="handle_discord"
+                                      inputmode="numeric" autocomplete="off" maxlength="20";
+                                @if !NOTIFY_DISCORD_HINT.is_empty() {
+                                    span.handle-hint { (NOTIFY_DISCORD_HINT) }
+                                }
+                            }
+                        }
+                        button.notify-submit type="submit" { "Subscribe" }
                     }
                 }
                 (site_footer())
@@ -1084,11 +1422,10 @@ fn build_tree(groups: &[FolderGroup]) -> TreeNode {
     // subfolders are names, not dates, so alphabetical still reads best there.
     // This runs before `finish` so the positional DOM ids, the sidebar rows and
     // the page sections are all minted in this one order.
-    root.children
-        .sort_by_key(|c| match leading_year(&c.name) {
-            Some(year) => (0, std::cmp::Reverse(year)),
-            None => (1, std::cmp::Reverse(0)),
-        });
+    root.children.sort_by_key(|c| match leading_year(&c.name) {
+        Some(year) => (0, std::cmp::Reverse(year)),
+        None => (1, std::cmp::Reverse(0)),
+    });
     root.finish(&mut 0, 0);
     root
 }
@@ -1201,7 +1538,7 @@ fn tree_sections(node: &TreeNode, groups: &[FolderGroup], eager: &mut usize) -> 
             Some(g) => {
                 section.gallery data-path=(node.path) id=(node.id) style=(format!("--depth:{}", node.depth)) {
                     (tree_section_heading(node, Some(g)))
-                    (image_grid(&g.images, false, std::mem::take(eager)))
+                    (image_grid(&g.images, false, std::mem::take(eager), g.favs_count))
                 }
             }
             None => {

@@ -1,8 +1,10 @@
 mod handlers;
 mod nether;
+mod notify;
 mod paths;
 mod people;
 mod portfolio;
+mod recent;
 mod state;
 mod thumbs;
 mod views;
@@ -38,6 +40,8 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("prebuild") => prebuild_cmd(&args[2..]).await,
         Some("warm") => warm_cmd(&args[2..]).await,
+        Some("recent") => recent_cmd(&args[2..]).await,
+        Some("notify") => notify_cmd(&args[2..]).await,
         Some("serve") | None => serve().await,
         Some(other) => {
             eprintln!("unknown subcommand: {other}");
@@ -47,19 +51,30 @@ async fn main() -> Result<()> {
             eprintln!("                                       (--prune also deletes cached renditions with no source)");
             eprintln!("  portfolio-site prebuild <name>...    build all zip combos for one or more work items");
             eprintln!("  portfolio-site prebuild --all        build all zip combos for every work item");
+            eprintln!("  portfolio-site recent show           print the folders currently marked recent");
+            eprintln!("  portfolio-site recent set <dir>...   replace the recent set (paths relative to photos/)");
+            eprintln!("  portfolio-site notify --dry-run      show what would be sent about the recent set");
+            eprintln!("  portfolio-site notify                send it, and record what went out");
             std::process::exit(2);
         }
     }
 }
 
-/// Resolve photos/ and cache/ relative to the current working directory.
+/// Resolve photos/, cache/ and data/ relative to the current working directory.
 /// Both the web server and the prebuild command share this layout so a
 /// running server and a one-shot prebuild use the same on-disk state.
-fn resolve_roots() -> Result<(PathBuf, PathBuf)> {
+///
+/// `cache/` and `data/` are siblings but not peers: everything under `cache/`
+/// can be regenerated from the photos (and `warm --prune` is allowed to delete
+/// from it), while `data/` holds the subscriber logs and the API credentials,
+/// which exist nowhere else. Keeping them apart is what stops a cache clear
+/// from taking the mailing list with it.
+fn resolve_roots() -> Result<(PathBuf, PathBuf, PathBuf)> {
     let cwd = std::env::current_dir()?;
     let binding = cwd.parent().context("CANNOT FIND PHOTOS")?;
     let photos_dir = binding.join("photos");
     let cache_dir = cwd.join("cache");
+    let data_dir = cwd.join("data");
 
     std::fs::create_dir_all(&photos_dir)
         .with_context(|| format!("creating {}", photos_dir.display()))?;
@@ -69,12 +84,34 @@ fn resolve_roots() -> Result<(PathBuf, PathBuf)> {
         .with_context(|| format!("creating {}", cache_dir.join("preview").display()))?;
     std::fs::create_dir_all(cache_dir.join("work"))
         .with_context(|| format!("creating {}", cache_dir.join("work").display()))?;
+    // Split in two: `logs/` is the append-only state (subscribers, pending
+    // confirmations, what has already been announced), `token/` is the API
+    // credentials. See `notify::LOGS_DIR` for why they are kept apart.
+    //
+    // 0700 on all three: subscriber addresses are other people's contact
+    // details, and the credentials can send mail as this domain.
+    for dir in [
+        data_dir.clone(),
+        data_dir.join(notify::LOGS_DIR),
+        data_dir.join(notify::TOKENS_DIR),
+    ] {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("chmod 700 {}", dir.display()))?;
+        }
+    }
 
     let photos_root: PathBuf = std::fs::canonicalize(&photos_dir)
         .with_context(|| format!("canonicalizing {}", photos_dir.display()))?;
     let cache_root: PathBuf = std::fs::canonicalize(&cache_dir)
         .with_context(|| format!("canonicalizing {}", cache_dir.display()))?;
-    Ok((photos_root, cache_root))
+    let data_root: PathBuf = std::fs::canonicalize(&data_dir)
+        .with_context(|| format!("canonicalizing {}", data_dir.display()))?;
+    Ok((photos_root, cache_root, data_root))
 }
 
 async fn serve() -> Result<()> {
@@ -89,7 +126,7 @@ async fn serve() -> Result<()> {
     let static_dir = cwd.join("static");
     let nether_dir = binding.join("nether");
 
-    let (photos_root, cache_root) = resolve_roots()?;
+    let (photos_root, cache_root, data_root) = resolve_roots()?;
 
     let db_candidate = photos_root.join("digikam4.db");
     let db_path: Option<PathBuf> = if db_candidate.is_file() {
@@ -110,7 +147,7 @@ async fn serve() -> Result<()> {
         "roots",
     );
 
-    let state = AppState::new(photos_root, cache_root, db_path, nether_root);
+    let state = AppState::new(photos_root, cache_root, data_root, db_path, nether_root);
 
     let app = build_router(state, static_dir)
         // HTML/CSS/JS go out compressed; the default predicate already skips
@@ -149,6 +186,9 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
     let pages = Router::new()
         .route("/", get(handlers::index))
         .route("/about", get(handlers::about))
+        .route("/recent", get(handlers::recent_photos))
+        .route("/notify", get(handlers::notify_form).post(handlers::notify_subscribe))
+        .route("/notify/confirm", get(handlers::notify_confirm))
         .route("/browse", get(handlers::browse_root))
         .route("/browse/*path", get(handlers::browse))
         .route("/all", get(handlers::all_photos))
@@ -166,6 +206,8 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         // A permanent redirect collapses them instead: one URL serves the page,
         // the other names it, and any link equity on the slashed form transfers.
         .route("/about/", get(|| permanent("/about")))
+        .route("/recent/", get(|| permanent("/recent")))
+        .route("/notify/", get(|| permanent("/notify")))
         .route("/browse/", get(|| permanent("/browse")))
         .route("/people/", get(|| permanent("/people")))
         .route("/work/", get(|| permanent("/work")))
@@ -231,7 +273,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
 /// into a skipped dir) so the cache doesn't accumulate orphans over time.
 async fn warm_cmd(args: &[String]) -> Result<()> {
     let prune = args.iter().any(|a| a == "--prune");
-    let (photos_root, cache_root) = resolve_roots()?;
+    let (photos_root, cache_root, _data_root) = resolve_roots()?;
 
     println!("scanning {} for photos...", photos_root.display());
     let jpegs = collect_jpegs(&photos_root).await;
@@ -407,6 +449,134 @@ async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// `portfolio-site notify [--dry-run]`
+///
+/// Tells every confirmed subscriber about the folders in the recent set that
+/// they have not already heard about. Run after `update_db.sh`, once the new
+/// photos are actually live.
+///
+/// **Always dry-run first.** The recent set is whatever `.recent` currently
+/// says, and `notified.log` is the only thing standing between a mistake there
+/// and a mail to every subscriber about the entire back catalogue.
+///
+/// One recipient's failure is logged and skipped rather than aborting: a
+/// Discord user who has closed their DMs should not stop the emails going out.
+/// Nothing is recorded for a recipient whose send failed, so a re-run picks up
+/// exactly what did not arrive.
+async fn notify_cmd(args: &[String]) -> Result<()> {
+    let dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
+    let (photos_root, _cache_root, data_root) = resolve_roots()?;
+    let db_candidate = photos_root.join("digikam4.db");
+    let db_path = db_candidate.is_file().then_some(db_candidate);
+
+    let digests = notify::plan(&photos_root, db_path.as_ref(), &data_root).await?;
+    if digests.is_empty() {
+        println!("nothing to send: no subscriber has unseen photos in the recent set");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("dry run — {} message(s) would be sent\n", digests.len());
+        for digest in &digests {
+            let (subject, body) = notify::compose(digest);
+            println!("to: {} ({})", digest.handle, digest.channel.as_str());
+            println!("subject: {subject}");
+            for line in body.lines() {
+                println!("  {line}");
+            }
+            println!();
+        }
+        println!("re-run without --dry-run to send");
+        return Ok(());
+    }
+
+    let sender = notify::Sender::load(&data_root).await?;
+    let mut sent = 0usize;
+    let mut failed = 0usize;
+    for digest in &digests {
+        let (subject, body) = notify::compose(digest);
+        match sender
+            .send(digest.channel, &digest.handle, &subject, &body)
+            .await
+        {
+            Ok(()) => {
+                // Recorded only now, so a failure above leaves the folder
+                // unannounced and the next run retries it.
+                notify::record_sent(&data_root, digest).await?;
+                sent += 1;
+                println!("sent to {} ({})", digest.handle, digest.channel.as_str());
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!(
+                    "FAILED {} ({}): {e:#}",
+                    digest.handle,
+                    digest.channel.as_str()
+                );
+            }
+        }
+    }
+    println!("{sent} sent, {failed} failed");
+    if failed > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `portfolio-site recent show | set <dir>...`
+///
+/// Maintains `photos/.recent`, the declaration of which folders make up the
+/// current drop. `set` replaces the whole set rather than appending, which is
+/// what "remove the last set and include the new ones" means in practice.
+///
+/// Validation is strict here on purpose: `recent::load` skips a bad entry so a
+/// renamed folder cannot take the page down, which means a typo would otherwise
+/// surface as a roll quietly missing from `/recent`. Catching it at the moment
+/// the set is written is the only place the mistake is cheap.
+async fn recent_cmd(args: &[String]) -> Result<()> {
+    let (photos_root, _cache_root, _data_root) = resolve_roots()?;
+    match args.first().map(String::as_str) {
+        Some("show") | None => {
+            let folders = recent::load(&photos_root).await;
+            if folders.is_empty() {
+                println!(
+                    "no recent folders set ({} is missing or empty)",
+                    recent::file_path(&photos_root).display()
+                );
+            } else {
+                for folder in &folders {
+                    println!("{folder}");
+                }
+            }
+            Ok(())
+        }
+        Some("set") => {
+            let folders: Vec<String> = args[1..]
+                .iter()
+                .filter(|a| !a.starts_with("--"))
+                .cloned()
+                .collect();
+            if folders.is_empty() {
+                eprintln!("usage: portfolio-site recent set <dir>...");
+                eprintln!("  (to clear the set, delete {})", recent::file_path(&photos_root).display());
+                std::process::exit(2);
+            }
+            let validated = recent::validate(&photos_root, &folders).await?;
+            recent::write(&photos_root, &validated).await?;
+            println!("wrote {}", recent::file_path(&photos_root).display());
+            for folder in &validated {
+                println!("  {folder}");
+            }
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("unknown recent subcommand: {other}");
+            eprintln!("usage: portfolio-site recent show | set <dir>...");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// `portfolio-site prebuild <name>... | --all`
 ///
 /// Walks every (scope, kind) combination for the named work item(s) and
@@ -415,7 +585,7 @@ async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
 /// — `write_zip` writes to a temp file then renames, so the server only
 /// ever sees a complete archive.
 async fn prebuild_cmd(args: &[String]) -> Result<()> {
-    let (photos_root, cache_root) = resolve_roots()?;
+    let (photos_root, cache_root, _data_root) = resolve_roots()?;
     let all_mode = args.iter().any(|a| a == "--all");
     let names: Vec<String> = if all_mode {
         let summaries = work::list_work(photos_root.clone()).await?;
@@ -565,6 +735,8 @@ mod tests {
         std::fs::create_dir_all(photos.join("portfolio")).unwrap();
         std::fs::create_dir_all(photos.join("2024")).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(&static_dir).unwrap();
         std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
 
@@ -574,13 +746,23 @@ mod tests {
         // collapses a folder holding no images and exactly one subfolder by
         // redirecting into it, so a single-folder tree makes `/browse` a 303 and
         // every assertion about the listing it renders untestable.
-        for rel in ["portfolio/test.jpg", "2024/roll.jpg"] {
+        std::fs::create_dir_all(photos.join("2024/favs")).unwrap();
+        for rel in ["portfolio/test.jpg", "2024/roll.jpg", "2024/favs/pick.jpg"] {
             image::RgbImage::from_pixel(16, 16, image::Rgb([120, 140, 100]))
                 .save(photos.join(rel))
                 .expect("write test jpeg");
         }
 
-        let state = AppState::new(photos, cache, None, root.join("nether"));
+        // Declares `2024` as the current drop and leaves `portfolio` out, so
+        // `/recent` renders a strict subset and the tests can tell the two
+        // apart. The trailing junk lines pin the parser's tolerance.
+        std::fs::write(
+            photos.join(recent::FILE_NAME),
+            b"# the current drop\n2024\n\n../escape\n",
+        )
+        .unwrap();
+
+        let state = AppState::new(photos, cache, data, None, root.join("nether"));
         Fixture {
             router: build_router(state, static_dir),
             _dir: dir,
@@ -595,6 +777,13 @@ mod tests {
             .unwrap()
     }
 
+    async fn body_string(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     fn cache_control(resp: &axum::response::Response) -> String {
         resp.headers()
             .get(header::CACHE_CONTROL)
@@ -605,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn html_pages_are_revalidated() {
         let f = fixture();
-        for uri in ["/", "/about", "/browse", "/all", "/work"] {
+        for uri in ["/", "/about", "/browse", "/recent", "/all", "/work"] {
             let cc = cache_control(&get(&f.router, uri).await);
             assert!(cc.contains("no-cache"), "{uri} cache-control was {cc:?}");
             assert!(cc.contains("private"), "{uri} cache-control was {cc:?}");
@@ -634,6 +823,81 @@ mod tests {
     /// stored entry's headers from a 304 (RFC 9111 §4.3.4), so a `no-cache`
     /// leaking onto this response would rewrite the cached image's `max-age`
     /// and force every thumbnail to revalidate on every page load.
+    /// The declared set is the whole of `/recent` — a folder that exists and
+    /// holds photos but is not named in `.recent` must not leak onto the page.
+    /// This is the assertion that stops `/recent` quietly drifting into a
+    /// second `/all`.
+    #[tokio::test]
+    async fn recent_renders_only_the_declared_folders() {
+        let f = fixture();
+        let resp = get(&f.router, "/recent").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("/browse/2024"), "declared folder is missing");
+        assert!(
+            !html.contains("/browse/portfolio"),
+            "undeclared folder leaked onto /recent"
+        );
+    }
+
+    /// On `/recent` a roll is one section with its favorites at the front and a
+    /// rule between them and the rest — not the two sections the folder tree
+    /// would suggest, which is what `/all` still shows.
+    #[tokio::test]
+    async fn recent_folds_favs_into_the_roll_with_a_divider() {
+        let f = fixture();
+        let html = body_string(get(&f.router, "/recent").await).await;
+        assert_eq!(
+            html.matches(r#"data-path="2024""#).count(),
+            1,
+            "the roll should render as a single section"
+        );
+        assert!(
+            !html.contains(r#"data-path="2024/favs""#),
+            "favs should not be a section of its own"
+        );
+        assert_eq!(
+            html.matches("fav-divider").count(),
+            1,
+            "one rule between the favorites and the rest"
+        );
+        // The favorite leads, so it appears before the roll's own photo.
+        let fav = html.find("favs/pick.jpg").expect("favorite is missing");
+        let rule = html.find("fav-divider").unwrap();
+        let rest = html.find("2024/roll.jpg").expect("roll photo is missing");
+        assert!(fav < rule && rule < rest, "order should be fav, rule, rest");
+    }
+
+    /// `../escape` in the fixture's `.recent` is skipped rather than served or
+    /// fatal: `recent::load` runs every line through the same containment check
+    /// as a URL path, and a bad line drops out of the set on its own.
+    #[tokio::test]
+    async fn recent_ignores_entries_outside_the_photos_root() {
+        let f = fixture();
+        let resp = get(&f.router, "/recent").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(!html.contains("escape"), "escaping entry reached the page");
+    }
+
+    /// The Browse tab is gone from the nav, but its URLs are indexed, linked
+    /// from the `/all` crumbs, and named in every notification message. Dropping
+    /// the routes with the tab would 404 all of them.
+    #[tokio::test]
+    async fn browse_still_serves_after_losing_its_tab() {
+        let f = fixture();
+        assert_eq!(get(&f.router, "/browse").await.status(), StatusCode::OK);
+        assert_eq!(
+            get(&f.router, "/browse/2024").await.status(),
+            StatusCode::OK
+        );
+        let nav = body_string(get(&f.router, "/").await).await;
+        assert!(
+            !nav.contains(">Browse<"),
+            "Browse tab is still rendered in the nav"
+        );
+    }
+
     #[tokio::test]
     async fn thumb_304_preserves_cache_control() {
         let f = fixture();
@@ -822,7 +1086,7 @@ mod tests {
     #[tokio::test]
     async fn listing_pages_have_exactly_one_heading() {
         let f = fixture();
-        for uri in ["/", "/about", "/browse", "/all", "/work"] {
+        for uri in ["/", "/about", "/browse", "/recent", "/all", "/work"] {
             let html = body_of(&f.router, uri).await;
             let n = html.matches("<h1").count();
             assert_eq!(n, 1, "{uri} had {n} <h1> elements, expected 1");

@@ -26,6 +26,18 @@ pub async fn list_person_photos(db_path: PathBuf, person_name: String) -> Result
         .context("person photo listing task panicked")?
 }
 
+/// Every (person tag, photo path) pair in the archive, for callers that need to
+/// go from a *folder* to the people in it rather than the other way round.
+///
+/// `notify` uses this to answer "who is in this drop": one query and a prefix
+/// match beats calling [`list_person_photos`] once per person, which would
+/// re-scan the whole tag table for each of them.
+pub async fn list_all_tagged_photos(db_path: PathBuf) -> Result<Vec<(String, String)>> {
+    tokio::task::spawn_blocking(move || list_all_tagged_photos_blocking(&db_path))
+        .await
+        .context("tagged photo listing task panicked")?
+}
+
 // The three items below are the generic half of this module — opening the
 // digiKam database, deciding which rows are publishable, and turning an
 // (album, filename) pair back into a path. `portfolio` queries the same
@@ -122,6 +134,44 @@ fn list_person_photos_blocking(db_path: &Path, person_name: &str) -> Result<Vec<
         if seen.insert(rel.clone()) {
             out.push(PersonPhoto { rel, name });
         }
+    }
+    Ok(out)
+}
+
+fn list_all_tagged_photos_blocking(db_path: &Path) -> Result<Vec<(String, String)>> {
+    let conn = open_readonly(db_path)?;
+    // Same person-tag definition as `list_people` — parented under "People",
+    // carrying a 'person' property, and not one of digiKam's built-in stubs —
+    // so the two can never disagree about who counts as a person.
+    let sql = format!(
+        "
+        SELECT t.name, a.relativePath, i.name
+        FROM Tags t
+        JOIN TagProperties tp ON tp.tagid = t.id AND tp.property = 'person'
+        JOIN ImageTags it ON it.tagid = t.id
+        JOIN Images i ON i.id = it.imageid
+        JOIN Albums a ON a.id = i.album
+        WHERE t.pid = (SELECT id FROM Tags WHERE pid = 0 AND name = 'People' LIMIT 1)
+          AND t.id NOT IN (
+              SELECT tagid FROM TagProperties
+              WHERE property IN ('unknownPerson', 'ignoredPerson', 'unconfirmedPerson')
+          )
+          AND i.status = 1
+          AND {VISIBLE_IMAGE_FILTER}
+        "
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (person, album_rel, name) = r?;
+        out.push((person, combine_rel(&album_rel, &name)));
     }
     Ok(out)
 }

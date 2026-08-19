@@ -291,7 +291,8 @@ section.all-controls {
   color: var(--text);
 }
 
-.favs-toggle-track {
+.favs-toggle-track,
+.switch-track {
   position: relative;
   width: 2.2rem;
   height: 1.2rem;
@@ -301,7 +302,8 @@ section.all-controls {
   flex: 0 0 auto;
 }
 
-.favs-toggle-thumb {
+.favs-toggle-thumb,
+.switch-thumb {
   position: absolute;
   top: 0.15rem;
   left: 0.15rem;
@@ -1247,6 +1249,7 @@ main.portfolio .work-gallery .section-count {
    tile renders at the image's natural aspect ratio without leaving gaps for
    taller portraits next to shorter landscapes. */
 main.work ul.work-grid,
+main.recent ul.work-grid,
 main.portfolio ul.work-grid {
   display: block;
   grid-template-columns: none;
@@ -1277,17 +1280,20 @@ main.portfolio ul.work-grid {
 }
 
 main.work ul.work-grid li.tile,
+main.recent ul.work-grid li.tile,
 main.portfolio ul.work-grid li.tile {
   break-inside: avoid;
   margin: 0 0 1.25rem;
 }
 
 main.work ul.work-grid li.tile a,
+main.recent ul.work-grid li.tile a,
 main.portfolio ul.work-grid li.tile a {
   display: block;
 }
 
 main.work ul.work-grid li.tile img,
+main.recent ul.work-grid li.tile img,
 main.portfolio ul.work-grid li.tile img {
   aspect-ratio: auto;
   width: 100%;
@@ -1617,4 +1623,292 @@ body > main {
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
+}
+
+/* ---- /notify: who wants to hear about which people --------------------------
+   The person rows are checkboxes, not buttons, so the form submits and works
+   with JavaScript disabled. The switch itself is the same one the /all
+   favorites control uses — `.switch-track`/`.switch-thumb` share those rules
+   above — driven here by :checked rather than by aria-pressed. */
+
+/* Wide enough for the people list to run in several columns. A narrow column
+   was what forced that list into a scroll box in the first place. */
+.notify-form {
+  /* Wide on purpose. Every column the people list gains is a row it loses,
+     and rows are what decide whether this page fits on a laptop screen: at
+     four columns the 32 rows overflowed a 768px viewport, at six they do not.
+     `auto-fill` still collapses to one column on a phone. */
+  max-width: 68rem;
+  /* No bottom margin: the footer already contributes `margin-top: 3rem`, and
+     stacking the two pushed the form off the bottom of a 768px laptop. */
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.notify-intro {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0 0 0.5rem;
+}
+
+.notify-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.7rem 1rem 0.85rem;
+  margin: 0;
+  min-width: 0;
+}
+
+.notify-fieldset legend {
+  padding: 0 0.4rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* Columns rather than a scroll box. One row per tagged person is a long list,
+   and capping its height only traded a long page for a scrollbar inside a
+   scrollbar — two nested scroll regions to get through before reaching the
+   submit button. Flowing the same rows into as many columns as fit turns that
+   height into width the page already had, so the whole form is visible at once
+   and nothing scrolls on a desktop viewport.
+
+   `auto-fill` handles the range on its own: several columns on a wide screen,
+   one on a phone, with no breakpoint to keep in sync with the form width. */
+.person-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  column-gap: 1.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.person-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0.1rem;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+/* Clipped rather than `display: none` so the checkbox keeps its place in the
+   tab order and stays in the accessibility tree — the visible switch is
+   decoration, this input is the actual control. */
+.person-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Wraps rather than ellipsising. In a narrow column "Parker Simmons" clips to
+   "Parker Sim…", and this is the list where someone picks themselves out — a
+   truncated name is the one thing it cannot afford. A wrapped name makes its
+   own row slightly taller and costs nothing else. */
+.person-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.person-count {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.person-toggle input:checked ~ .switch-track {
+  background: var(--accent);
+}
+
+.person-toggle input:checked ~ .switch-track .switch-thumb {
+  transform: translateX(1rem);
+}
+
+/* Keyboard focus has to land somewhere visible, since the real input is
+   clipped. */
+.person-toggle input:focus-visible ~ .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The "any new set" toggle. Sits above the people grid and is separated from
+   it, because it is a different kind of choice: not one more name, but a
+   standing subscription that composes with whatever names are ticked below. */
+.all-rolls-toggle {
+  padding: 0.15rem 0.1rem 0.5rem;
+  margin-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.all-rolls-toggle .person-name {
+  font-weight: 600;
+}
+
+.channel-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+  margin-bottom: 0.7rem;
+}
+
+.channel-option {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+}
+
+.channel-option input {
+  accent-color: var(--accent);
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.handle-field {
+  display: block;
+}
+
+/* `display: block` above is a class selector, so it outranks the user-agent
+   rule that makes [hidden] display:none — without this, notify.js sets the
+   attribute and the field stays on screen anyway. */
+.handle-field[hidden] {
+  display: none;
+}
+
+.handle-field + .handle-field {
+  margin-top: 0.8rem;
+}
+
+.handle-label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+/* Sits under the field it explains, so it reads as an answer to the field
+   rather than as a second label above it. */
+.handle-hint {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--muted);
+  max-width: 34rem;
+}
+
+.handle-input {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.5rem 0.6rem;
+  max-width: 26rem;
+}
+
+.handle-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* The honeypot. Positioned off-screen rather than `display: none`, and hidden
+   from the accessibility tree, so a form-filling bot sees a real field while a
+   person never meets one. */
+.notify-hp {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.notify-submit {
+  font: inherit;
+  cursor: pointer;
+  align-self: flex-start;
+  padding: 0.55rem 1.2rem;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.notify-submit:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.notify-message {
+  max-width: 34rem;
+  margin: 0 auto 1.5rem;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: 0.8rem 1rem;
+  border-radius: 0 5px 5px 0;
+  line-height: 1.55;
+}
+
+.notify-message.is-error {
+  border-left-color: #b4553f;
+  background: rgba(180, 85, 63, 0.14);
+}
+
+/* Link out to /notify from the People pages — the form's only entry point. */
+.notify-link {
+  margin: 0 0 1.4rem;
+}
+
+.notify-link a {
+  font-size: 0.9rem;
+  color: var(--accent);
+}
+
+/* /recent lays out like Browse — the same tile width, the same gap, the same
+   full-page width — but through columns rather than a CSS grid, so the photos
+   keep their real proportions instead of being cropped to squares. Browse's
+   `minmax(220px, 1fr)` and `gap: 1rem` are mirrored here as the column width
+   and column gap. */
+main.recent ul.work-grid {
+  columns: 220px;
+  column-gap: 1rem;
+}
+
+main.recent ul.work-grid li.tile {
+  margin: 0 0 1rem;
+}
+
+/* The line between a roll's favorites and the rest of it on /recent.
+   `column-span: all` because the portfolio grid is a multi-column layout, not
+   a CSS grid — without it the rule would sit inside one column and read as
+   part of that column rather than as a break across the whole roll. The
+   grid-column pair keeps it full-width if the same markup is ever rendered in
+   the non-masonry grid. */
+li.fav-divider {
+  column-span: all;
+  grid-column: 1 / -1;
+  break-inside: avoid;
+  list-style: none;
+  height: 0;
+  padding: 0;
+  /* Weighted to the top: the gap above the rule is what separates it from the
+     last favorite, and it needs to read as a deliberate break rather than as
+     the spacing between two rows of photos. */
+  margin: 2.75rem 0 1.75rem;
+  border: 0;
+  border-top: 3px solid var(--border);
 }
