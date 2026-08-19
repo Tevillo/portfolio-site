@@ -160,15 +160,17 @@ pub struct Pending {
     pub ts: u64,
 }
 
-/// One message that went out, and every folder it covered.
+/// Everything one recipient has ever been told about.
 ///
-/// A row per message rather than a row per folder: the message is what actually
-/// happened, so a row records one send and reading the log back tells you what
-/// each recipient was told and when, in one line each.
+/// One row per recipient, not per send: a later message merges its folders into
+/// the row that is already there. The question this log exists to answer is
+/// "has this person seen this roll?", and one row per recipient answers it by
+/// inspection — a file with a line per person, rather than a line per person
+/// per drop growing without bound.
 ///
-/// The unit of *comparison* is still the folder — `plan` flattens these lists
-/// and asks whether this recipient has seen each one — so adding a fourth roll
-/// to `.recent` later still announces only the fourth.
+/// `ts` is therefore when they were *last* told something, not when any
+/// particular roll went out. Per-send history is the thing given up for that,
+/// and it lives in the `notify` run's own output instead.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Announced {
     pub channel: Channel,
@@ -652,16 +654,40 @@ pub async fn plan(
 
 /// Record that a digest went out, one line per folder it covered.
 pub async fn record_sent(data_root: &Path, digest: &Digest) -> Result<()> {
-    append_line(
-        &log_path(data_root, NOTIFIED_LOG),
-        &Announced {
+    // Rewritten rather than appended to, because a recipient's row is merged
+    // into rather than duplicated. Held across read-modify-write for the same
+    // reason `confirm` is: two `notify` runs at once would otherwise each write
+    // back a file predating the other, and the loser's folders would be
+    // forgotten — which shows up later as a roll announced twice.
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _guard = LOCK.get_or_init(Default::default).lock().await;
+
+    let path = log_path(data_root, NOTIFIED_LOG);
+    let mut rows: Vec<Announced> = read_log(&path).await;
+    match rows
+        .iter_mut()
+        .find(|a| a.channel == digest.channel && a.handle == digest.handle)
+    {
+        Some(row) => {
+            for folder in &digest.folders {
+                // A folder can already be there if a send is retried after a
+                // partial failure; recording it twice would be harmless but
+                // makes the row grow every run.
+                if !row.folders.iter().any(|f| f == folder) {
+                    row.folders.push(folder.clone());
+                }
+            }
+            row.ts = now();
+        }
+        None => rows.push(Announced {
             channel: digest.channel,
             handle: digest.handle.clone(),
             folders: digest.folders.clone(),
             ts: now(),
-        },
-    )
-    .await
+        }),
+    }
+    let refs: Vec<&Announced> = rows.iter().collect();
+    rewrite_log(&path, &refs).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,29 +1111,85 @@ mod tests {
         assert!(current[0].all_rolls);
     }
 
-    /// One row per message, listing every folder it covered — not one row per
-    /// folder. The log then reads as a history of what was sent, one line per
-    /// send, instead of repeating the recipient once per roll.
+    /// One row per recipient, however many sends they have had: a later drop
+    /// merges into the row already there rather than adding another. Otherwise
+    /// the file grows a line per person per drop forever, and answering "has
+    /// this person seen this roll?" means scanning all of them.
     #[tokio::test]
-    async fn a_send_records_one_row_listing_every_folder() {
+    async fn later_sends_merge_into_the_recipients_existing_row() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let digest = Digest {
+        let send = |folders: Vec<String>| Digest {
             channel: Channel::Email,
             handle: "a@b.co".into(),
             people: vec!["Guin".into()],
-            folders: vec![
-                "2026/caldwell-35".into(),
-                "2026/caldwell-utopia-wide".into(),
-                "2026/utopia".into(),
-            ],
+            folders,
         };
-        record_sent(root, &digest).await.unwrap();
+
+        record_sent(
+            root,
+            &send(vec!["2026/caldwell-35".into(), "2026/utopia".into()]),
+        )
+        .await
+        .unwrap();
+        record_sent(root, &send(vec!["2026/eliana-grad".into()]))
+            .await
+            .unwrap();
 
         let rows: Vec<Announced> = read_log(&log_path(root, NOTIFIED_LOG)).await;
-        assert_eq!(rows.len(), 1, "three folders should be one row, not three");
-        assert_eq!(rows[0].handle, "a@b.co");
-        assert_eq!(rows[0].folders, digest.folders);
+        assert_eq!(rows.len(), 1, "second send should merge, not add a row");
+        assert_eq!(
+            rows[0].folders,
+            vec![
+                "2026/caldwell-35".to_string(),
+                "2026/utopia".to_string(),
+                "2026/eliana-grad".to_string()
+            ]
+        );
+
+        // A retry after a partial failure re-records a folder already there.
+        record_sent(root, &send(vec!["2026/utopia".into()]))
+            .await
+            .unwrap();
+        let rows: Vec<Announced> = read_log(&log_path(root, NOTIFIED_LOG)).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].folders.len(), 3, "a repeated folder was added twice");
+    }
+
+    /// Merging is per recipient, so one person's row must not absorb another's.
+    #[tokio::test]
+    async fn recipients_keep_their_own_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for handle in ["a@b.co", "c@d.co"] {
+            record_sent(
+                root,
+                &Digest {
+                    channel: Channel::Email,
+                    handle: handle.into(),
+                    people: vec!["Guin".into()],
+                    folders: vec!["2026/utopia".into()],
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // Same handle, different channel — still a different recipient.
+        record_sent(
+            root,
+            &Digest {
+                channel: Channel::Discord,
+                handle: "a@b.co".into(),
+                people: vec!["Guin".into()],
+                folders: vec!["2026/utopia".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows: Vec<Announced> = read_log(&log_path(root, NOTIFIED_LOG)).await;
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.folders == vec!["2026/utopia".to_string()]));
     }
 
     /// Both messages name the same list, so they have to say it the same way.
