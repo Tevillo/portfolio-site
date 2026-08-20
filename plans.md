@@ -58,4 +58,9 @@
       one-shot confirmation token, and an unsubscribe that is a button rather
       than an empty list. Worth deciding at the same time whether that page also
       shows what they have already been sent.
-
+- Add an audit page for myself
+  - Include amount of people subscribed, and how many impressions I get if possible
+- Setup some type of down detector
+- Make about me better
+- Change formatting for actual portfolio page
+- Add page for my programming projects
