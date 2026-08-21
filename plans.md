@@ -1,66 +1,108 @@
-- [x] Increase Visibility for looking up website name
-      Canonical URLs, robots.txt, sitemap.xml, Person JSON-LD, name-bearing
-      titles and one h1 per page are in. Still to do by hand, outside the code:
-      submit https://paulborrego.com/sitemap.xml in Google Search Console, and
-      add the profile links to KNOWS_ABOUT/sameAs once there are any.
-- [x] Reverse all tab to be most to least recent by year
-      Top level of the /all tree now sorts newest year first, numerically, in
-      both the sidebar and the sections. Non-year folders sink below the years
-      keeping their alphabetical order; sub-folders are unchanged.
-- [x] Write a proper intro for the Google result description
-      HOME_INTRO and SITE_DESCRIPTION are filled in with your own words, and
-      OWNER_TAGLINE is now "Full stack film photographer" (owner_title derives
-      both page titles from it, so that one edit moved the titles too). The
-      intro renders above the galleries, which is what gives Google prose to
-      quote instead of the folder headings. Left to do outside the code:
-      request reindexing of / in Search Console; snippets lag by days, and
-      Google still picks its own for some queries.
-      Note: the About page still opens "Self hosting enjoyer", which no longer
-      matches the home page. Separate writing job.
-- [x] Add an email list
-      Grew into notifications by person: someone picks the people they want to
-      hear about at /notify, or "Any new set of photos" for every roll, and
-      chooses email or a Discord DM. Nothing is sent to an unconfirmed handle —
-      a signup writes data/logs/pending.log and gets one message with a confirm
-      link; following it moves them to data/logs/subscribers.log and deletes the
-      pending row. Both channels confirm, because a mistyped Discord user ID is
-      a valid ID belonging to a stranger.
-      Sending is a deploy-time step, not a daemon: `portfolio-site notify
-      --dry-run` prints what would go out, `notify` sends it and records each
-      message in data/logs/notified.log. "New" comes from photos/.recent, not
-      from EXIF, so a negative scanned today counts as new. Each recipient gets
-      one message per drop naming only their people who actually appear, and
-      re-running only sends what did not arrive.
-      Wording lives in the site-copy block in src/views.rs; NOTIFY_INTRO and
-      NOTIFY_CONFIRM_INTRO are still empty and waiting on you. Setup and the
-      per-upload routine are in NOTIFY.md. Email needs a verified Resend
-      domain before it will land anywhere but spam; Discord is live (Photo-Bot,
-      in one server).
-- [x] Remove browse tab, add a most recent tab
-      /recent renders the folders named in photos/.recent, in that file's order,
-      at Browse's density but with the photos uncropped. Favourites lead each
-      roll with a rule between them and the rest, rather than sitting in a
-      section of their own. The Browse tab is gone from the nav but /browse
-      still serves — its URLs are indexed, the /all crumbs link into it, and
-      every notification links rolls by their /browse path.
-      Set the current drop with `portfolio-site recent set <dir>...`, which
-      replaces the previous set and refuses a folder holding no visible photos.
-      No rebuild needed; the file is read per request.
-- Let someone change their preferences without starting over
-      Re-subscribing already works — the last line for a handle wins, so a new
-      confirmed signup supersedes the old one — but it is the wrong shape for
-      "also tell me about Judy" or "stop telling me about Guin". The form does
-      not know who you already follow, so it opens with every toggle off and you
-      have to remember and re-tick your whole list, then confirm again. Getting
-      one name wrong silently drops the rest.
-      Wants a link that opens /notify with the current choices already ticked,
-      which means a stable per-subscriber token in the message rather than the
-      one-shot confirmation token, and an unsubscribe that is a button rather
-      than an empty list. Worth deciding at the same time whether that page also
-      shows what they have already been sent.
-- Add an audit page for myself
-  - Include amount of people subscribed, and how many impressions I get if possible
-- Setup some type of down detector
-- Make about me better
-- Change formatting for actual portfolio page
-- Add page for my programming projects
+# Plans
+
+What this site is trying to be, and the directions that are open. Deliberately
+at the level of ideas: no line numbers, no function names, no hex values. The
+implementation-level detail — decisions already made, questions still open, the
+code they touch — lives in `.claude/plans/`, indexed in the README there.
+
+## What the site is
+
+A film photographer's own archive, self-hosted on one box, published as a
+website. Every photograph on it was shot, developed and scanned by the owner,
+and the site is the repository of record rather than a selection from one.
+
+That is the unusual thing about it, and most of the tension below comes from it.
+
+## The archive and the portfolio are two different sites
+
+Right now they share one. `/all` and `/browse` are a file browser: a folder
+tree, nearly nine hundred photographs, counts on every heading. That is
+genuinely the right tool for finding one negative among years of them, and it
+should stay. `/` and `/recent` are presentation — the pages a stranger lands on.
+
+The two keep bleeding into each other, and it always runs the same direction:
+the archive's habits show up on the front door. Folder names stand in for
+titles. File counts sit above the first photograph. A roll is identified by its
+path.
+
+The direction is not to hide the archive. It is to stop the front door being
+built out of it — to let the presented surface have its own names, its own
+order, and its own idea of what a section is, while the archive underneath goes
+on being a file browser and gets better at that job.
+
+## Presentation
+
+The ambition is that someone who does not know the owner can arrive, understand
+within a screen what they are looking at, and want to keep scrolling.
+
+What that implies, roughly in order of how much it would change:
+
+- **Named bodies of work.** A portfolio's unit is a series with a title. A
+  file browser's is a directory. The site currently shows the second.
+- **One measure.** Page width, and where the content's left edge sits, should
+  not change as you move between pages.
+- **`/work` is the page a client lands on** and is the thinnest page on the
+  site. It is also half a delivery portal, which is why it looks like one.
+  Those two jobs may not belong on one page.
+- **A face on the About page.** The single highest-value thing that page is
+  missing, and it is a file, not a feature.
+- **The dark theme is the better presentation of the photographs.** Worth
+  deciding whether it should be the default rather than the opt-in.
+
+Two constraints sit over all of it. The photographs are the only thing on this
+site allowed to be heavy — the markup, styling and scripts are a few tens of
+kilobytes and should stay that way, and no feature here is worth a framework.
+And every word a visitor reads is the owner's, so any of this that needs prose
+stops at the point where prose is needed.
+
+## The site is about people, not files
+
+This is the part that makes it not a generic portfolio. There is a person index,
+photographs are tagged by who is in them, and someone can ask to hear about a
+named person and be messaged when a new roll carrying them goes up. The home
+page invites exactly that.
+
+It is also the part that touches other people's data, so it moves carefully:
+nothing is sent to an unconfirmed address, and a page should not reveal whether
+a given address is subscribed. Where it is still awkward is changing your mind
+— saying "also tell me about her" currently means declaring your whole list
+again from memory.
+
+The open question underneath is how much of a person the site should show. A
+face per person on the index is presentation. A page that answers "who is this
+and where do they appear" is closer to a profile, and that is a decision about
+other people, not about layout.
+
+## What "recent" means
+
+A question that keeps coming back in different clothes: is a photograph's date
+when it was published or when it was taken? The archive's answer is
+publication — a negative scanned today is new today, whatever year it was shot.
+A person's page reads more naturally by capture date. Both are defensible and
+they sort differently, so the site currently answers inconsistently by accident.
+
+Worth settling once, deliberately, rather than per page.
+
+## Durability
+
+The photographs can be re-derived and the renditions can be rebuilt. Two things
+cannot: the record of who consented to be messaged, and the record of what has
+already been sent. Both exist in exactly one place, on one machine, and nothing
+copies them anywhere.
+
+Everything else in this area is smaller and in the same spirit — knowing when
+the site is down rather than hearing about it, and not being able to deploy a
+build whose tests fail.
+
+## Beyond photographs
+
+There is a private notes vault the site can already render, and an unbuilt idea
+of a page for programming work. Whether this stays a photography site with a
+side room, or becomes two things sharing a domain, is undecided — and the
+content source for it is the decision that settles the shape, not the routing.
+
+## Where the detail lives
+
+`.claude/plans/` — one file per topic, plus the measured front-end audit and a
+record of shipped work kept for its reasoning. Note that directory is
+gitignored, which is discussed in its README and is worth a decision.
