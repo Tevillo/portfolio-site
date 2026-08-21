@@ -1,10 +1,23 @@
+/* Light theme. The three foreground tokens below are pinned to WCAG AA (4.5:1)
+   against *both* --bg and --surface, because every one of them lands on both:
+   --muted carries the tagline, top nav, breadcrumbs, counts and footer, and
+   --accent is every link on the site. They were #6c7559 / #6b8e4e / #87a96b,
+   measuring 4.18 / 3.23 / 2.29 on --bg — all three below AA, and the third
+   meant hovering a link *lowered* its contrast. Same hue and saturation, walked
+   down in lightness until both grounds clear the threshold. */
 :root {
   --bg: #edefe7;
   --surface: #f6f7f1;
   --text: #2f3a26;
-  --muted: #6c7559;
-  --accent: #6b8e4e;
-  --accent-hover: #87a96b;
+  /* 4.61 on --bg, 4.97 on --surface */
+  --muted: #666e54;
+  /* 4.61 / 4.96 — and #f6f7f1 on an accent fill goes 3.48 -> 4.96 with it,
+     which is what makes the notify submit and lightbox download buttons
+     legible. */
+  --accent: #57733f;
+  /* 6.07 / 6.53. Darker than --accent, not lighter: hover has to raise
+     contrast. The dark theme lightens instead, for the same reason. */
+  --accent-hover: #4a5f37;
   --border: #c9d1b8;
   /* Stable light foreground used for text on accent/dark backgrounds —
      decoupled from --surface so a dark-theme can flip the card surface
@@ -13,7 +26,7 @@
   /* Accent at low opacity, for marking a selected row without printing text
      on top of the accent itself. Translucent so it composites over whichever
      surface it lands on. */
-  --accent-soft: rgba(107, 142, 78, 0.2);
+  --accent-soft: rgba(87, 115, 63, 0.2);
 }
 
 /* Dark theme — opt-in site-wide. The inline head script in views.rs sets
@@ -1238,8 +1251,9 @@ main.portfolio .work-gallery .section-label {
   font-weight: 600;
 }
 
-main.work .work-gallery .section-count,
-main.portfolio .work-gallery .section-count {
+/* Only the work delivery pages still print a count next to a section label;
+   the home page and /recent dropped theirs. */
+main.work .work-gallery .section-count {
   font-weight: 400;
   font-size: 0.85rem;
   color: var(--muted);

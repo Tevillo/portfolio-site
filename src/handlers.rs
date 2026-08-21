@@ -65,7 +65,7 @@ async fn portfolio_groups(state: &AppState) -> Vec<FolderGroup> {
     let mut dir_raws: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut groups: Vec<FolderGroup> = Vec::new();
     // Absolute source paths in flattened `groups` order, the shape
-    // `fill_preview_dims` expects.
+    // `fill_image_dims` expects.
     let mut sources: Vec<PathBuf> = Vec::new();
 
     for section in sections {
@@ -98,6 +98,7 @@ async fn portfolio_groups(state: &AppState) -> Vec<FolderGroup> {
                 jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
                 raw_download_url,
                 dims: None,
+                srcset: None,
                 name: p.name,
             });
         }
@@ -121,7 +122,9 @@ async fn portfolio_groups(state: &AppState) -> Vec<FolderGroup> {
     // Same reason as the folder walk: the natural-ratio masonry carries no CSS
     // aspect-ratio, so without intrinsic dimensions every tile lays out at zero
     // height and `loading="lazy"` defers nothing.
-    fill_preview_dims(&sources, &mut groups).await;
+    // The home page's tiles are 410px wide and already on Preview; sizing a
+    // srcset for them is the separate job in FRONTEND.md.
+    fill_image_dims(&sources, &mut groups, ThumbKind::Preview, None).await;
     groups
 }
 
@@ -134,9 +137,11 @@ pub async fn about(State(state): State<AppState>) -> Response {
     let portrait = match safe_resolve(state.photos_root(), rel).await {
         Ok(path) if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) => {
             let url = format!("/preview/{}", encode_path(rel));
-            let dims = tokio::task::spawn_blocking(move || thumbs::preview_dimensions(&path).ok())
-                .await
-                .unwrap_or(None);
+            let dims = tokio::task::spawn_blocking(move || {
+                thumbs::rendition_dimensions(&path, ThumbKind::Preview).ok()
+            })
+            .await
+            .unwrap_or(None);
             dims.map(|d| (url, d))
         }
         _ => None,
@@ -151,7 +156,7 @@ pub async fn about(State(state): State<AppState>) -> Response {
 /// `GET /robots.txt`. Two jobs: point crawlers at the sitemap, and keep them
 /// out of the routes that transfer bytes rather than serve pages.
 ///
-/// Deliberately leaves `/image/`, `/thumb/` and `/preview/` crawlable. Blocking
+/// Deliberately leaves `/image/` and the rendition routes crawlable. Blocking
 /// them is the reflex, but Google Images is a real discovery path for a
 /// photographer and those routes are what it would index; only `/download/`
 /// (full-resolution originals and RAW siblings, served as attachments) is worth
@@ -213,7 +218,7 @@ pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
     // something on it. Intermediate folders come along as each group's parents
     // are themselves groups only when they hold photos too; listing the leaves
     // is what matters, since the crawler reaches the rest from /browse.
-    if let Ok(groups) = walk_groups(state.photos_root(), "", "thumb").await {
+    if let Ok(groups) = walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None).await {
         paths.extend(
             groups
                 .iter()
@@ -357,6 +362,7 @@ async fn render_dir(
                 jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                 raw_download_url,
                 dims: None,
+                srcset: None,
                 name,
             }
         })
@@ -457,6 +463,7 @@ async fn read_dir_images(root: &Path, rel: &str) -> Vec<ImageEntry> {
                 jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                 raw_download_url,
                 dims: None,
+                srcset: None,
                 name,
             }
         })
@@ -579,6 +586,7 @@ pub async fn person_photos(
             jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
             raw_download_url,
             dims: None,
+            srcset: None,
             name: p.name,
         });
     }
@@ -609,7 +617,7 @@ fn people_unavailable_response() -> Response {
 }
 
 pub async fn all_photos(State(state): State<AppState>) -> Response {
-    match walk_groups(state.photos_root(), "", "thumb").await {
+    match walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None).await {
         Ok(groups) => {
             let crumbs = vec![
                 Crumb {
@@ -930,7 +938,18 @@ pub async fn recent_photos(State(state): State<AppState>) -> Response {
     let folders = recent::load(state.photos_root()).await;
     let mut groups: Vec<FolderGroup> = Vec::new();
     for folder in &folders {
-        match walk_groups(state.photos_root(), folder, "preview").await {
+        // Grid for the tile, Medium as the second candidate: /recent's tiles are
+        // 252-327 CSS px, so 400px is right for a 1x screen and half what a 2x
+        // one wants. See `views::GRID_SIZES`.
+        match walk_groups(
+            state.photos_root(),
+            folder,
+            ThumbKind::Grid,
+            true,
+            Some(ThumbKind::Medium),
+        )
+        .await
+        {
             Ok(mut g) => groups.append(&mut g),
             // One unreadable folder drops out of the page instead of 500ing the
             // whole drop, matching how `recent::load` treats an entry that no
@@ -947,14 +966,26 @@ pub async fn recent_photos(State(state): State<AppState>) -> Response {
 /// directory that directly contains JPEGs. `start_rel` is relative to `root`
 /// (empty = the whole photos tree, as `/all` uses); paths and URLs stay
 /// rooted at `root` so thumbnail/image links resolve regardless of where the
-/// walk starts. `thumb_route` selects which rendition the displayed tile loads
-/// — `"thumb"` (400px grid) for dense listings, `"preview"` (1600px) where tiles
-/// render larger. Only `/all` walks the tree now; the home page is driven by the
+/// walk starts.
+///
+/// `kind` selects which rendition the displayed tile loads — [`ThumbKind::Grid`]
+/// (400px) for dense listings, [`ThumbKind::Preview`] (1600px) where tiles render
+/// larger. `natural_ratio` says whether the page lays those tiles out at their
+/// own aspect ratio, which decides whether intrinsic dimensions get read: the
+/// square grids reserve their space in CSS and need none, so /all is spared 800+
+/// header reads it would never use. `srcset_kind` adds one larger candidate so a
+/// high-density screen can take a sharper file than `kind` alone would give it;
+/// it is only consulted when `natural_ratio` is set, since that is when the
+/// dimensions the descriptors need are read at all.
+///
+/// Only `/all` and `/recent` walk the tree; the home page is driven by the
 /// `portfolio/*` tags instead.
 async fn walk_groups(
     root: &Path,
     start_rel: &str,
-    thumb_route: &str,
+    kind: ThumbKind,
+    natural_ratio: bool,
+    srcset_kind: Option<ThumbKind>,
 ) -> Result<Vec<FolderGroup>, StatusCode> {
     let start_abs = if start_rel.is_empty() {
         root.to_path_buf()
@@ -964,7 +995,7 @@ async fn walk_groups(
     let mut stack: Vec<(PathBuf, String)> = vec![(start_abs, start_rel.to_string())];
     let mut groups: Vec<FolderGroup> = Vec::new();
     // Absolute source path of every image pushed into `groups`, kept in the
-    // same flattened order so `fill_preview_dims` can zip the two together
+    // same flattened order so `fill_image_dims` can zip the two together
     // without having to reverse the URL encoding.
     let mut sources: Vec<PathBuf> = Vec::new();
 
@@ -1018,11 +1049,12 @@ async fn walk_groups(
                     .get(&file_stem_lower(&name))
                     .map(|raw| format!("/download/{}", encode_path(&join_rel(&rel, raw))));
                 ImageEntry {
-                    thumb_url: format!("/{}/{}", thumb_route, encode_path(&rel_child)),
+                    thumb_url: format!("/{}/{}", kind.route(), encode_path(&rel_child)),
                     image_url: format!("/image/{}", encode_path(&rel_child)),
                     jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                     raw_download_url,
                     dims: None,
+                    srcset: None,
                     name,
                 }
             })
@@ -1054,24 +1086,35 @@ async fn walk_groups(
         }
     }
 
-    // The preview rendition feeds the natural-ratio masonry, whose tiles carry
-    // no CSS aspect-ratio. Without intrinsic dimensions every <img> lays out at
-    // zero height, so the browser thinks the entire grid is in the viewport and
-    // `loading="lazy"` fetches all of it up front. Fill them in one blocking
-    // batch: `preview_dimensions` only reads JPEG/EXIF headers, no decode.
-    if thumb_route == "preview" {
-        fill_preview_dims(&sources, &mut groups).await;
+    // A natural-ratio masonry's tiles carry no CSS aspect-ratio. Without
+    // intrinsic dimensions every <img> lays out at zero height, so the browser
+    // thinks the entire grid is in the viewport and `loading="lazy"` fetches all
+    // of it up front — which is how dropping these would undo the whole point of
+    // serving a smaller rendition. Fill them in one blocking batch:
+    // `rendition_dimensions` only reads JPEG/EXIF headers, no decode.
+    if natural_ratio {
+        fill_image_dims(&sources, &mut groups, kind, srcset_kind).await;
     }
 
     Ok(groups)
 }
 
-/// Populate `ImageEntry::dims` for every image in `groups`, off the async
-/// runtime since the underlying reads are synchronous file I/O. `sources` is
-/// the absolute path of each image, in the same order the images appear when
-/// `groups` is flattened. Photos whose headers can't be read keep `None` and
-/// simply render without the attributes.
-async fn fill_preview_dims(sources: &[PathBuf], groups: &mut [FolderGroup]) {
+/// Populate `ImageEntry::dims` — and, when `srcset_kind` is set, the second
+/// `srcset` candidate — for every image in `groups`, off the async runtime since
+/// the underlying reads are synchronous file I/O. `sources` is the absolute path
+/// of each image, in the same order the images appear when `groups` is
+/// flattened. `kind` must be the rendition those images are linked at, so the
+/// dimensions describe the file the browser will fetch. Photos whose headers
+/// can't be read keep `None` and simply render without the attributes.
+///
+/// The two renditions share one `oriented_dimensions` call per photo:
+/// `scale_to` is arithmetic, so a second candidate costs no extra disk read.
+async fn fill_image_dims(
+    sources: &[PathBuf],
+    groups: &mut [FolderGroup],
+    kind: ThumbKind,
+    srcset_kind: Option<ThumbKind>,
+) {
     if sources.is_empty() {
         return;
     }
@@ -1079,14 +1122,20 @@ async fn fill_preview_dims(sources: &[PathBuf], groups: &mut [FolderGroup]) {
     let dims = match tokio::task::spawn_blocking(move || {
         sources
             .into_iter()
-            .map(|p| thumbs::preview_dimensions(&p).ok())
+            .map(|p| {
+                let oriented = thumbs::oriented_dimensions(&p).ok()?;
+                Some((
+                    thumbs::scale_to(oriented, kind.max_dim()),
+                    srcset_kind.map(|k| thumbs::scale_to(oriented, k.max_dim()).0),
+                ))
+            })
             .collect::<Vec<_>>()
     })
     .await
     {
         Ok(d) => d,
         Err(e) => {
-            warn!(error = %e, "preview dimension batch panicked");
+            warn!(error = %e, "image dimension batch panicked");
             return;
         }
     };
@@ -1095,8 +1144,31 @@ async fn fill_preview_dims(sources: &[PathBuf], groups: &mut [FolderGroup]) {
         .flat_map(|g| g.images.iter_mut())
         .zip(dims)
     {
-        img.dims = dim;
+        let Some((scaled, big_w)) = dim else { continue };
+        img.dims = Some(scaled);
+        // The larger candidate is the same photo under a different route, so the
+        // URL is the linked one with its prefix swapped — `thumb_url` is always
+        // built as `/{route}/{encoded rel}`, so the tail already carries the
+        // encoding the other route wants.
+        //
+        // Skipped when the larger candidate is not actually larger, which is the
+        // case for any source already smaller than `kind`'s cap: `scale_to`
+        // never enlarges, so both renditions are the same bytes and a `srcset`
+        // offering two identical widths tells the browser nothing.
+        img.srcset = match (srcset_kind, big_w) {
+            (Some(k), Some(w)) if w > scaled.0 => {
+                swap_rendition_route(&img.thumb_url, kind, k).map(|u| (u, w))
+            }
+            _ => None,
+        };
     }
+}
+
+/// `/thumb/2026/a.jpg` -> `/medium/2026/a.jpg`. `None` if `url` is not under
+/// `from`'s route, which yields a tile with no `srcset` rather than a 404.
+fn swap_rendition_route(url: &str, from: ThumbKind, to: ThumbKind) -> Option<String> {
+    let rel = url.strip_prefix(&format!("/{}/", from.route()))?;
+    Some(format!("/{}/{}", to.route(), rel))
 }
 
 pub async fn image(
@@ -1172,6 +1244,14 @@ pub async fn thumb(
     headers: HeaderMap,
 ) -> Response {
     render_thumb_response(&state, &rel, &headers, ThumbKind::Grid).await
+}
+
+pub async fn medium(
+    State(state): State<AppState>,
+    AxumPath(rel): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    render_thumb_response(&state, &rel, &headers, ThumbKind::Medium).await
 }
 
 pub async fn preview(
@@ -2006,6 +2086,7 @@ mod tests {
                     jpg_download_url: String::new(),
                     raw_download_url: None,
                     dims: None,
+                    srcset: None,
                 })
                 .collect(),
             favs_count: 0,

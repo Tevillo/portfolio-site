@@ -29,6 +29,15 @@ pub struct ImageEntry {
     /// `loading="lazy"` defers nothing. Square grids reserve their space via
     /// `aspect-ratio: 1` in CSS and leave this `None`.
     pub dims: Option<(u32, u32)>,
+    /// One larger `srcset` candidate beyond `thumb_url`, as (url, intrinsic
+    /// width in px). `None` emits a plain `src` and nothing else.
+    ///
+    /// Only the second candidate is stored because the first *is* `thumb_url`,
+    /// whose width comes from `dims`. Both are required for a `srcset`: a `w`
+    /// descriptor is a claim about the file's real width, and a wrong one makes
+    /// the browser choose against the wrong number rather than merely
+    /// inefficiently.
+    pub srcset: Option<(String, u32)>,
 }
 
 pub struct Crumb {
@@ -351,6 +360,26 @@ fn site_description() -> &'static str {
 /// ambiguous in a sitemap and useless in an Open Graph card.
 pub fn abs_url(path: &str) -> String {
     format!("{SITE_ORIGIN}{path}")
+}
+
+/// Absolute `og:image` URL for a photo, given the `/image/...` URL of the same
+/// photo — i.e. the 1600px preview rendition rather than the original.
+///
+/// The original is the wrong file for a share card. The home page's was 3.4 MB,
+/// and a scraper that caps or times out below that renders no card at all —
+/// which matters here because notification messages are where this site's links
+/// actually get previewed. The preview rendition of the same photo is ~290 KB
+/// and larger than any card displays.
+///
+/// The swap is a prefix rewrite because every `ImageEntry::image_url` is built
+/// as `/image/{encoded rel}`, so the tail is already the encoded path the
+/// `/preview/` route wants. Falls back to the input untouched if that ever
+/// stops being true, which yields the old behaviour rather than a broken URL.
+fn share_image(image_url: &str) -> String {
+    match image_url.strip_prefix("/image/") {
+        Some(rel) => abs_url(&format!("/preview/{rel}")),
+        None => abs_url(image_url),
+    }
 }
 
 /// `application/ld+json` describing the site owner, emitted on the home and
@@ -713,6 +742,22 @@ const EAGER_TILES: usize = 2;
 /// `favs_count` splits the grid: that many tiles lead, then a hairline, then
 /// the rest. Zero (or a count covering every image) draws no line — there is
 /// nothing to separate.
+/// `sizes` for the natural-ratio masonry, and the reason it is a constant
+/// rather than something derived.
+///
+/// The grid is CSS multi-column (`columns: 360px`), so the tile width is chosen
+/// by the browser and cannot be expressed exactly here. Measured, it barely
+/// moves: 252 CSS px at a 1920 viewport, 283 at 945, and 327 at 390 where the
+/// single column is at its widest. So two cases cover it — the single column
+/// below 700px, and a flat 260px above.
+///
+/// 260 rather than the 283 actually measured, deliberately. The Grid rendition
+/// puts a portrait scan at ~272px wide, so declaring 283 would put every
+/// portrait tile just *over* the threshold and send a 1x desktop to the 800px
+/// candidate — four times the bytes to cover a 4% difference nobody can see.
+/// Declaring 260 keeps 1x on the small file and still sends 2x to the large one.
+const GRID_SIZES: &str = "(max-width: 700px) calc(100vw - 3rem), 260px";
+
 fn image_grid(images: &[ImageEntry], masonry: bool, eager: usize, favs_count: usize) -> Markup {
     let divider_at = (favs_count > 0 && favs_count < images.len()).then_some(favs_count);
     html! {
@@ -746,10 +791,21 @@ fn image_grid(images: &[ImageEntry], masonry: bool, eager: usize, favs_count: us
 /// is what makes `loading="lazy"` able to skip off-screen photos at all, and it
 /// removes the layout shift as each image lands.
 fn grid_img(img: &ImageEntry, eager: bool) -> Markup {
+    // A `srcset` needs the width of *every* candidate, and the first candidate's
+    // width is `dims.0` — so no dims means no srcset, and the tile falls back to
+    // the plain `src` it had before.
+    let srcset = match (img.dims, img.srcset.as_ref()) {
+        (Some((w, _)), Some((url, big_w))) => {
+            Some(format!("{} {w}w, {url} {big_w}w", img.thumb_url))
+        }
+        _ => None,
+    };
     html! {
         @match img.dims {
             Some((w, h)) => img
                 src=(img.thumb_url) alt=(img.name)
+                srcset=[srcset.as_deref()]
+                sizes=[srcset.as_ref().map(|_| GRID_SIZES)]
                 width=(w) height=(h)
                 decoding="async"
                 loading=(if eager { "eager" } else { "lazy" })
@@ -788,7 +844,7 @@ pub fn page(
     let description = format!("Film photographs in {title}, shot and scanned by {OWNER_NAME}.");
     // A listing's first tile is its largest image; showing it in a link preview
     // beats showing the site icon.
-    let og = images.first().map(|img| abs_url(&img.image_url));
+    let og = images.first().map(|img| share_image(&img.image_url));
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -1036,7 +1092,12 @@ fn gallery_sections(groups: &[FolderGroup]) -> Markup {
                         } @else {
                             a.section-label href=(g.browse_url) { (g.label) }
                         }
-                        span.section-count { "(" (g.images.len()) ")" }
+                        // No count here, unlike /all's heading. How many files
+                        // sit in a folder is archive information: useful when
+                        // you are navigating the archive, and on the home page
+                        // it is the first thing a visitor reads, ahead of any
+                        // photograph. /all and the work delivery pages keep
+                        // theirs — there a file count is the point.
                     }
                     // Only the first section is above the fold, so it is the
                     // only one that gets the eager budget.
@@ -1055,12 +1116,13 @@ pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
         .first()
         .and_then(|g| g.images.first())
         .map(|img| img.thumb_url.as_str());
-    // Full-size rather than the thumbnail: link previews crop their own, and a
-    // 400px tile renders as a blurry card.
+    // The preview rendition, not the tile and not the original: a 400px tile
+    // renders as a blurry card, and the original is megabytes of file a scraper
+    // may refuse. See [`share_image`].
     let og = groups
         .first()
         .and_then(|g| g.images.first())
-        .map(|img| abs_url(&img.image_url));
+        .map(|img| share_image(&img.image_url));
     // Bound outside the `html!` block: `Head` borrows its title, so a `format!`
     // temporary built inline would be dropped at the end of the builder chain
     // while the borrow is still live.
@@ -1127,7 +1189,7 @@ pub fn recent_page(groups: &[FolderGroup]) -> Markup {
     let og = groups
         .first()
         .and_then(|g| g.images.first())
-        .map(|img| abs_url(&img.image_url));
+        .map(|img| share_image(&img.image_url));
     // Bound outside `html!` for the same reason as in `grouped_gallery_page`:
     // `Head` borrows its title, so an inline `format!` temporary would be
     // dropped while the borrow is still live.

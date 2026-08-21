@@ -16,6 +16,14 @@ const ICC_IDENTIFIER: &[u8] = b"ICC_PROFILE\0";
 pub enum ThumbKind {
     /// 400px grid thumbnail.
     Grid,
+    /// 800px, the second `srcset` candidate for the natural-ratio grids.
+    ///
+    /// Sized from the measured tile: /recent lays out at 252-327 CSS px across
+    /// every viewport, so 400px covers a 1x screen and nothing more — on a 2x
+    /// phone a portrait scan's 272px width against a 327px slot is a 0.42x
+    /// upscale. 800px puts the same portrait at 544px, which is 0.96x for a 2x
+    /// laptop and 0.83x for a 2x phone, at roughly a quarter of Preview's bytes.
+    Medium,
     /// 1600px medium-size preview, used by the work feed so the page can
     /// show "big" photos without serving the multi-megabyte originals.
     Preview,
@@ -25,13 +33,31 @@ impl ThumbKind {
     pub(crate) fn subdir(self) -> &'static str {
         match self {
             ThumbKind::Grid => "thumbs",
+            ThumbKind::Medium => "medium",
             ThumbKind::Preview => "preview",
         }
     }
 
-    fn max_dim(self) -> u32 {
+    /// URL prefix this rendition is served under. Deliberately not `subdir`:
+    /// the Grid rendition caches to `thumbs/` but serves from `/thumb/`, and
+    /// having the two derived from one `match` is what stops a page linking a
+    /// route that does not exist.
+    pub(crate) fn route(self) -> &'static str {
+        match self {
+            ThumbKind::Grid => "thumb",
+            ThumbKind::Medium => "medium",
+            ThumbKind::Preview => "preview",
+        }
+    }
+
+    /// Every rendition, so the warm and prune passes cannot silently skip one
+    /// that was added later. Both used to carry their own array literal.
+    pub(crate) const ALL: [ThumbKind; 3] = [ThumbKind::Grid, ThumbKind::Medium, ThumbKind::Preview];
+
+    pub(crate) fn max_dim(self) -> u32 {
         match self {
             ThumbKind::Grid => 400,
+            ThumbKind::Medium => 800,
             ThumbKind::Preview => 1600,
         }
     }
@@ -48,32 +74,51 @@ pub struct ThumbInfo {
 }
 
 /// Cheap pre-flight: read just the JPEG header + EXIF orientation from `src`
-/// and return the (w, h) the Preview rendition will end up with after
-/// orientation rotation and downscaling to fit within `Preview.max_dim()`.
+/// and return the (w, h) the `kind` rendition will end up with after
+/// orientation rotation and downscaling to fit within `kind.max_dim()`.
 /// No image decode happens; only ~headers are read off disk, so this is
 /// safe to call per-photo during page render to populate `<img width
 /// height>` attributes that prevent layout shift.
-pub fn preview_dimensions(src: &Path) -> Result<(u32, u32)> {
+///
+/// `kind` has to be the rendition the page actually links, not whichever one
+/// is largest: the attributes are a claim about the bytes the browser is
+/// about to fetch. The natural-ratio masonry only reads the *ratio* out of
+/// them, so a mismatched scale would lay out correctly and still be a lie.
+pub fn rendition_dimensions(src: &Path, kind: ThumbKind) -> Result<(u32, u32)> {
+    Ok(scale_to(oriented_dimensions(src)?, kind.max_dim()))
+}
+
+/// The source's pixel dimensions after EXIF-orientation rotation, before any
+/// downscaling. Split out from [`rendition_dimensions`] so a page needing the
+/// dimensions of *several* renditions of the same photo — a `srcset` needs one
+/// `w` descriptor per candidate — pays for one header read rather than one per
+/// candidate. [`scale_to`] turns this into a given rendition's size and touches
+/// no disk at all.
+pub fn oriented_dimensions(src: &Path) -> Result<(u32, u32)> {
     let (raw_w, raw_h) = image::image_dimensions(src)
         .with_context(|| format!("reading dimensions of {}", src.display()))?;
     let orientation = read_orientation(src).unwrap_or(1);
-    let (w, h) = if (5..=8).contains(&orientation) {
+    Ok(if (5..=8).contains(&orientation) {
         (raw_h, raw_w)
     } else {
         (raw_w, raw_h)
-    };
-    let max = ThumbKind::Preview.max_dim();
+    })
+}
+
+/// Fit `(w, h)` inside a `max` x `max` box, preserving the aspect ratio and
+/// never enlarging. Pure arithmetic, and the same rule `ensure_thumb` renders
+/// by, which is what lets the `<img>` attributes describe the real file.
+pub fn scale_to((w, h): (u32, u32), max: u32) -> (u32, u32) {
     if w <= max && h <= max {
-        return Ok((w, h));
+        return (w, h);
     }
-    let (scaled_w, scaled_h) = if w >= h {
+    if w >= h {
         let ratio = max as f64 / w as f64;
         (max, ((h as f64) * ratio).round().max(1.0) as u32)
     } else {
         let ratio = max as f64 / h as f64;
         (((w as f64) * ratio).round().max(1.0) as u32, max)
-    };
-    Ok((scaled_w, scaled_h))
+    }
 }
 
 fn read_orientation(path: &Path) -> Option<u32> {

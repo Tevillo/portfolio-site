@@ -321,7 +321,9 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
                     counts.edited_jpeg += 1;
                 }
                 let bucket = parent_path(&subpath).to_string();
-                let preview_dims = crate::thumbs::preview_dimensions(&path).ok();
+                let preview_dims =
+                    crate::thumbs::rendition_dimensions(&path, crate::thumbs::ThumbKind::Preview)
+                        .ok();
                 grouped.entry(bucket).or_default().push(WorkPhoto {
                     rel: format!("work/{}/{}", name, subpath),
                     subpath,

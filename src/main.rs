@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
             eprintln!("unknown subcommand: {other}");
             eprintln!("usage:");
             eprintln!("  portfolio-site [serve]               run the web server");
-            eprintln!("  portfolio-site warm [--prune]        pre-generate grid + preview renditions for every photo");
+            eprintln!("  portfolio-site warm [--prune]        pre-generate every rendition for every photo");
             eprintln!("                                       (--prune also deletes cached renditions with no source)");
             eprintln!("  portfolio-site prebuild <name>...    build all zip combos for one or more work items");
             eprintln!("  portfolio-site prebuild --all        build all zip combos for every work item");
@@ -240,6 +240,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/nether-media/*path", get(nether::media))
         .route("/download/*path", get(handlers::download))
         .route("/thumb/*path", get(handlers::thumb))
+        .route("/medium/*path", get(handlers::medium))
         .route("/preview/*path", get(handlers::preview))
         .nest_service(
             "/static",
@@ -260,9 +261,13 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
 
 /// `portfolio-site warm [--prune]`
 ///
-/// Walks every servable JPEG under the photos root and forces both the grid
-/// (400px) and preview (1600px) renditions into the cache, so the first
-/// visitor to any folder never pays the on-demand decode/downscale cost.
+/// Walks every servable JPEG under the photos root and forces every rendition
+/// in [`ThumbKind::ALL`] into the cache, so the first visitor to any folder
+/// never pays the on-demand decode/downscale cost. Adding a variant to that
+/// constant is all it takes to have this build it too — the counts and the
+/// progress line below are derived from it rather than written out, because
+/// they were not, and going from two renditions to three made the summary
+/// print a number that had underflowed.
 ///
 /// Already-fresh renditions are detected by `ensure_thumb` (mtime check) and
 /// skipped cheaply, so this is safe to re-run after every deploy. Writes are
@@ -288,7 +293,12 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    println!("found {total} photos; warming grid + preview cache ({concurrency} at a time)");
+    let rendition_names = ThumbKind::ALL.map(ThumbKind::subdir).join(", ");
+    println!(
+        "found {total} photos; warming {rendition_names} ({concurrency} at a time, \
+         {} renditions each)",
+        ThumbKind::ALL.len(),
+    );
 
     let jpegs = Arc::new(jpegs);
     let next = Arc::new(AtomicUsize::new(0));
@@ -311,7 +321,7 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
                     break;
                 }
                 let src = &jpegs[idx];
-                for kind in [ThumbKind::Grid, ThumbKind::Preview] {
+                for kind in ThumbKind::ALL {
                     match thumbs::ensure_thumb(src, &photos_root, &cache_root, kind).await {
                         Ok(info) => {
                             if info.rebuilt {
@@ -335,12 +345,17 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
         let _ = w.await;
     }
 
+    // One attempt per photo per rendition. `saturating_sub` rather than plain
+    // arithmetic: these are `usize`, and the hardcoded `total * 2` this replaces
+    // went negative the moment a third rendition existed, wrapping the "already
+    // fresh" figure to about eighteen quintillion.
+    let attempted = total * ThumbKind::ALL.len();
+    let built = built.load(Ordering::Relaxed);
+    let failed = failed.load(Ordering::Relaxed);
     println!(
-        "done in {:.1}s — {} renditions generated, {} already fresh, {} failed",
+        "done in {:.1}s — {built} renditions generated, {} already fresh, {failed} failed",
         start.elapsed().as_secs_f32(),
-        built.load(Ordering::Relaxed),
-        total * 2 - built.load(Ordering::Relaxed) - failed.load(Ordering::Relaxed),
-        failed.load(Ordering::Relaxed),
+        attempted.saturating_sub(built).saturating_sub(failed),
     );
 
     if prune {
@@ -356,13 +371,13 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Remove every file under `cache/thumbs` and `cache/preview` whose
+/// Remove every file under every `cache/<rendition>/` directory whose
 /// root-relative path is not in `servable`. In-progress `.<name>.tmp` files
 /// (written by a concurrent render) are left alone. Reports how much was freed.
 async fn prune_orphans(cache_root: &Path, servable: &HashSet<PathBuf>) {
     let mut removed = 0usize;
     let mut freed = 0u64;
-    for subdir in [ThumbKind::Grid.subdir(), ThumbKind::Preview.subdir()] {
+    for subdir in ThumbKind::ALL.map(ThumbKind::subdir) {
         let base = cache_root.join(subdir);
         let mut stack = vec![base.clone()];
         while let Some(dir) = stack.pop() {
@@ -747,11 +762,18 @@ mod tests {
         // redirecting into it, so a single-folder tree makes `/browse` a 303 and
         // every assertion about the listing it renders untestable.
         std::fs::create_dir_all(photos.join("2024/favs")).unwrap();
-        for rel in ["portfolio/test.jpg", "2024/roll.jpg", "2024/favs/pick.jpg"] {
+        for rel in ["portfolio/test.jpg", "2024/roll.jpg"] {
             image::RgbImage::from_pixel(16, 16, image::Rgb([120, 140, 100]))
                 .save(photos.join(rel))
                 .expect("write test jpeg");
         }
+        // One source larger than every rendition cap, so the ladder is actually
+        // exercised: at 16px the Grid and Medium renditions are the same bytes
+        // (`scale_to` never enlarges) and no `srcset` is emitted at all. Kept to
+        // one file because the others only ever need to decode.
+        image::RgbImage::from_pixel(900, 600, image::Rgb([120, 140, 100]))
+            .save(photos.join("2024/favs/pick.jpg"))
+            .expect("write large test jpeg");
 
         // Declares `2024` as the current drop and leaves `portfolio` out, so
         // `/recent` renders a strict subset and the tests can tell the two
@@ -819,6 +841,20 @@ mod tests {
         assert!(resp.headers().contains_key(header::ETAG));
     }
 
+    /// Every rendition in `ThumbKind::ALL` has a route that serves it. The
+    /// warm and prune passes iterate that constant, so a variant added without
+    /// a route would be rendered to disk and then be unreachable.
+    #[tokio::test]
+    async fn every_rendition_has_a_route() {
+        let f = fixture();
+        for kind in ThumbKind::ALL {
+            let uri = format!("/{}/portfolio/test.jpg", kind.route());
+            let resp = get(&f.router, &uri).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} did not serve");
+            assert!(resp.headers().contains_key(header::ETAG), "{uri} has no ETag");
+        }
+    }
+
     /// The regression this whole split exists to prevent. A cache updates its
     /// stored entry's headers from a 304 (RFC 9111 §4.3.4), so a `no-cache`
     /// leaking onto this response would rewrite the cached image's `max-age`
@@ -838,6 +874,118 @@ mod tests {
             !html.contains("/browse/portfolio"),
             "undeclared folder leaked onto /recent"
         );
+    }
+
+    /// `/recent` lays its tiles out five-up at ~210px, so it links the 400px
+    /// Grid rendition, not the 1600px Preview one. It used to link Preview,
+    /// which cost 19.7 MB a page for tiles the same size as `/all`'s 23 KB ones.
+    ///
+    /// The intrinsic dimensions are the other half of the same change and are
+    /// asserted here too: the tiles carry no CSS `aspect-ratio`, so without
+    /// `<img width height>` the grid lays out at zero height, the browser
+    /// believes all of it is in the viewport, and `loading="lazy"` fetches every
+    /// file up front — undoing the saving this test exists to protect.
+    #[tokio::test]
+    async fn recent_serves_grid_renditions_with_intrinsic_dimensions() {
+        let f = fixture();
+        let html = body_string(get(&f.router, "/recent").await).await;
+        // Scoped to <img src>, because the page's og:image is a `/preview/`
+        // URL on purpose (see `share_cards_use_the_preview_rendition`) and a
+        // document-wide search for it would fail on that alone.
+        assert!(
+            html.contains("<img src=\"/thumb/"),
+            "no grid renditions on /recent"
+        );
+        assert!(
+            !html.contains("<img src=\"/preview/"),
+            "/recent is back on the 1600px preview rendition"
+        );
+        assert!(
+            html.contains(" width=\"") && html.contains(" height=\""),
+            "tiles lost their intrinsic dimensions"
+        );
+    }
+
+    /// The `srcset` that closes the gap the Grid-only version of `/recent` left
+    /// on phones: its single column is the *widest* tile the page ever lays out
+    /// (327 CSS px measured, against 252 at a 1920 viewport), so the 400px
+    /// rendition that is right for the dense desktop grid is the one case it
+    /// cannot cover.
+    ///
+    /// Both descriptors have to be present and have to differ — a `srcset` whose
+    /// candidates claim the same width silently degrades to picking the first.
+    #[tokio::test]
+    async fn recent_tiles_offer_a_larger_srcset_candidate() {
+        let f = fixture();
+        let html = body_string(get(&f.router, "/recent").await).await;
+        let tile = html
+            .split("<img ")
+            .find(|t| t.contains("srcset="))
+            .expect("no tile carried a srcset");
+        let srcset = tile
+            .split("srcset=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("srcset was empty");
+        assert!(srcset.contains("/thumb/"), "small candidate missing: {srcset}");
+        assert!(srcset.contains("/medium/"), "large candidate missing: {srcset}");
+        let widths: Vec<u32> = srcset
+            .split(',')
+            .filter_map(|c| c.trim().rsplit(' ').next())
+            .filter_map(|w| w.trim_end_matches('w').parse().ok())
+            .collect();
+        assert_eq!(widths.len(), 2, "expected two descriptors: {srcset}");
+        assert!(
+            widths[1] > widths[0],
+            "the larger candidate is not larger: {srcset}"
+        );
+        // Without `sizes` the browser assumes the tile is the full viewport
+        // width and takes the biggest candidate every time, on every device.
+        assert!(tile.contains("sizes=\""), "srcset without a sizes hint");
+
+        // The other side of the guard: the fixture's 16px photo is smaller than
+        // the Grid cap, so both renditions are identical and it must offer no
+        // candidates rather than two equal ones.
+        let tiny = html
+            .split("<img ")
+            .find(|t| t.contains("/thumb/2024/roll.jpg"))
+            .expect("the small photo is missing from /recent");
+        assert!(
+            !tiny.contains("srcset="),
+            "a source smaller than the grid cap still emitted a srcset"
+        );
+    }
+
+    /// A share card points at the preview rendition. The original is the wrong
+    /// file for the job — the home page's is 3.4 MB, and a scraper that caps
+    /// below that renders no card at all.
+    #[tokio::test]
+    async fn share_cards_use_the_preview_rendition() {
+        let f = fixture();
+        let mut checked = 0;
+        for path in ["/", "/recent", "/browse/2024"] {
+            let html = body_string(get(&f.router, path).await).await;
+            let Some(rest) = html.split("property=\"og:image\" content=\"").nth(1) else {
+                continue;
+            };
+            let url = rest.split('"').next().unwrap_or_default();
+            // The icon is the documented fallback for a page with no photo to
+            // show — the fixture's home page has no tagged portfolio, so it
+            // takes that branch and there is nothing to assert about it.
+            if url.ends_with("/static/icon.png") {
+                continue;
+            }
+            assert!(
+                url.contains("/preview/"),
+                "{path} og:image is not a preview rendition: {url}"
+            );
+            assert!(
+                !url.contains("/image/"),
+                "{path} og:image is still the full-size original: {url}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no page produced a photo-derived og:image");
     }
 
     /// On `/recent` a roll is one section with its favorites at the front and a
@@ -1047,7 +1195,7 @@ mod tests {
         );
         // Google Images is a real discovery path for a photography site, so the
         // image routes must stay crawlable.
-        for route in ["/image/", "/thumb/", "/preview/"] {
+        for route in ["/image/", "/thumb/", "/medium/", "/preview/"] {
             assert!(
                 !robots.contains(&format!("Disallow: {route}")),
                 "robots.txt blocked {route}, which hides the photographs"
