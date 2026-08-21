@@ -8,7 +8,7 @@ This is not an assessment of the site as it stands. The measured audit of the
 current front end is `.claude/plans/frontend-audit.md`, and shipped work is
 `.claude/plans/done.md`.
 
-## First
+## Safe copies of data
 
 **Get `data/` off this box.** The record of who agreed to be messaged, and the
 record of what has already been sent, exist in one place on one machine and
@@ -16,7 +16,7 @@ nothing copies them anywhere. Losing the first destroys consent I cannot
 reconstruct; losing the second means the next send mails everyone about rolls
 they were already told about. Everything else on this list can wait behind it.
 
-## Photography, presented
+## Page layout: home, About, 404
 
 **Portfolio formatting on the home page.** The home page stays at `/`. What it
 should look like is open — big single-column photographs, justified rows at true
@@ -31,7 +31,7 @@ paragraphs have to be, so it comes before rewriting them.
 reorganised, so old links will rot. Right now that is a blank white page with no
 way back.
 
-## People
+## People tab
 
 **Covers on the People tab.** A tile per person — their photograph, their name,
 their count — instead of a list of names. The cover should be a photo I tag
@@ -41,7 +41,7 @@ deliberately, not whatever sorts first.
 telling me about Guin" currently means declaring the whole list again from
 memory, and getting one name wrong silently drops the rest.
 
-## Order
+## Sort order
 
 **`/all` by most recently changed**, within each year. The years stay newest
 first; the rolls I touched last should lead their year.
@@ -52,7 +52,7 @@ photographs, which is the reverse of everywhere else.
 Both turn on one unsettled question: whether a photograph's date is when it was
 published or when it was taken. Worth answering once rather than per page.
 
-## Knowing it works
+## Reporting and uptime checks
 
 **An audit report**, as a CLI command rather than a web route — subscribers,
 downloads, and separately per client job, because the question there is not "how
@@ -61,7 +61,7 @@ is the site doing" but "did this client get their photos".
 **A down detector**, pointed at `/version` so a wrong answer means a stale
 deploy and not merely "up".
 
-## New ground
+## Programming projects page
 
 **A programming projects page.** Undecided, and the content source decides the
 shape: notes in the vault, a constant in the code, a data file, or the GitHub
