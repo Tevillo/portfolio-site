@@ -34,6 +34,19 @@ const MEDIA_DIR: &str = "Home/Cooking/Recipes/Engineer";
 /// URL prefix the rewritten `<img src>` values point at, handled by [`media`].
 const MEDIA_URL: &str = "/nether-media";
 
+/// Vault folders that are never exposed: personal records. The walk skips them,
+/// so they stay out of the sidebar tree, the graph, the wikilink index and the
+/// sitemap, and [`render`] refuses a hand-typed URL into one.
+const PRIVATE_DIRS: &[&str] = &["Home/Medical"];
+
+/// Whether a `/`-separated vault-relative path names a [`PRIVATE_DIRS`] folder
+/// or anything inside it.
+fn is_private(rel: &str) -> bool {
+    PRIVATE_DIRS
+        .iter()
+        .any(|dir| rel == *dir || rel.strip_prefix(*dir).is_some_and(|r| r.starts_with('/')))
+}
+
 pub async fn root(State(state): State<AppState>) -> Response {
     render(&state, HOME_NOTE, true).await
 }
@@ -141,7 +154,11 @@ fn resolve_media(note_dir: &str, dest: &str) -> Option<String> {
         return None;
     }
     let dest = percent_decode(dest);
-    let base = if dest.contains('/') { note_dir } else { MEDIA_DIR };
+    let base = if dest.contains('/') {
+        note_dir
+    } else {
+        MEDIA_DIR
+    };
 
     // Normalize lexically; `..` popping past the start means the src reaches
     // outside the vault, which can never land in MEDIA_DIR.
@@ -198,6 +215,9 @@ fn percent_decode(s: &str) -> String {
 }
 
 async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
+    if is_private(rel_no_ext) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let root = state.nether_root();
 
     // The vault is small; rescanning per request keeps the sidebar and link
@@ -235,7 +255,7 @@ async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
 
 /// Walk the vault and return every note's path relative to the root, including
 /// the `.md` suffix, using `/` separators. Dotfiles/dirs (`.obsidian`,
-/// `.trash`, `.git`) are skipped.
+/// `.trash`, `.git`) and [`PRIVATE_DIRS`] are skipped.
 /// Canonical `/nether/...` paths for every note in the vault, for the sitemap.
 /// Lives here rather than in `handlers` so the vault's layout rules — which
 /// files count as notes, how a path becomes a URL — stay in one module.
@@ -273,6 +293,9 @@ async fn collect_notes(root: &Path) -> Vec<String> {
             } else {
                 format!("{rel}/{name}")
             };
+            if is_private(&child_rel) {
+                continue;
+            }
             if ftype.is_dir() {
                 stack.push((entry.path(), child_rel));
             } else if ftype.is_file() && has_md_ext(&name) {
@@ -447,11 +470,7 @@ impl GraphData {
 
 /// Build the link graph by reading every note and resolving its wikilinks
 /// against the vault index. Edges are undirected and de-duplicated.
-async fn build_graph(
-    root: &Path,
-    notes: &[String],
-    index: &HashMap<String, String>,
-) -> GraphData {
+async fn build_graph(root: &Path, notes: &[String], index: &HashMap<String, String>) -> GraphData {
     let mut nodes = Vec::with_capacity(notes.len());
     let mut idx_of = HashMap::new();
     for rel in notes {
@@ -648,7 +667,11 @@ impl Dir {
 fn build_crumbs(rel_no_ext: &str, is_home: bool) -> Vec<Crumb> {
     let mut crumbs = vec![Crumb {
         label: "Nether".into(),
-        url: if is_home { None } else { Some("/nether".into()) },
+        url: if is_home {
+            None
+        } else {
+            Some("/nether".into())
+        },
     }];
     if is_home {
         return crumbs;
@@ -669,6 +692,17 @@ mod tests {
     use super::*;
 
     const RECIPE_DIR: &str = "Home/Cooking/Recipes";
+
+    #[test]
+    fn private_dirs_cover_the_folder_and_its_contents() {
+        assert!(is_private("Home/Medical"));
+        assert!(is_private("Home/Medical/Notes"));
+        assert!(is_private("Home/Medical/Notes/Visit.md"));
+        assert!(!is_private("Home"));
+        assert!(!is_private("Home/Medicals"));
+        assert!(!is_private("Medical"));
+        assert!(!is_private("Home/Cooking"));
+    }
 
     #[test]
     fn resolves_relative_to_the_note() {
@@ -702,7 +736,10 @@ mod tests {
         assert_eq!(resolve_media(RECIPE_DIR, "../secret.png"), None);
         assert_eq!(resolve_media(RECIPE_DIR, "Engineer/../../card.png"), None);
         assert_eq!(resolve_media(RECIPE_DIR, "/home/pborrego/card.png"), None);
-        assert_eq!(resolve_media(RECIPE_DIR, "https://example.com/card.png"), None);
+        assert_eq!(
+            resolve_media(RECIPE_DIR, "https://example.com/card.png"),
+            None
+        );
         // Escaping the vault entirely, as a note written against a filesystem
         // path outside it would.
         assert_eq!(
