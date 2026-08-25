@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
+use crate::audit;
 use crate::work::{self, DownloadKind, Scope};
 use crate::paths::{PathError, safe_resolve};
 use crate::people;
@@ -1235,7 +1236,14 @@ pub async fn download(
     } else {
         "application/octet-stream"
     };
-    stream_file_response(&path, mime, basename).await
+    stream_and_log(
+        &state,
+        &path,
+        mime,
+        basename,
+        audit::Download::public(rel.clone()),
+    )
+    .await
 }
 
 pub async fn thumb(
@@ -1701,6 +1709,9 @@ pub async fn work_auth(
         }
     };
     if !work::verify(&stored, &submitted) {
+        // Counted, not identified: the report wants "is someone guessing at
+        // this job", and a per-job tally answers that without a visitor log.
+        audit::record_auth_failure(state.data_root(), &name).await;
         return render_work_page(
             &state,
             &name,
@@ -1773,7 +1784,8 @@ pub async fn work_download(
         scope.slug(),
         kind.slug()
     );
-    stream_file_response(&zip_path, "application/zip", &attach).await
+    let rec = audit::Download::work_zip(name.clone(), scope.slug(), kind.slug(), attach.clone());
+    stream_and_log(&state, &zip_path, "application/zip", &attach, rec).await
 }
 
 /// Per-photo download: POST /work/:name/file/*subpath. `subpath` may include
@@ -1811,7 +1823,8 @@ pub async fn work_file_download(
     } else {
         "application/octet-stream"
     };
-    stream_file_response(&path, mime, basename).await
+    let rec = audit::Download::work_file(name.clone(), subpath.clone());
+    stream_and_log(&state, &path, mime, basename, rec).await
 }
 
 fn is_valid_work_subpath(s: &str) -> bool {
@@ -1970,6 +1983,27 @@ async fn stream_file_response(path: &Path, mime: &str, attach_name: &str) -> Res
         .header(header::CONTENT_DISPOSITION, disposition)
         .body(body)
         .unwrap()
+}
+
+/// `stream_file_response`, plus a line in the download log when it actually
+/// served the file.
+///
+/// The status check is the whole point: `stream_file_response` answers 404 for
+/// a path that resolved but does not exist, and logging before it would file
+/// every miss as a download. Logging is best-effort and never changes the
+/// response — see `audit::record_download`.
+async fn stream_and_log(
+    state: &AppState,
+    path: &Path,
+    mime: &str,
+    attach_name: &str,
+    rec: audit::Download,
+) -> Response {
+    let resp = stream_file_response(path, mime, attach_name).await;
+    if resp.status().is_success() {
+        audit::record_download(state.data_root(), rec).await;
+    }
+    resp
 }
 
 fn is_valid_work_name(name: &str) -> bool {

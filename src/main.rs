@@ -1,3 +1,4 @@
+mod audit;
 mod handlers;
 mod nether;
 mod notify;
@@ -42,6 +43,7 @@ async fn main() -> Result<()> {
         Some("warm") => warm_cmd(&args[2..]).await,
         Some("recent") => recent_cmd(&args[2..]).await,
         Some("notify") => notify_cmd(&args[2..]).await,
+        Some("audit") => audit_cmd().await,
         Some("serve") | None => serve().await,
         Some(other) => {
             eprintln!("unknown subcommand: {other}");
@@ -55,6 +57,7 @@ async fn main() -> Result<()> {
             eprintln!("  portfolio-site recent set <dir>...   replace the recent set (paths relative to photos/)");
             eprintln!("  portfolio-site notify --dry-run      show what would be sent about the recent set");
             eprintln!("  portfolio-site notify                send it, and record what went out");
+            eprintln!("  portfolio-site audit                 print subscriber, download and per-job figures");
             std::process::exit(2);
         }
     }
@@ -429,7 +432,7 @@ async fn prune_orphans(cache_root: &Path, servable: &HashSet<PathBuf>) {
 /// Depth-first walk of `root` collecting every servable JPEG, applying the
 /// same visibility rules the request handlers use: skip dotfiles, skip files
 /// whose name marks them hidden, and skip `negative` directories.
-async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
+pub(crate) async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -536,6 +539,22 @@ async fn notify_cmd(args: &[String]) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `portfolio-site audit`
+///
+/// Prints what the logs know: who is subscribed, what has been downloaded, and
+/// per work item whether the client collected their photos. Read-only — it
+/// opens nothing but `data/logs/` and the photo tree, so it is safe to run
+/// against the live server.
+///
+/// A command rather than a web route on purpose. The figures include
+/// subscriber handles and client delivery activity, and a page showing them
+/// would need a password to hold, a session to get wrong, and a URL that
+/// exists whether or not anyone is looking at it.
+async fn audit_cmd() -> Result<()> {
+    let (photos_root, _cache_root, data_root) = resolve_roots()?;
+    audit::report(&photos_root, &data_root).await
 }
 
 /// `portfolio-site recent show | set <dir>...`
@@ -739,6 +758,8 @@ mod tests {
     struct Fixture {
         _dir: tempfile::TempDir,
         router: Router,
+        /// Kept so the download-log tests can read what the handlers wrote.
+        data: PathBuf,
     }
 
     fn fixture() -> Fixture {
@@ -775,6 +796,14 @@ mod tests {
             .save(photos.join("2024/favs/pick.jpg"))
             .expect("write large test jpeg");
 
+        // One password-protected work item, so the tests can exercise the
+        // auth path and the two work download routes.
+        std::fs::create_dir_all(photos.join("work/smith/edited")).unwrap();
+        image::RgbImage::from_pixel(16, 16, image::Rgb([90, 90, 90]))
+            .save(photos.join("work/smith/edited/A.jpg"))
+            .expect("write work jpeg");
+        std::fs::write(photos.join("work/smith/.password"), b"hunter2").unwrap();
+
         // Declares `2024` as the current drop and leaves `portfolio` out, so
         // `/recent` renders a strict subset and the tests can tell the two
         // apart. The trailing junk lines pin the parser's tolerance.
@@ -784,11 +813,25 @@ mod tests {
         )
         .unwrap();
 
-        let state = AppState::new(photos, cache, data, None, root.join("nether"));
+        let state = AppState::new(photos, cache, data.clone(), None, root.join("nether"));
         Fixture {
             router: build_router(state, static_dir),
             _dir: dir,
+            data,
         }
+    }
+
+    /// Every line the download log holds, or an empty vec if it was never
+    /// written. Reads the file rather than the parsed rows so a test can assert
+    /// on what is *not* in a line as well as what is.
+    fn download_log(f: &Fixture) -> Vec<String> {
+        let path = f.data.join(notify::LOGS_DIR).join(audit::DOWNLOADS_LOG);
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect()
     }
 
     async fn get(router: &Router, uri: &str) -> axum::response::Response {
@@ -1240,4 +1283,163 @@ mod tests {
             assert_eq!(n, 1, "{uri} had {n} <h1> elements, expected 1");
         }
     }
+
+    async fn post(router: &Router, uri: &str, form: &str) -> axum::response::Response {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(
+                        header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(Body::from(form.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn auth_failure_log(f: &Fixture) -> Vec<String> {
+        let path = f.data.join(notify::LOGS_DIR).join(audit::AUTH_FAILURES_LOG);
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A wrong password is counted per job and nothing else is kept. The report
+    /// asks "is someone guessing at this job", which a tally answers; an
+    /// address would turn the same file into a visitor log.
+    #[tokio::test]
+    async fn wrong_work_passwords_are_counted_and_right_ones_are_not() {
+        let f = fixture();
+        let bad = post(&f.router, "/work/smith/auth", "password=wrong").await;
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+
+        let lines = auth_failure_log(&f);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(r#""job":"smith""#), "{}", lines[0]);
+        assert!(!lines[0].contains("wrong"), "the attempt was stored: {}", lines[0]);
+
+        let good = post(&f.router, "/work/smith/auth", "password=hunter2").await;
+        assert_eq!(good.status(), StatusCode::SEE_OTHER);
+        assert_eq!(auth_failure_log(&f).len(), 1, "a success was counted as a failure");
+    }
+
+    /// The full client path: unlock the job, take the zip, take a single file.
+    /// Both land in the log, and the zip carries the scope and kind — "they
+    /// took the JPEGs but never the RAWs" is the answer the work report exists
+    /// to give, and it is unrecoverable if only a count is stored.
+    #[tokio::test]
+    async fn served_work_downloads_record_their_scope_and_kind() {
+        let f = fixture();
+        let unlocked = post(&f.router, "/work/smith/auth", "password=hunter2").await;
+        assert_eq!(unlocked.status(), StatusCode::SEE_OTHER);
+        let cookie = unlocked
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .expect("auth issued a cookie")
+            .to_string();
+
+        let with_cookie = |uri: &str, form: &str| {
+            let router = f.router.clone();
+            let cookie = cookie.clone();
+            let uri = uri.to_string();
+            let form = form.to_string();
+            async move {
+                router
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(uri)
+                            .header(header::COOKIE, cookie)
+                            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                            .body(Body::from(form))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let zip = with_cookie("/work/smith/download", "kind=jpeg&scope=edited").await;
+        assert_eq!(zip.status(), StatusCode::OK);
+        let one = with_cookie("/work/smith/file/edited/A.jpg", "").await;
+        assert_eq!(one.status(), StatusCode::OK);
+
+        let lines = download_log(&f);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains(r#""route":"work_zip""#), "{}", lines[0]);
+        assert!(lines[0].contains(r#""job":"smith""#), "{}", lines[0]);
+        assert!(lines[0].contains(r#""scope":"edited""#), "{}", lines[0]);
+        assert!(lines[0].contains(r#""kind":"jpeg""#), "{}", lines[0]);
+        assert!(lines[1].contains(r#""route":"work_file""#), "{}", lines[1]);
+        assert!(lines[1].contains(r#""path":"edited/A.jpg""#), "{}", lines[1]);
+    }
+
+    /// An unauthenticated work download is refused, and a refusal is not a
+    /// delivery — logging it would tell the owner a client collected photos
+    /// they never received.
+    #[tokio::test]
+    async fn refused_work_downloads_are_not_logged() {
+        let f = fixture();
+        let resp = post(&f.router, "/work/smith/download", "kind=jpeg&scope=all").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = post(&f.router, "/work/smith/file/edited/A.jpg", "").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(download_log(&f).is_empty(), "{:?}", download_log(&f));
+    }
+
+    /// The log records deliberate saves, and only those. `/image`, `/thumb`,
+    /// `/medium` and `/preview` are how a gallery page draws itself — one visit
+    /// to `/all` is a thousand of them — so a line from any of those would bury
+    /// the signal the log exists to carry.
+    #[tokio::test]
+    async fn only_the_download_route_is_logged() {
+        let f = fixture();
+        let resp = get(&f.router, "/download/2024/roll.jpg").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drain the body: the handler streams it, and the assertion below is
+        // about a side effect that happens before the first byte either way.
+        let _ = body_string(resp).await;
+
+        for uri in [
+            "/image/2024/roll.jpg",
+            "/thumb/2024/roll.jpg",
+            "/medium/2024/roll.jpg",
+            "/preview/2024/roll.jpg",
+        ] {
+            assert_eq!(get(&f.router, uri).await.status(), StatusCode::OK, "{uri}");
+        }
+
+        let lines = download_log(&f);
+        assert_eq!(lines.len(), 1, "renditions leaked into the log: {lines:?}");
+        assert!(lines[0].contains(r#""route":"public""#), "{}", lines[0]);
+        assert!(lines[0].contains(r#""path":"2024/roll.jpg""#), "{}", lines[0]);
+    }
+
+    /// Logging before the response is built would file every miss as a
+    /// download, and the misses are exactly what a scraper walking filenames
+    /// generates — so the log would read busiest when nothing was served.
+    #[tokio::test]
+    async fn a_download_that_404s_is_not_logged() {
+        let f = fixture();
+        for uri in [
+            "/download/2024/does-not-exist.jpg",
+            "/download/2024/roll.txt",
+            "/download/../escape.jpg",
+        ] {
+            let status = get(&f.router, uri).await.status();
+            assert_ne!(status, StatusCode::OK, "{uri} unexpectedly served");
+        }
+        assert!(download_log(&f).is_empty(), "{:?}", download_log(&f));
+    }
+
 }

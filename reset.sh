@@ -6,8 +6,9 @@ set -eu
 
 git pull
 cargo build --release
+ln ./target/release/portfolio-site ./portfolio-site
 # Pre-generate every rendition so the first visitor after a deploy
 # never pays the on-demand decode cost. Safe to run against the live server
 # (atomic writes); already-fresh renditions are skipped cheaply.
-./target/release/portfolio-site warm
+./portfolio-site warm
 sudo systemctl restart portfolio-site.service

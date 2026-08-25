@@ -31,6 +31,25 @@ paragraphs have to be, so it comes before rewriting them.
 reorganised, so old links will rot. Right now that is a blank white page with no
 way back.
 
+## Work pages
+
+**Make `/work` more professional.** It is the page a client lands on from a link
+I sent them, and it is currently one bordered card carrying a folder slug and a
+file count — a directory listing wearing a border. `frontend-audit.md` items 7
+and 9 measure what is actually there.
+
+Undecided, and it is really two decisions that keep getting made as one:
+
+- **What a job presents.** Cover photo, client-facing title, date, one card per
+  job. The cover can come from the job's `favs/` and needs no new data model.
+  The title is copy, so it is mine.
+- **What the handover feels like.** The password gate, the download buttons, and
+  what a client sees after clicking one. This is the half that really is a
+  delivery portal, and it can be plain without being unprofessional.
+
+Presentation is the cheaper one to settle first: it changes what the page is,
+and the handover has to sit inside whatever that turns out to be.
+
 ## People tab
 
 **Covers on the People tab.** A tile per person — their photograph, their name,
@@ -51,15 +70,6 @@ photographs, which is the reverse of everywhere else.
 
 Both turn on one unsettled question: whether a photograph's date is when it was
 published or when it was taken. Worth answering once rather than per page.
-
-## Reporting and uptime checks
-
-**An audit report**, as a CLI command rather than a web route — subscribers,
-downloads, and separately per client job, because the question there is not "how
-is the site doing" but "did this client get their photos".
-
-**A down detector**, pointed at `/version` so a wrong answer means a stale
-deploy and not merely "up".
 
 ## Programming projects page
 

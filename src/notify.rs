@@ -46,7 +46,7 @@ use crate::views::abs_url;
 
 /// Confirmation links stop working after this long, so a token leaked from an
 /// old mailbox cannot be used to switch a subscription on much later.
-const PENDING_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+pub(crate) const PENDING_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// `data/` splits in two: append-only state under `logs/`, credentials under
 /// `token/`. They differ in every way that matters operationally — the logs are
@@ -61,7 +61,7 @@ pub const SUBSCRIBERS_LOG: &str = "subscribers.log";
 pub const PENDING_LOG: &str = "pending.log";
 pub const NOTIFIED_LOG: &str = "notified.log";
 
-fn log_path(data_root: &Path, name: &str) -> PathBuf {
+pub(crate) fn log_path(data_root: &Path, name: &str) -> PathBuf {
     data_root.join(LOGS_DIR).join(name)
 }
 
@@ -196,7 +196,7 @@ pub fn now() -> u64 {
 /// at the current end of file atomically, so a signup arriving while `notify` is
 /// running cannot interleave into the middle of another line. That is the whole
 /// reason this is a log and not a document.
-async fn append_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) async fn append_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut line = serde_json::to_string(value).context("serialising log line")?;
     line.push('\n');
     let path = path.to_path_buf();
@@ -231,7 +231,7 @@ async fn append_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// parse is skipped with a warning rather than failing the read — one corrupt
 /// line (a half-written record from a killed process, say) must not take the
 /// entire mailing list offline.
-async fn read_log<T: DeserializeOwned>(path: &Path) -> Vec<T> {
+pub(crate) async fn read_log<T: DeserializeOwned>(path: &Path) -> Vec<T> {
     let contents = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
