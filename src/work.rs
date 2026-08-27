@@ -129,6 +129,8 @@ impl WorkCounts {
 
 pub struct WorkSummary {
     pub name: String,
+    /// Contents of the job's `title.txt`, when it has one. See [`TITLE_FILE`].
+    pub title: Option<String>,
     pub jpeg_count: u32,
     pub raw_count: u32,
 }
@@ -163,6 +165,8 @@ pub struct WorkSection {
 }
 
 pub struct WorkDetail {
+    /// Contents of the job's `title.txt`, when it has one. See [`TITLE_FILE`].
+    pub title: Option<String>,
     pub sections: Vec<WorkSection>,
     /// Per-scope file counts; powers the download UI's button labels and
     /// disabled state. Always populated by `read_work`.
@@ -204,8 +208,10 @@ fn list_work_blocking(photos_root: &Path) -> Result<Vec<WorkSummary>> {
             continue;
         }
         let (jpeg_count, raw_count) = count_files_recursive(&entry.path());
+        let title = read_title_blocking(&entry.path());
         out.push(WorkSummary {
             name,
+            title,
             jpeg_count,
             raw_count,
         });
@@ -361,8 +367,10 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
     sections.sort_by(|a, b| section_sort_key(&a.label).cmp(&section_sort_key(&b.label)));
 
     let has_password = read_password_blocking(&dir).is_some();
+    let title = read_title_blocking(&dir);
 
     Ok(Some(WorkDetail {
+        title,
         sections,
         counts,
         has_password,
@@ -421,6 +429,40 @@ fn section_sort_key(label: &str) -> (u8, String, u8, String) {
 /// Returns the stored password (trimmed) for a job, or None if no `.password`
 /// file exists. The caller is responsible for the verify; this is kept as a
 /// separate step so callers can refuse to authorize when no file is set.
+/// The file a job's display title is read from, at the job root.
+///
+/// Not a dotfile, unlike `.password`: this one is meant to be seen and edited,
+/// and a client never sees the folder anyway. It is skipped by everything that
+/// walks a job — the section builder and the counters take JPEGs and raws by
+/// extension, and the zip builder does the same — so it never appears in a
+/// gallery or an archive.
+pub const TITLE_FILE: &str = "title.txt";
+
+/// Longest display title accepted from [`TITLE_FILE`], in characters.
+///
+/// The title is the header's centre column and the stem of the `<title>`, and
+/// both have a length past which they stop being a title and start being a
+/// layout problem. Generous enough that a real one is never touched — the
+/// longest job name on disk is 20 characters.
+const TITLE_MAX_CHARS: usize = 120;
+
+/// The job's own title, or `None` to fall back to its folder name.
+///
+/// First non-empty line, trimmed. A title is one line by definition, and taking
+/// only the first means a file with a trailing newline — which is every file
+/// written by an editor — behaves the same as one without, and a stray second
+/// line cannot inject a line break into the `<title>`.
+fn read_title_blocking(work_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(work_dir.join(TITLE_FILE)).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.chars().count() > TITLE_MAX_CHARS {
+        Some(line.chars().take(TITLE_MAX_CHARS).collect())
+    } else {
+        Some(line.to_string())
+    }
+}
+
 pub async fn read_password(photos_root: PathBuf, name: String) -> Result<Option<String>> {
     tokio::task::spawn_blocking(move || {
         let dir = work_root(&photos_root).join(&name);

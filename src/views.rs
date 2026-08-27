@@ -31,6 +31,18 @@ pub struct ImageEntry {
     /// `loading="lazy"` defers nothing. Square grids reserve their space via
     /// `aspect-ratio: 1` in CSS and leave this `None`.
     pub dims: Option<(u32, u32)>,
+    /// `POST` endpoint that serves this photograph as an attachment, for the
+    /// lightbox's single Download button.
+    ///
+    /// The work delivery pages and nothing else. Their per-file route is a POST
+    /// — authorization rides on the path-scoped job cookie, and a `<a href>`
+    /// against it answers 405 — so `lightbox.js` submits a one-shot form to this
+    /// instead of following a link. That is also why it cannot be folded into
+    /// [`Self::jpg_download_url`], which is a GET the lightbox puts straight
+    /// into an anchor: the two attributes drive two different affordances and
+    /// take two different kinds of URL. `None` on every other page, which is
+    /// what keeps the button hidden there.
+    pub download_action: Option<String>,
     /// One larger `srcset` candidate beyond `thumb_url`, as (url, intrinsic
     /// width in px). `None` emits a plain `src` and nothing else.
     ///
@@ -74,38 +86,93 @@ pub struct PersonEntry {
     pub photo_count: u32,
 }
 
+/// A folder or file name as a client should read it: `-` and `_` become spaces.
+///
+/// Every name on the work pages is a path segment off disk — jobs are
+/// `marisol-sam-wedding`, film folders are `medium-format`, camera files are
+/// `DSC_0142.jpg`. Those separators are there because a filesystem is easier to
+/// work in without spaces, which is a fact about the archive and not something a
+/// paying client should have to read around.
+///
+/// Mechanical, and it touches separators only: the words, their order and their
+/// capitalisation are still whatever the folder says. Not a rename either — the
+/// raw segment stays the URL, the zip entry name and the file on disk, so this
+/// is display and nothing else.
+pub fn humanize(s: &str) -> String {
+    s.replace(['-', '_'], " ")
+}
+
+/// What to call a job: its own `title.txt` if it has one, else its folder name
+/// with the separators spelled out.
+///
+/// The folder name is a filesystem identifier that has to be a valid path
+/// segment and stay put once links have been sent out; a title is what the
+/// client should read. [`humanize`] closes most of the gap on its own — a folder
+/// really called `marisol-sam-wedding` reads fine as "marisol sam wedding" — but
+/// it cannot add capitals, punctuation, or a word the folder does not contain,
+/// and those are the owner's to write rather than the assistant's to invent. A
+/// file in the job folder is where he writes them.
+///
+/// Taken verbatim: a hyphen someone typed into a title is punctuation they
+/// meant, not a separator standing in for a space, so `humanize` is exactly
+/// wrong here. `work::read_title_blocking` has already trimmed it, dropped a
+/// trailing newline and capped its length; an empty file falls back the same as
+/// a missing one.
+pub fn work_display_name(name: &str, title: Option<&str>) -> String {
+    match title {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => humanize(name),
+    }
+}
+
+/// Path segments naming a stage of the owner's process rather than a set of
+/// photographs, dropped from a set's client-facing label.
+///
+/// `edited` because `digital/edited` is "the digital photographs" as far as the
+/// client is concerned, and the folder beside it holds the same frames unedited
+/// — a distinction belonging to the download panel's edited/original rows, not
+/// to the name of a tab. `positive` because it names which side of the film a
+/// scan was taken from, which is a darkroom fact about how the photograph got
+/// here rather than anything the client is choosing between.
+///
+/// `negative` is deliberately **not** here. Dropping it would collapse
+/// `medium-format/positive/edited` and `medium-format/negative/edited` onto one
+/// label, and two tabs reading "medium format" is worse than one reading
+/// "medium format negative". Nothing in the archive scans negatives to JPEG
+/// today, so that tab does not currently appear at all.
+const WORK_LABEL_DROP: &[&str] = &["edited", "positive"];
+
+/// Client-facing label for one browsable set inside a job.
+///
+/// `digital/edited` → "digital"; `medium-format/positive/edited` → "medium
+/// format". Which segments are dropped, and why one that looks droppable is
+/// not, is [`WORK_LABEL_DROP`].
+///
+/// `job` is the fallback for a path that drops to nothing — photographs sitting
+/// directly in `edited/`, where the set *is* the delivery — and for the job-root
+/// section, whose path is empty to begin with.
+pub fn work_set_label(path: &str, job: &str) -> String {
+    let kept: Vec<String> = path
+        .split('/')
+        .filter(|seg| !seg.is_empty())
+        .filter(|seg| !WORK_LABEL_DROP.iter().any(|d| seg.eq_ignore_ascii_case(d)))
+        .map(humanize)
+        .collect();
+    if kept.is_empty() {
+        humanize(job)
+    } else {
+        kept.join(" ")
+    }
+}
+
 pub struct WorkIndexEntry {
     pub name: String,
+    /// The job's `title.txt`, when it has one. `None` falls back to `name`; see
+    /// [`work_display_name`].
+    pub title: Option<String>,
     pub url: String,
     pub jpeg_count: u32,
     pub raw_count: u32,
-}
-
-pub struct WorkFeedPhoto {
-    pub name: String,
-    pub preview_url: String,
-    pub image_url: String,
-    pub download_action: String,
-    /// Final preview pixel dimensions (post-orientation, post-downscale).
-    /// Rendered as `<img width=… height=…>` so the browser reserves the
-    /// right space pre-load and `loading="lazy"` can actually defer tiles
-    /// that aren't near the viewport.
-    pub preview_dims: Option<(u32, u32)>,
-}
-
-pub struct WorkFeedSection {
-    /// Empty string for files at the job root; otherwise the full subfolder
-    /// path (e.g. "digital", "digital/edited", "film/medium-format/positive").
-    pub label: String,
-    pub photos: Vec<WorkFeedPhoto>,
-    /// Unique-per-page identifier used by `collapse.js` to keep the user's
-    /// toggle choice in localStorage, e.g. `job:marisol-sam-wedding:digital/edited`.
-    pub data_path: String,
-    /// True when this section should be open on first load. Sections whose
-    /// path contains an `edited` segment (and the job-root section) are
-    /// promoted; everything else collapses by default until the client
-    /// expands it.
-    pub default_open: bool,
 }
 
 /// One node in the Obsidian vault sidebar tree.
@@ -381,6 +448,34 @@ pub const NOT_FOUND_HEADING: &str = "";
 /// One line under [`NOT_FOUND_HEADING`], e.g. what to do about a link that has
 /// rotted. Empty renders nothing.
 pub const NOT_FOUND_BODY: &str = "";
+
+/// Shown when a job has refused too many passwords and has stopped checking.
+///
+/// The same sentence as [`NOTIFY_ERR_RATE`], and deliberately the same constant
+/// value rather than a second string saying it differently — it is the identical
+/// situation on a different form, and two ways of phrasing "wait a bit" is two
+/// things to keep in the owner's voice instead of one. Reword `NOTIFY_ERR_RATE`
+/// and both move together.
+pub const WORK_ERR_RATE: &str = NOTIFY_ERR_RATE;
+
+/// The control in the delivery page's tab bar that opens the download panel,
+/// and the panel's own accessible name.
+///
+/// Written by the assistant on request, like [`NOTIFY_DISCORD_HINT`] and unlike
+/// the rest of this block: it is a button that has to say what it does, and a
+/// blank one is an unusable page rather than a quieter one. Reword it freely —
+/// it is the only word standing between a client and their photographs.
+pub const WORK_DOWNLOAD_LABEL: &str = "Download";
+
+/// Shown on a delivery page whose every photograph sits in an `original`
+/// folder, so the tab strip has no set to offer.
+///
+/// **Empty, and waiting for the owner's words.** The page is correct while it
+/// is empty — the guard in [`work_page`] renders nothing, and the download bar
+/// above is fully populated, which is where those photographs are. What the
+/// sentence has to do is stop the gap reading as a broken page: say that the
+/// edited set is not up yet and that the buttons above still work.
+pub const WORK_NO_SETS: &str = "";
 
 /// `<title>` for the home and About pages: the owner's name, followed by the
 /// owner's own tagline when there is one.
@@ -717,8 +812,20 @@ fn head_block(h: Head) -> Markup {
 }
 
 fn site_header(active: Nav) -> Markup {
+    site_header_titled(active, None)
+}
+
+/// The site header, optionally naming the page between the brand and the nav.
+///
+/// `title` is the delivery pages and nothing else. A client arriving at a link
+/// someone sent them is looking for one thing first — is this my gallery — and
+/// the header is where a name is looked for. It renders as the page's `<h1>`,
+/// so the page has exactly one and it is the visible one; every other page
+/// keeps its visually-hidden [`page_heading`] instead. The three-column grid
+/// that centres it is `.site-titled` in `style.css`.
+fn site_header_titled(active: Nav, title: Option<&str>) -> Markup {
     html! {
-        header.site {
+        header.site.site-titled[title.is_some()] {
             div.site-left {
                 // The owner's name, not the word "Portfolio". This is the most
                 // prominent link on every page and the one a crawler weighs
@@ -744,6 +851,9 @@ fn site_header(active: Nav) -> Markup {
                         path d="M20 14.5A8 8 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z" fill="currentColor" {}
                     }
                 }
+            }
+            @if let Some(t) = title {
+                h1.site-title { (t) }
             }
             // Ordered by what the author wants a visitor to reach first, from
             // the curated selections through the broader archive, with About
@@ -826,7 +936,7 @@ fn crumbs_nav(crumbs: &[Crumb]) -> Markup {
 const EAGER_TILES: usize = 2;
 
 /// `masonry` adds the `work-grid` class so the grid renders as a natural-ratio
-/// CSS-columns masonry (used by the work and portfolio pages) instead of the
+/// CSS-columns masonry (used by `/recent`) instead of the
 /// default square-cropped grid. `eager` is how many leading tiles skip lazy
 /// loading; pass 0 for any grid that is not the first on the page.
 /// `favs_count` splits the grid: that many tiles lead, then a hairline, then
@@ -1271,9 +1381,18 @@ pub struct SectionTab {
 /// chrome that explains nothing, and the heading below it already names the
 /// section.
 fn section_tabs(tabs: &[SectionTab]) -> Markup {
+    subnav_tabs(tabs, "Portfolio sections")
+}
+
+/// The strip itself, shared with the work delivery pages, which tab between
+/// sets of photographs the same way.
+///
+/// `aria_label` is the only difference between the two: it names the strip for a
+/// screen reader, and "Portfolio sections" would be wrong on a client delivery.
+fn subnav_tabs(tabs: &[SectionTab], aria_label: &str) -> Markup {
     html! {
         @if tabs.len() > 1 {
-            nav.subnav aria-label="Portfolio sections" {
+            nav.subnav aria-label=(aria_label) {
                 @for t in tabs {
                     // Same `aria-current` convention as `nav.topnav`, so a
                     // screen reader reports position in both bars the same way.
@@ -1329,9 +1448,14 @@ fn tile(img: &ImageEntry, seq: usize, eager: bool, wide: bool) -> Markup {
             // Same anchor contract as `image_grid` plus `data-seq`, so
             // `lightbox.js` needs no knowledge of which grid it was opened from
             // beyond the order to walk it in.
+            // `data-download` is the work pages' POST route and is absent
+            // everywhere else, which is what hides the lightbox's Download
+            // button on the portfolio. `image_grid`'s tiles do not emit it:
+            // every page that uses that grid leaves it `None`.
             a href=(img.image_url)
               data-seq=(seq)
               data-name=(img.name)
+              data-download=[img.download_action.as_deref()]
               data-jpg=(img.jpg_download_url)
               data-raw=[img.raw_download_url.as_deref()] {
                 (grid_img(img, eager, PORTFOLIO_SIZES))
@@ -2151,7 +2275,11 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
             )))
             body {
                 (site_header(Nav::Work))
-                main {
+                // `work-list`, not `work`: lightbox.js gates its full-size
+                // prefetch on `main.work`, and there is nothing to prefetch
+                // here. The class exists only to put this page in the same
+                // measure as the delivery pages it links to.
+                main.work-list {
                     (crumbs_nav(crumbs))
                     (page_heading("Professional photography work by Paul Borrego"))
                     @if items.is_empty() {
@@ -2162,11 +2290,26 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
                                 @for j in items {
                                     li.work-card {
                                         a href=(j.url) {
-                                            span.work-name { (j.name) }
-                                            span.work-counts {
-                                                (j.jpeg_count) " JPEG"
-                                                @if j.raw_count > 0 { " · " (j.raw_count) " RAW" }
+                                            span.work-card-text {
+                                                span.work-name { (work_display_name(&j.name, j.title.as_deref())) }
+                                                span.work-counts {
+                                                    span.work-count { (j.jpeg_count) " JPEG" }
+                                                    @if j.raw_count > 0 {
+                                                        // Punctuation between two counts, not
+                                                        // content. Its spacing is the flex gap
+                                                        // now, and it sits out of the reading
+                                                        // order so a screen reader gets the two
+                                                        // counts without a "middle dot" between
+                                                        // them.
+                                                        span.work-count-sep aria-hidden="true" { "·" }
+                                                        span.work-count { (j.raw_count) " RAW" }
+                                                    }
+                                                }
                                             }
+                                            // Decorative: the whole card is the link and the
+                                            // chevron only says which way it goes. Reuses the
+                                            // collapse chevron, rotated in CSS.
+                                            span.work-card-go aria-hidden="true" { (chevron()) }
                                         }
                                     }
                                 }
@@ -2180,22 +2323,15 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
     }
 }
 
-/// One preview tile's `<img>`, with width/height attributes when we have
-/// them so the browser reserves the right space pre-load and `loading=lazy`
-/// only fetches tiles near the viewport.
-fn work_preview_img(p: &WorkFeedPhoto) -> Markup {
-    html! {
-        @match p.preview_dims {
-            Some((w, h)) => img src=(p.preview_url) alt=(p.name) loading="lazy" decoding="async" width=(w) height=(h);,
-            None => img src=(p.preview_url) alt=(p.name) loading="lazy" decoding="async";,
-        }
-    }
-}
-
 /// One row in the bulk-download bar — a label plus JPEG/RAW/Both submit
 /// buttons. The row is its own `<form>` so the `<input name="scope">` hidden
 /// field rides along regardless of which kind button is pressed; no
 /// JavaScript needed.
+///
+/// The three buttons are one choice, so they sit in a `dl-kinds` group rather
+/// than the `dl-buttons` one the auth form uses: `dl-kinds` styles them as a
+/// single segmented control, `dl-buttons` as a filled primary. The `name` /
+/// `value` pairs are identical either way — the split is presentational.
 fn download_scope_row(label: &str, scope: &str, counts: &WorkCounts, action: &str) -> Markup {
     use crate::work::{DownloadKind, Scope};
     let parsed = Scope::parse(scope).expect("download_scope_row called with unknown scope");
@@ -2206,7 +2342,7 @@ fn download_scope_row(label: &str, scope: &str, counts: &WorkCounts, action: &st
         form.dl-row method="post" action=(action) {
             input type="hidden" name="scope" value=(scope);
             span.dl-row-label { (label) }
-            div.dl-buttons {
+            div.dl-kinds {
                 button type="submit" name="kind" value="jpeg" disabled[jpeg == 0] {
                     "JPEG (" (jpeg) ")"
                 }
@@ -2221,16 +2357,145 @@ fn download_scope_row(label: &str, scope: &str, counts: &WorkCounts, action: &st
     }
 }
 
-/// Job detail view: grid sections like /all but with bigger tiles. The page
-/// has two visual states gated by an HttpOnly cookie:
-///   - **Pre-auth**: only the password form is interactive; tile links omit
-///     `data-download` so the lightbox download button stays hidden.
-///   - **Post-auth**: password form disappears, bulk JPEG/RAW buttons appear,
-///     and tile links carry `data-download` so the lightbox button renders.
+/// The one `id` on a delivery page, shared by the popover and by every control
+/// that opens or closes it.
+///
+/// A constant because it is a contract in three places at once — the panel, the
+/// bar's button, the panel's own close button — plus `work.js`, which opens it
+/// after a failed password. Typo any one of them and the button silently does
+/// nothing.
+const WORK_DOWNLOADS_ID: &str = "work-downloads";
+
+/// The download panel: locked notice, password form, or the bulk rows.
+///
+/// A popover rather than a block on the page. It is three rows of buttons a
+/// client uses twice — once to unlock, once to collect — and it was sitting
+/// above the photographs on every visit in between, which is the wrong ratio of
+/// chrome to work for the page's actual purpose.
+///
+/// Declarative: `popovertarget` on the button opens it, the browser supplies the
+/// top layer, the backdrop, light-dismiss and Escape, and none of that needs
+/// JavaScript. A browser too old for the Popover API ignores the attribute
+/// entirely and renders this inline as an ordinary panel — the layout the page
+/// had before, which is the right thing to degrade to.
+///
+/// `auto_open` marks the one state that cannot wait for a click: the re-render
+/// after a wrong password. See `work.js`.
+fn work_downloads_popover(
+    counts: &WorkCounts,
+    has_password: bool,
+    authorized: bool,
+    bulk_action: &str,
+    auth_action: &str,
+    error: Option<&str>,
+    auto_open: bool,
+) -> Markup {
+    html! {
+        div #(WORK_DOWNLOADS_ID)
+            .dl-popover
+            popover="auto"
+            aria-label=(WORK_DOWNLOAD_LABEL)
+            data-auto-open=[auto_open.then_some("true")]
+        {
+            // Escape and a click outside both close this; the button is for
+            // everyone who reaches for a visible one, and for touch, where
+            // "outside" is easy to miss.
+            button.dl-popover-close type="button"
+                popovertarget=(WORK_DOWNLOADS_ID)
+                popovertargetaction="hide"
+                aria-label="Close" { "×" }
+
+            @if !has_password {
+                p.dl-locked {
+                    "Downloads are locked — no password has been set for this job yet."
+                }
+            } @else if authorized {
+                div.dl-rows {
+                    (download_scope_row("Download all", "all", counts, bulk_action))
+                    (download_scope_row("Download edited", "edited", counts, bulk_action))
+                    (download_scope_row("Download original", "original", counts, bulk_action))
+                }
+            } @else {
+                form.work-auth method="post" action=(auth_action) {
+                    label.dl-label for="work-password" { "Password" }
+                    // Field and submit share a row so the pair reads as one
+                    // control; they wrap onto two lines when the panel cannot
+                    // hold both.
+                    div.work-auth-row {
+                        input #work-password
+                            type="password"
+                            name="password"
+                            autocomplete="off"
+                            placeholder="Enter password to unlock downloads"
+                            // Names the message below as the field's own, so a
+                            // screen reader reads the two together instead of
+                            // announcing an error with no subject.
+                            aria-describedby=[error.map(|_| "work-password-error")]
+                            aria-invalid=[error.map(|_| "true")]
+                            required;
+                        div.dl-buttons {
+                            button type="submit" { "Unlock downloads" }
+                        }
+                    }
+                    // Under the field it is about, not in a banner at the top of
+                    // the page: by the time it is read the eye is already here,
+                    // and the panel this sits in is over the page anyway.
+                    @if let Some(msg) = error {
+                        p #work-password-error .dl-error role="alert" { (msg) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Job detail view: three wide columns of photographs, one browsable set at a
+/// time, reached from a tab strip.
+///
+/// This replaced a stack of collapsible folder sections — one per subfolder,
+/// each labelled with its path (`digital/edited`,
+/// `medium-format/positive/edited`) and collapsed by default unless the path
+/// said `edited`. That was the archive's own filing cabinet handed to the
+/// client: it asked them to read a directory tree, and it put the frames they
+/// had been waiting for behind a disclosure triangle. A set is now a tab, and
+/// its photographs are the page — laid out by [`column_grid`], the same three
+/// equal-width columns the portfolio uses, for the same reason (a portrait gets
+/// the height its ratio asks for instead of being squeezed to a row's).
+///
+/// **Only the edited sets are browsable.** An `original` folder holds the same
+/// frames unedited and outnumbers the delivery several times over — 330 of 382
+/// JPEGs in the one job on disk — so the panel's "Download original" row is
+/// where those belong rather than in a gallery a client is choosing from.
+/// Photographs sitting at the job root are browsable too: they are nobody's
+/// source material and filtering on `edited` alone would make them invisible.
+///
+/// The page's furniture is two things and they are each in one place: the job's
+/// name is the header's [`site_header_titled`] centre, the sets and the download
+/// control share the sticky bar, and everything else is photographs.
+///
+/// **No breadcrumb.** Every other listing on the site opens on one, because
+/// every other listing sits inside the archive's folder tree and the trail is
+/// how you climb back out. A delivery does not: it is one job, reached from a
+/// link someone was sent, and "Home / Work / marisol sam wedding" spent a band
+/// of the page restating the name already centred in the header above it and
+/// offering a client two routes into an archive that is not theirs. The header's
+/// brand and nav are the way out, as they are on the portfolio.
+///
+/// Two states, gated by an HttpOnly cookie, and both live in the popover now:
+///   - **Pre-auth**: the password form, and tiles carrying no file URL, so the
+///     lightbox's download button stays hidden.
+///   - **Post-auth**: the bulk JPEG/RAW rows, and every tile carrying its own
+///     file URL.
+///
+/// `images` is the active set alone — the handler builds no others, so a job's
+/// largest set costs nothing until it is asked for. `total_jpeg_count` is every
+/// JPEG in the job, browsable or not, and exists only to tell "no photographs
+/// here yet" apart from "photographs, but none in a set a client can browse".
 pub fn work_page(
     name: &str,
-    crumbs: &[Crumb],
-    sections: &[WorkFeedSection],
+    title: Option<&str>,
+    sets: &[SectionTab],
+    images: &[ImageEntry],
     total_jpeg_count: u32,
     counts: WorkCounts,
     has_password: bool,
@@ -2238,7 +2503,15 @@ pub fn work_page(
     bulk_action: &str,
     auth_action: &str,
     error: Option<&str>,
+    open_downloads: bool,
 ) -> Markup {
+    // `marisol-sam-wedding` on disk and in the URL; whatever the job's
+    // `title.txt` says, or that name spelled out, everywhere a person reads it.
+    // See [`work_display_name`].
+    let display_name = work_display_name(name, title);
+    // The first tile is this page's Largest Contentful Paint element on every
+    // viewport, so name it in <head> and start the fetch during HTML parse.
+    let lcp = images.first().map(|img| img.thumb_url.as_str());
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -2247,93 +2520,61 @@ pub fn work_page(
             // near-duplicates that dilute the site and offer a searcher nothing.
             (head_block(
                 Head::new(
-                    &format!("{name} — Photo Delivery — {OWNER_NAME}"),
-                    &format!("Private photo delivery for {name}."),
+                    &format!("{display_name} — Photo Delivery — {OWNER_NAME}"),
+                    &format!("Private photo delivery for {display_name}."),
                     &format!("/work/{name}"),
                 )
-                .scripts(&["/static/lightbox.js", "/static/collapse.js"])
+                // No `collapse.js`: the folder sections it drove are gone.
+                // `work.js` is six lines and does one thing; see the popover.
+                .scripts(&["/static/lightbox.js", "/static/work.js"])
+                .preload(lcp)
                 .noindex(),
             ))
             body {
-                (site_header(Nav::Work))
+                // The job's name rides in the header rather than over the
+                // photographs: it is the first thing a client checks and the
+                // last thing they need again, and it is this page's `<h1>`.
+                (site_header_titled(Nav::Work, Some(&display_name)))
                 main.work {
-                    (crumbs_nav(crumbs))
-                    h1.work-title { (name) }
-
-                    @if let Some(msg) = error {
-                        div.banner.banner-error role="alert" { (msg) }
-                    }
-
-                    @if !has_password {
-                        div.work-downloads.dl-locked-banner {
-                            p.dl-locked {
-                                "Downloads are locked — no password has been set for this job yet."
-                            }
-                        }
-                    } @else if authorized {
-                        div.work-downloads {
-                            (download_scope_row("Download all", "all", &counts, bulk_action))
-                            (download_scope_row("Download edited", "edited", &counts, bulk_action))
-                            (download_scope_row("Download original", "original", &counts, bulk_action))
-                        }
-                    } @else {
-                        form.work-downloads.work-auth method="post" action=(auth_action) {
-                            label.dl-label for="work-password" { "Password" }
-                            input #work-password
-                                type="password"
-                                name="password"
-                                autocomplete="off"
-                                placeholder="Enter password to unlock downloads"
-                                required;
-                            div.dl-buttons {
-                                button type="submit" { "Unlock downloads" }
-                            }
+                    // One sticky bar: the sets on the left, the way to the files
+                    // on the right. It renders even for a job with a single set,
+                    // where `subnav_tabs` suppresses itself — the download
+                    // control is not optional.
+                    div.work-bar {
+                        (subnav_tabs(sets, "Photo sets"))
+                        button.dl-open type="button"
+                            popovertarget=(WORK_DOWNLOADS_ID)
+                            aria-haspopup="dialog" {
+                            (WORK_DOWNLOAD_LABEL)
                         }
                     }
+                    // Opened on arrival in the two states where the client is
+                    // already mid-task: a password that was refused, and one
+                    // that was accepted. Everything else waits for the button.
+                    (work_downloads_popover(
+                        &counts,
+                        has_password,
+                        authorized,
+                        bulk_action,
+                        auth_action,
+                        error,
+                        error.is_some() || open_downloads,
+                    ))
 
                     @if total_jpeg_count == 0 {
                         p.empty { "No JPEG photos in this job yet." }
-                    } @else {
-                        @for section in sections {
-                            section
-                                class=(if section.default_open { "gallery work-gallery" } else { "gallery work-gallery collapsed" })
-                                data-path=(section.data_path)
-                                data-default-collapsed=(if section.default_open { "false" } else { "true" })
-                            {
-                                h2 {
-                                    button.collapse-toggle type="button"
-                                        aria-label=(if section.default_open { "Collapse folder" } else { "Expand folder" })
-                                        aria-expanded=(if section.default_open { "true" } else { "false" }) {
-                                        svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" {
-                                            polyline points="6,9 12,15 18,9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" {}
-                                        }
-                                    }
-                                    @if section.label.is_empty() {
-                                        span.section-label { "(root)" }
-                                    } @else {
-                                        span.section-label { (section.label) }
-                                    }
-                                    span.section-count { "(" (section.photos.len()) ")" }
-                                }
-                                ul.grid.work-grid {
-                                    @for p in &section.photos {
-                                        li.tile {
-                                            @if p.download_action.is_empty() {
-                                                a href=(p.image_url) data-name=(p.name) {
-                                                    (work_preview_img(p))
-                                                }
-                                            } @else {
-                                                a href=(p.image_url)
-                                                  data-name=(p.name)
-                                                  data-download=(p.download_action) {
-                                                    (work_preview_img(p))
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    } @else if images.is_empty() {
+                        // Photographs exist but every one of them is an
+                        // original, so there is nothing to browse and plenty to
+                        // download. Guarded because [`WORK_NO_SETS`] is empty
+                        // and waiting for the owner's words; nothing renders
+                        // until then, which leaves a correct page rather than a
+                        // wrong sentence.
+                        @if !WORK_NO_SETS.is_empty() {
+                            p.empty { (WORK_NO_SETS) }
                         }
+                    } @else {
+                        (column_grid(images, PORTFOLIO_EAGER_TILES))
                     }
                 }
                 (site_footer())
@@ -2341,6 +2582,7 @@ pub fn work_page(
         }
     }
 }
+
 
 /// About page: the prose from `ABOUT_PARAGRAPHS` in a single readable column,
 /// with an optional portrait alongside. `portrait` is the preview URL for

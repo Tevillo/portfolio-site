@@ -266,14 +266,17 @@
   });
 
   // Work-page-only behavior: background prefetch of full-size images.
-  // Gated on `main.work` so /all and /browse don't pay for it. (The JPEG,
-  // RAW and Both download buttons are plain form submits — no JS needed.)
+  // Gated on `main.work` so /all, /browse and the portfolio don't pay for it —
+  // they share the `.mgrid` layout but not the client's need to click through a
+  // delivery at full size. (The JPEG, RAW and Both download buttons are plain
+  // form submits — no JS needed.)
   if (document.querySelector('main.work')) {
-    // Background prefetch: drain a low-concurrency queue of every
+    // `.mgrid li.mtile a` since the delivery pages moved from the collapsible
+    // folder sections to the portfolio's column grid: one set is on the page at
+    // a time now, so there is no collapsed section left to exclude and the
+    // whole grid is worth prefetching.
     const tiles = Array.from(
-      document.querySelectorAll(
-        'main.work section.gallery:not(.collapsed) ul.grid li.tile a'
-      )
+      document.querySelectorAll('main.work .mgrid li.mtile a')
     );
     if (tiles.length) {
       // Skim off the first few synchronously after a brief settle so the

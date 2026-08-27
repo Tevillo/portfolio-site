@@ -805,6 +805,10 @@ mod tests {
         router: Router,
         /// Kept so the download-log tests can read what the handlers wrote.
         data: PathBuf,
+        /// Kept so a test can add a file to the tree mid-run — `title.txt` is
+        /// read per request, so writing one between two `get`s is how the
+        /// fallback and the override are compared on one fixture.
+        photos: PathBuf,
     }
 
     fn fixture() -> Fixture {
@@ -858,11 +862,12 @@ mod tests {
         )
         .unwrap();
 
-        let state = AppState::new(photos, cache, data.clone(), None, root.join("nether"));
+        let state = AppState::new(photos.clone(), cache, data.clone(), None, root.join("nether"));
         Fixture {
             router: build_router(state, static_dir),
             _dir: dir,
             data,
+            photos,
         }
     }
 
@@ -946,6 +951,7 @@ mod tests {
             router: build_router(state, static_dir),
             _dir: dir,
             data,
+            photos,
         }
     }
 
@@ -2488,6 +2494,477 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .map(str::to_string)
             .collect()
+    }
+
+    /// A work job with several folders under it, for the tab-strip tests.
+    ///
+    /// Its own fixture rather than more folders under `fixture()`'s `work/smith`:
+    /// the download and audit tests count files in that job, and a set fixture
+    /// that grows whenever a layout question comes up would keep moving their
+    /// numbers underneath them.
+    ///
+    /// Shape mirrors the real archive — an edited folder and its original beside
+    /// it, plus a second family of film scans one level deeper, plus a photograph
+    /// sitting at the job root.
+    fn work_sets_fixture() -> Fixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let photos = root.join("photos");
+        let cache = root.join("cache");
+        let data = root.join("data");
+        let static_dir = root.join("static");
+        for d in [&photos, &cache, &data, &static_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
+        for rel in [
+            "work/big-job/loose_shot.jpg",
+            "work/big-job/digital/edited/digital_frame-01.jpg",
+            "work/big-job/digital/edited/digital_frame-02.jpg",
+            "work/big-job/digital/original/digital_frame-01.jpg",
+            "work/big-job/digital/original/digital_frame-02.jpg",
+            "work/big-job/digital/original/digital_frame-03.jpg",
+            "work/big-job/medium-format/positive/edited/mf_frame-01.jpg",
+        ] {
+            let at = photos.join(rel);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            image::RgbImage::from_pixel(900, 600, image::Rgb([120, 140, 100]))
+                .save(&at)
+                .expect("write work jpeg");
+        }
+        std::fs::write(photos.join("work/big-job/.password"), b"hunter2").unwrap();
+        let state = AppState::new(
+            photos.clone(),
+            cache,
+            data.clone(),
+            None,
+            root.join("nether"),
+        );
+        Fixture {
+            router: build_router(state, static_dir),
+            _dir: dir,
+            data,
+            photos,
+        }
+    }
+
+    /// The tab strip offers the edited sets and the job root, and nothing else.
+    ///
+    /// An `original` folder is the same frames unedited — in the real archive it
+    /// is 330 of 382 JPEGs — so it is download-only, reachable through the bulk
+    /// bar's "Download original" row rather than as a gallery a client picks
+    /// from. This is the assertion that stops those coming back as tabs.
+    #[tokio::test]
+    async fn work_tabs_offer_the_edited_sets_and_not_the_originals() {
+        let f = work_sets_fixture();
+        let html = body_string(get(&f.router, "/work/big-job").await).await;
+        assert!(
+            html.contains(r#"<nav class="subnav" aria-label="Photo sets">"#),
+            "no tab strip: {html}"
+        );
+        // The tabs and the download control share one bar, and the control is
+        // there whether or not the tabs are.
+        assert!(html.contains(r#"<div class="work-bar">"#), "no bar: {html}");
+        assert!(
+            html.contains(r#"popovertarget="work-downloads""#),
+            "nothing opens the download panel: {html}"
+        );
+        // The job-root set takes the job's own name, `digital/edited` drops the
+        // stage segment, and the film set keeps every segment that is not a
+        // stage. See `views::work_set_label`.
+        for label in [">big job<", ">digital<", ">medium format<"] {
+            assert!(html.contains(label), "no tab {label}");
+        }
+        assert!(
+            !html.contains("original"),
+            "an original folder reached the tab strip: {html}"
+        );
+        // Two edited sets plus the root, and no fourth for the originals.
+        assert_eq!(
+            html.matches(r#"<a href="/work/big-job?set="#).count(),
+            3,
+            "wrong number of tabs: {html}"
+        );
+    }
+
+    /// `?set=` picks the gallery, and an unknown slug falls back to the first
+    /// set rather than 404ing — a client following a stale link should get their
+    /// photographs, not an error.
+    #[tokio::test]
+    async fn the_set_query_picks_the_gallery_and_tolerates_a_stale_slug() {
+        let f = work_sets_fixture();
+        let tiles = |html: &str| html.matches(r#"<li class="mtile""#).count();
+
+        let digital = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
+        assert_eq!(tiles(&digital), 2, "wrong tile count for digital");
+        assert!(digital.contains(r#"aria-current="page">digital<"#));
+
+        let film = body_string(get(&f.router, "/work/big-job?set=medium-format").await).await;
+        assert_eq!(tiles(&film), 1, "wrong tile count for the film set");
+
+        // The job root leads the order, so both of these render it.
+        let default = body_string(get(&f.router, "/work/big-job").await).await;
+        let stale = body_string(get(&f.router, "/work/big-job?set=no-such-set").await).await;
+        assert_eq!(tiles(&default), 1, "wrong tile count for the default set");
+        assert_eq!(tiles(&stale), tiles(&default), "a stale slug did not fall back");
+    }
+
+    /// Every name a client reads has its filesystem separators spelled out.
+    ///
+    /// The job is `big-job` in the URL and on disk; the frames are
+    /// `digital_frame-01.jpg`. Those hyphens and underscores are there because a
+    /// filesystem is easier to work in without spaces, which is not something a
+    /// paying client should have to read around.
+    #[tokio::test]
+    async fn client_facing_names_have_their_separators_spelled_out() {
+        let f = work_sets_fixture();
+        let index = body_string(get(&f.router, "/work").await).await;
+        assert!(index.contains(">big job<"), "index card not humanized: {index}");
+        // The URL is untouched — this is display only.
+        assert!(index.contains(r#"href="/work/big-job""#), "the URL was rewritten");
+
+        let page = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
+        assert!(page.contains(r#"<h1 class="site-title">big job</h1>"#), "{page}");
+        assert!(
+            page.contains(r#"data-name="digital frame 01.jpg""#),
+            "photo name not humanized: {page}"
+        );
+        assert!(
+            page.contains(r#"alt="digital frame 01.jpg""#),
+            "alt text not humanized: {page}"
+        );
+        // And the file on disk is still addressed by its real name.
+        assert!(page.contains("/preview/work/big-job/digital/edited/digital_frame-01.jpg"));
+    }
+
+    /// The delivery tiles carry the POST download route, not the GET one.
+    ///
+    /// `/work/:name/file/*` is a POST — authorization rides on the path-scoped
+    /// job cookie — and `lightbox.js` reads two different attributes for two
+    /// different affordances: `data-download` it submits as a one-shot form,
+    /// `data-jpg` it puts straight into an `<a href>`. Wiring a work tile to
+    /// `data-jpg` renders a download link that answers 405, which is invisible
+    /// to any assertion about the tile markup alone. That is the mistake this
+    /// catches.
+    #[tokio::test]
+    async fn work_tiles_carry_the_post_download_route_and_no_get_link() {
+        let js = std::fs::read_to_string("static/lightbox.js").expect("read lightbox.js");
+        assert!(
+            js.contains("dataset.download"),
+            "lightbox.js no longer reads data-download"
+        );
+        assert!(
+            js.contains("main.work .mgrid li.mtile a"),
+            "lightbox.js prefetches a selector the work grid no longer emits"
+        );
+
+        let f = work_sets_fixture();
+        let unlocked = post(&f.router, "/work/big-job/auth", "password=hunter2").await;
+        let cookie = unlocked
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("no auth cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let resp = f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/work/big-job?set=digital")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_string(resp).await;
+        assert!(
+            html.contains(
+                r#"data-download="/work/big-job/file/digital/edited/digital_frame-01.jpg""#
+            ),
+            "no POST download action on the tiles: {html}"
+        );
+        // The GET menu has nothing to offer here, and an empty value is what
+        // keeps it hidden.
+        assert!(
+            html.contains(r#"data-jpg="""#),
+            "a work tile offered a GET download link: {html}"
+        );
+
+        // Pre-auth neither affordance is wired at all.
+        let locked = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
+        assert!(
+            !locked.contains("data-download="),
+            "a locked page handed out download routes: {locked}"
+        );
+    }
+
+    /// Everything that opens or closes the download panel agrees on its `id`.
+    ///
+    /// The panel is declarative — `popovertarget` names the element it acts on —
+    /// so a mismatched `id` is not an error anywhere. The button simply does
+    /// nothing, the client cannot reach their files, and nothing in the console
+    /// says why. `work.js` looks the element up the same way and fails the same
+    /// silent way, which is what this covers that a rendering assertion cannot.
+    #[tokio::test]
+    async fn the_download_panel_and_everything_that_opens_it_agree_on_one_id() {
+        let f = work_sets_fixture();
+        let html = body_string(get(&f.router, "/work/big-job").await).await;
+
+        let id = "work-downloads";
+        assert!(html.contains(&format!(r#"id="{id}""#)), "no panel: {html}");
+        assert!(html.contains(r#"popover="auto""#), "the panel is not a popover");
+        // The bar's button opens it and the panel's own button closes it.
+        assert_eq!(
+            html.matches(&format!(r#"popovertarget="{id}""#)).count(),
+            2,
+            "expected exactly an opener and a closer: {html}"
+        );
+        assert!(html.contains(r#"popovertargetaction="hide""#), "nothing closes it");
+
+        let js = std::fs::read_to_string("static/work.js").expect("read work.js");
+        assert!(
+            js.contains(&format!("'{id}'")),
+            "work.js looks up a different id than the page renders"
+        );
+
+        // `data-auto-open` is the flag work.js keys on, and it is set on the
+        // error re-render and nowhere else — an unlocked page that popped its
+        // own download panel open on every visit would be worse than the block
+        // this replaced.
+        assert!(
+            !html.contains("data-auto-open"),
+            "a page with no error still asks for the panel to open: {html}"
+        );
+        let refused = post(&f.router, "/work/big-job/auth", "password=wrong").await;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        let refused = body_string(refused).await;
+        assert!(
+            refused.contains(r#"data-auto-open="true""#),
+            "a refused password left the panel shut: {refused}"
+        );
+        // The refusal sits inside the panel, under the field it is about, and
+        // is wired to that field for a screen reader.
+        let panel = refused.find(&format!(r#"id="{id}""#)).expect("no panel");
+        let message = refused.find("dl-error").expect("no error message");
+        assert!(message > panel, "the refusal was left outside the panel");
+        let field = refused.find(r#"id="work-password""#).expect("no field");
+        assert!(field < message, "the refusal was put above the field");
+        assert!(
+            refused.contains(r#"aria-describedby="work-password-error""#),
+            "the field does not point at its error"
+        );
+        assert!(refused.contains(r#"aria-invalid="true""#), "the field is not marked invalid");
+    }
+
+    /// A job's `title.txt` names it, on the index card and on the delivery page.
+    ///
+    /// The folder name has to be a valid path segment and has to stay put once
+    /// links have gone out, so it cannot also be the thing a client reads.
+    /// `humanize` closes most of the gap but cannot add a capital, a comma, or a
+    /// word the folder does not contain — so the job carries its own title, and
+    /// the fallback when it does not is still the folder name and never an
+    /// invented sentence.
+    #[tokio::test]
+    async fn a_job_is_named_by_its_title_file_and_falls_back_to_its_folder() {
+        let f = work_sets_fixture();
+
+        // No title file yet: the folder name, spelled out.
+        let index = body_string(get(&f.router, "/work").await).await;
+        assert!(index.contains(">big job<"), "{index}");
+        let page = body_string(get(&f.router, "/work/big-job").await).await;
+        assert!(page.contains(r#"<h1 class="site-title">big job</h1>"#), "{page}");
+
+        // Written verbatim — the hyphen is punctuation the owner typed, not a
+        // separator standing in for a space, so `humanize` must not touch it.
+        std::fs::write(
+            f.photos.join("work/big-job").join(work::TITLE_FILE),
+            "Marisol & Sam \u{2014} June 2026\n",
+        )
+        .unwrap();
+
+        let index = body_string(get(&f.router, "/work").await).await;
+        assert!(
+            index.contains(">Marisol &amp; Sam — June 2026<"),
+            "the index card ignored title.txt: {index}"
+        );
+        assert!(!index.contains(">big job<"), "the folder name is still showing");
+        // The URL is the folder, always: a title is not an address.
+        assert!(index.contains(r#"href="/work/big-job""#), "the URL moved with the title");
+
+        let page = body_string(get(&f.router, "/work/big-job").await).await;
+        assert!(
+            page.contains(r#"<h1 class="site-title">Marisol &amp; Sam — June 2026</h1>"#),
+            "the page heading ignored title.txt: {page}"
+        );
+        assert!(
+            page.contains("<title>Marisol &amp; Sam — June 2026 — Photo Delivery"),
+            "the browser tab ignored title.txt: {page}"
+        );
+        assert!(
+            page.contains(r#"href="https://paulborrego.com/work/big-job""#),
+            "the canonical moved with the title"
+        );
+
+        // An empty file is a file nobody has filled in, not a job with no name.
+        std::fs::write(f.photos.join("work/big-job").join(work::TITLE_FILE), "\n  \n").unwrap();
+        let page = body_string(get(&f.router, "/work/big-job").await).await;
+        assert!(
+            page.contains(r#"<h1 class="site-title">big job</h1>"#),
+            "an empty title.txt did not fall back: {page}"
+        );
+
+        // One line only: an editor's trailing newline is not a second line, and
+        // a stray one cannot break the <title> in half.
+        std::fs::write(
+            f.photos.join("work/big-job").join(work::TITLE_FILE),
+            "The Real Title\nnotes to self\n",
+        )
+        .unwrap();
+        let page = body_string(get(&f.router, "/work/big-job").await).await;
+        assert!(page.contains(r#"<h1 class="site-title">The Real Title</h1>"#), "{page}");
+        assert!(!page.contains("notes to self"), "a second line reached the page");
+    }
+
+    /// `title.txt` is a name, not a photograph and not a deliverable.
+    #[tokio::test]
+    async fn the_title_file_is_not_served_as_part_of_the_job() {
+        let f = work_sets_fixture();
+        std::fs::write(
+            f.photos.join("work/big-job").join(work::TITLE_FILE),
+            "Marisol & Sam",
+        )
+        .unwrap();
+        let page = body_string(get(&f.router, "/work/big-job").await).await;
+        // Not a tile, not a tab, and not counted among the files on offer.
+        assert!(!page.contains(work::TITLE_FILE), "title.txt reached the page: {page}");
+        assert!(
+            page.contains(r#"<li class="mtile""#),
+            "the job root set lost its photograph"
+        );
+        let index = body_string(get(&f.router, "/work").await).await;
+        // The fixture's seven JPEGs, still seven.
+        assert!(index.contains("7 JPEG"), "title.txt was counted as a file: {index}");
+    }
+
+    /// Five wrong passwords and the job stops answering for a while.
+    ///
+    /// The limit reads the same append-only failure log the owner's report is
+    /// built from, so it survives a restart — a counter held in memory would be
+    /// cleared by one, which is the difference between a limit and a speed bump.
+    #[tokio::test]
+    async fn a_job_stops_checking_passwords_after_five_wrong_ones() {
+        let f = work_sets_fixture();
+
+        for i in 1..=4 {
+            let resp = post(&f.router, "/work/big-job/auth", "password=wrong").await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "try {i}");
+            let html = body_string(resp).await;
+            assert!(html.contains("Incorrect password."), "try {i} said something else");
+        }
+
+        // The fifth is still checked, and still wrong.
+        let fifth = post(&f.router, "/work/big-job/auth", "password=wrong").await;
+        assert_eq!(fifth.status(), StatusCode::UNAUTHORIZED);
+
+        // The sixth is not checked at all — including the right one, which is
+        // the whole point: past the limit the route has no opinion about what
+        // was submitted.
+        let refused = post(&f.router, "/work/big-job/auth", "password=hunter2").await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        let html = body_string(refused).await;
+        assert!(html.contains(views::WORK_ERR_RATE), "{html}");
+        assert!(!html.contains("dl-row"), "a locked-out attempt was let through: {html}");
+
+        // A refused attempt is not itself recorded: counting it would push the
+        // window forward on every retry and the pause would never end.
+        assert_eq!(auth_failure_log(&f).len(), 5, "a rate-limited try was counted");
+
+        // And the limit is per job, so the one next door is unaffected.
+        std::fs::create_dir_all(f.photos.join("work/other-job/edited")).unwrap();
+        image::RgbImage::from_pixel(900, 600, image::Rgb([120, 140, 100]))
+            .save(f.photos.join("work/other-job/edited/A.jpg"))
+            .unwrap();
+        std::fs::write(f.photos.join("work/other-job/.password"), b"hunter2").unwrap();
+        let ok = post(&f.router, "/work/other-job/auth", "password=hunter2").await;
+        assert_eq!(ok.status(), StatusCode::SEE_OTHER, "the limit leaked across jobs");
+    }
+
+    /// An accepted password lands on the files rather than on a button.
+    ///
+    /// The client typed a password to reach the downloads; making them press
+    /// Download afterwards is a step that asks nothing and answers nothing. The
+    /// redirect carries `?downloads=1`, which the view turns into the flag
+    /// `work.js` opens the panel on.
+    #[tokio::test]
+    async fn an_accepted_password_lands_with_the_downloads_open() {
+        let f = work_sets_fixture();
+        let ok = post(&f.router, "/work/big-job/auth", "password=hunter2").await;
+        assert_eq!(ok.status(), StatusCode::SEE_OTHER);
+        let location = ok
+            .headers()
+            .get(header::LOCATION)
+            .expect("no redirect")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(location, "/work/big-job?downloads=1");
+
+        let cookie = ok
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("no auth cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let landed = f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&location)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_string(landed).await;
+        assert!(
+            html.contains(r#"data-auto-open="true""#),
+            "the panel stayed shut after the password was accepted: {html}"
+        );
+        assert_eq!(html.matches(r#"class="dl-row""#).count(), 3, "no download rows");
+
+        // It lasts exactly one page view: the tab links carry no such parameter,
+        // so moving between sets does not reopen the panel every time.
+        assert!(
+            !html.contains("downloads=1\""),
+            "the flag leaked into a link on the page: {html}"
+        );
+        let plain = body_string(
+            f.router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/work/big-job")
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!plain.contains("data-auto-open"), "the panel opens on every visit");
     }
 
     /// A wrong password is counted per job and nothing else is kept. The report

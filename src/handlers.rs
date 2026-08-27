@@ -20,7 +20,7 @@ use crate::recent;
 use crate::state::AppState;
 use crate::thumbs::{self, ThumbKind};
 use crate::views::{
-    self, Crumb, DirEntry, FolderGroup, ImageEntry, WorkFeedPhoto, WorkFeedSection, WorkIndexEntry,
+    self, Crumb, DirEntry, FolderGroup, ImageEntry, SectionTab, WorkIndexEntry,
     PersonEntry,
 };
 
@@ -206,6 +206,9 @@ async fn portfolio_group(state: &AppState, section: &portfolio::Section) -> Opti
             image_url: format!("/image/{}", encode_path(&p.rel)),
             jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
             raw_download_url,
+            // The archive galleries download over GET; the POST route
+            // belongs to the work delivery pages alone.
+            download_action: None,
             dims: None,
             srcset: None,
             name: p.name.clone(),
@@ -538,6 +541,9 @@ async fn render_dir(
                 image_url: format!("/image/{}", encode_path(&rel_child)),
                 jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                 raw_download_url,
+                // The archive galleries download over GET; the POST route
+                // belongs to the work delivery pages alone.
+                download_action: None,
                 dims: None,
                 srcset: None,
                 name,
@@ -639,6 +645,9 @@ async fn read_dir_images(root: &Path, rel: &str) -> Vec<ImageEntry> {
                 image_url: format!("/image/{}", encode_path(&rel_child)),
                 jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                 raw_download_url,
+                // The archive galleries download over GET; the POST route
+                // belongs to the work delivery pages alone.
+                download_action: None,
                 dims: None,
                 srcset: None,
                 name,
@@ -763,6 +772,9 @@ pub async fn person_photos(
             image_url: format!("/image/{}", encode_path(&p.rel)),
             jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
             raw_download_url,
+            // The archive galleries download over GET; the POST route
+            // belongs to the work delivery pages alone.
+            download_action: None,
             dims: None,
             srcset: None,
             name: p.name,
@@ -1304,6 +1316,9 @@ async fn walk_groups(
                     image_url: format!("/image/{}", encode_path(&rel_child)),
                     jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
                     raw_download_url,
+                    // The archive galleries download over GET; the POST route
+                    // belongs to the work delivery pages alone.
+                    download_action: None,
                     dims: None,
                     srcset: None,
                     name,
@@ -1868,6 +1883,11 @@ pub async fn work_index(State(state): State<AppState>) -> Response {
         .into_iter()
         .map(|j| WorkIndexEntry {
             url: format!("/work/{}", encode_path(&j.name)),
+            // Raw on disk and in the URL above, readable on the card. Which of
+            // the two a card shows is `views::work_display_name`, in the view
+            // rather than here so the index and the delivery page cannot answer
+            // it differently.
+            title: j.title,
             name: j.name,
             jpeg_count: j.jpeg_count,
             raw_count: j.raw_count,
@@ -1886,20 +1906,82 @@ pub async fn work_index(State(state): State<AppState>) -> Response {
     views::work_index_page("Work", &crumbs, &entries).into_response()
 }
 
+/// One browsable set inside a job: an edited folder, or the job root.
+///
+/// `slug` is empty until [`assign_set_slugs`] runs, which needs every label
+/// first — a slug has to be unique across the job to address a tab, and
+/// uniqueness is not a property any single label has.
+struct WorkSet {
+    label: String,
+    slug: String,
+    photos: Vec<work::WorkPhoto>,
+}
+
+/// Give every set a unique `[a-z0-9-]` slug derived from its label.
+///
+/// Two labels can slug the same — `medium format positive` and
+/// `medium-format/positive` both reduce to `medium-format-positive` — and a tab
+/// addressed by an ambiguous slug would serve the wrong set. Collisions take a
+/// `-2`, `-3` suffix in section order, which is stable as long as the folders
+/// are. A label with no ASCII alphanumerics at all slugs to nothing, hence the
+/// `set` fallback; it then collides with any other such label and gets numbered
+/// the same way.
+fn assign_set_slugs(sets: &mut [WorkSet]) {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in sets.iter_mut() {
+        let base = match portfolio::slug(&s.label) {
+            b if b.is_empty() => "set".to_string(),
+            b => b,
+        };
+        let mut candidate = base.clone();
+        let mut n = 2;
+        while !used.insert(candidate.clone()) {
+            candidate = format!("{base}-{n}");
+            n += 1;
+        }
+        s.slug = candidate;
+    }
+}
+
+/// `?set=<slug>` picks which of the job's sets the page shows, defaulting to the
+/// first. A query rather than a path segment because a set is a view of one job
+/// rather than a resource of its own — and because `/work/:name/*` is already
+/// spoken for by `auth`, `download` and `file`, which a new capture would have
+/// to be kept clear of forever.
 pub async fn work_detail(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
+    AxumQuery(query): AxumQuery<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    render_work_page(&state, &name, &headers, None, StatusCode::OK).await
+    let set = query.get("set").map(String::as_str);
+    // Set by the redirect `work_auth` issues on success, and by nothing else.
+    let open_downloads = query.contains_key("downloads");
+    render_work_page(
+        &state,
+        &name,
+        set,
+        &headers,
+        None,
+        StatusCode::OK,
+        open_downloads,
+    )
+    .await
 }
 
+/// `set` is the requested tab slug, or `None` for the first set. The error
+/// re-render paths pass `None`: an auth failure puts the visitor back at the top
+/// of the page with a banner, where which set was showing no longer applies.
 async fn render_work_page(
     state: &AppState,
     name: &str,
+    set: Option<&str>,
     headers: &HeaderMap,
     error: Option<&str>,
     status: StatusCode,
+    // `open_downloads` is true on the redirect after a password was accepted,
+    // which opens the download panel on arrival. See `work_auth`.
+    open_downloads: bool,
 ) -> Response {
     if !is_valid_work_name(name) {
         return not_found_response();
@@ -1926,68 +2008,98 @@ async fn render_work_page(
         Some(pw) => cookie_authorizes(headers, name, pw),
         None => false,
     };
+    // Browsable sets, in the order `read_work` sorted the sections: the edited
+    // folders, plus any photographs sitting at the job root. An `original`
+    // folder is the same frames unedited and is download-only — see
+    // `views::work_page`. `total_jpeg_count` still counts every JPEG in the job,
+    // which is what separates "nothing here yet" from "nothing browsable here".
+    let display_name = views::work_display_name(name, detail.title.as_deref());
     let mut total_jpeg_count: u32 = 0;
-    let sections: Vec<WorkFeedSection> = detail
-        .sections
-        .into_iter()
+    let mut sets: Vec<WorkSet> = Vec::new();
+    for s in detail.sections {
+        total_jpeg_count += s.photos.len() as u32;
+        if !(s.is_edited || s.label.is_empty()) {
+            continue;
+        }
+        sets.push(WorkSet {
+            // The job's display name is the fallback label, so a job whose
+            // photographs sit directly in `edited/` gets a tab reading what the
+            // client calls the job rather than what the folder is called.
+            label: views::work_set_label(&s.label, &display_name),
+            // Filled in below, once every label is known.
+            slug: String::new(),
+            photos: s.photos,
+        });
+    }
+    assign_set_slugs(&mut sets);
+    // The requested tab, or the first — which `read_work` has already sorted to
+    // be the job-root section if there is one, then `edited` ahead of its
+    // siblings. An unknown or stale slug falls back rather than 404ing: it is a
+    // view of a page that exists, and a client following an old link should get
+    // their photographs rather than an error.
+    let active = set
+        .and_then(|want| sets.iter().position(|s| s.slug == want))
+        .unwrap_or(0);
+    let tabs: Vec<SectionTab> = sets
+        .iter()
+        .enumerate()
+        .map(|(i, s)| SectionTab {
+            label: s.label.clone(),
+            // Slugs are `[a-z0-9-]` by construction, so nothing here needs
+            // encoding beyond the job name.
+            url: format!("/work/{}?set={}", encode_path(name), s.slug),
+            active: i == active,
+        })
+        .collect();
+    // Only the active set is built. The job on disk has 302 photographs in one
+    // of its sets; rendering all of them to show one is work nobody asked for.
+    let images: Vec<ImageEntry> = sets
+        .get(active)
         .map(|s| {
-            let photos: Vec<WorkFeedPhoto> = s
-                .photos
-                .into_iter()
-                .map(|p| WorkFeedPhoto {
-                    preview_url: format!("/preview/{}", encode_path(&p.rel)),
+            s.photos
+                .iter()
+                .map(|p| ImageEntry {
+                    // The tile grid wants the preview rendition, not the
+                    // original: `dims` below are the preview's, and the
+                    // full-size file is what the lightbox swaps in.
+                    thumb_url: format!("/preview/{}", encode_path(&p.rel)),
                     image_url: format!("/image/{}", encode_path(&p.rel)),
+                    // `download_action`, not `jpg_download_url`: this route
+                    // is a POST (auth rides on the job cookie), so it drives
+                    // the lightbox's form-submitting Download button rather
+                    // than its GET JPG/RAW menu. `None` pre-auth, which hides
+                    // the button. See `views::ImageEntry::download_action`.
                     download_action: if authorized {
-                        format!(
+                        Some(format!(
                             "/work/{}/file/{}",
                             encode_path(name),
                             encode_path(&p.subpath)
-                        )
+                        ))
                     } else {
-                        String::new()
+                        None
                     },
-                    name: p.name,
-                    preview_dims: p.preview_dims,
+                    // The GET download menu belongs to the archive galleries;
+                    // a work photo has no GET route to offer, per-JPEG or
+                    // per-RAW. The bulk bar's RAW column is the only way to a
+                    // raw file here.
+                    jpg_download_url: String::new(),
+                    raw_download_url: None,
+                    name: views::humanize(&p.name),
+                    dims: p.preview_dims,
+                    // One rendition per work photo, so no second candidate to
+                    // offer and nothing for a `sizes` attribute to choose from.
+                    srcset: None,
                 })
-                .collect();
-            total_jpeg_count += photos.len() as u32;
-            // The job-root section gets the empty-label slot; everything else
-            // hangs off its subfolder path so collapse.js can persist per
-            // section choices without colliding across work items.
-            let data_path = if s.label.is_empty() {
-                format!("work:{name}:")
-            } else {
-                format!("work:{name}:{}", s.label)
-            };
-            let default_open = s.is_edited || s.label.is_empty();
-            WorkFeedSection {
-                label: s.label,
-                photos,
-                data_path,
-                default_open,
-            }
+                .collect()
         })
-        .collect();
-    let crumbs = vec![
-        Crumb {
-            label: "Home".into(),
-            url: Some("/".into()),
-        },
-        Crumb {
-            label: "Work".into(),
-            url: Some("/work".into()),
-        },
-        Crumb {
-            label: name.to_string(),
-            url: None,
-        },
-    ];
+        .unwrap_or_default();
     let bulk_action = format!("/work/{}/download", encode_path(name));
     let auth_action = format!("/work/{}/auth", encode_path(name));
     let body = views::work_page(
         name,
-        &crumbs,
-        &sections,
+        detail.title.as_deref(),
+        &tabs,
+        &images,
         total_jpeg_count,
         detail.counts,
         detail.has_password,
@@ -1995,6 +2107,7 @@ async fn render_work_page(
         &bulk_action,
         &auth_action,
         error,
+        open_downloads,
     );
     // This page renders materially different markup pre- vs post-auth, keyed
     // off the path-scoped auth cookie. Without `Vary: Cookie` a shared cache
@@ -2004,6 +2117,23 @@ async fn render_work_page(
         .insert(header::VARY, header::HeaderValue::from_static("Cookie"));
     resp
 }
+
+/// Wrong passwords accepted for one job before it stops answering.
+///
+/// Five, and then nothing is checked until the oldest of them ages out of
+/// [`WORK_AUTH_WINDOW_SECS`] — a rolling window rather than a latch, so a client
+/// who mistypes five times gets their gallery back on their own rather than
+/// having to ask for it.
+///
+/// **Per job, and the cost of that is worth stating.** A stranger who guesses
+/// five times locks the real client out for the rest of the window. Per visitor
+/// would be fairer, and the site cannot do it: it keeps no visitor log by
+/// design, and a limit kept in a cookie is one a guesser clears. A quarter hour
+/// of collateral is the price of not starting to log the people who visit.
+const WORK_AUTH_MAX_TRIES: usize = 5;
+
+/// How long a wrong password counts against [`WORK_AUTH_MAX_TRIES`].
+const WORK_AUTH_WINDOW_SECS: u64 = 15 * 60;
 
 /// Verify the submitted password and issue a path-scoped cookie. On success
 /// we 303-redirect back to the job page so the GET handler can re-render
@@ -2018,6 +2148,25 @@ pub async fn work_auth(
     if !is_valid_work_name(&name) {
         return StatusCode::NOT_FOUND.into_response();
     }
+    // Checked before the password is even read: past the limit this route has no
+    // opinion about what was submitted, which is the point of having one.
+    if audit::recent_auth_failures(state.data_root(), &name, WORK_AUTH_WINDOW_SECS).await
+        >= WORK_AUTH_MAX_TRIES
+    {
+        return render_work_page(
+            &state,
+            &name,
+            None,
+            &headers,
+            // Deliberately not recorded. Counting a refused attempt would push
+            // the window forward on every retry and turn a fifteen-minute pause
+            // into a lockout with no end.
+            Some(views::WORK_ERR_RATE),
+            StatusCode::TOO_MANY_REQUESTS,
+            false,
+        )
+        .await;
+    }
     let form = parse_urlencoded(&body);
     let submitted = form.get("password").cloned().unwrap_or_default();
     let stored = match work::read_password(state.photos_root().clone(), name.clone()).await {
@@ -2026,9 +2175,11 @@ pub async fn work_auth(
             return render_work_page(
                 &state,
                 &name,
+                None,
                 &headers,
                 Some("Downloads are locked — no password is set for this work item."),
                 StatusCode::FORBIDDEN,
+                false,
             )
             .await;
         }
@@ -2044,14 +2195,20 @@ pub async fn work_auth(
         return render_work_page(
             &state,
             &name,
+            None,
             &headers,
             Some("Incorrect password."),
             StatusCode::UNAUTHORIZED,
+            false,
         )
         .await;
     }
     let set_cookie = build_work_cookie(&name, &submitted);
-    let redirect_to = format!("/work/{}", encode_path(&name));
+    // `?downloads=1` so the panel is open when the page comes back: the client
+    // typed a password to reach the files, and making them press Download after
+    // it was accepted is a step that asks nothing and answers nothing. The tab
+    // links carry no such parameter, so it lasts exactly one page view.
+    let redirect_to = format!("/work/{}?downloads=1", encode_path(&name));
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, redirect_to)
@@ -2100,9 +2257,11 @@ pub async fn work_download(
             return render_work_page(
                 &state,
                 &name,
+                None,
                 &headers,
                 Some("No files matching that selection are available for this work item."),
                 StatusCode::NOT_FOUND,
+                false,
             )
             .await;
         }
@@ -2183,9 +2342,11 @@ async fn require_cookie_auth(
                 render_work_page(
                     state,
                     job_name,
+                    None,
                     headers,
                     Some("Downloads are locked — no password is set for this work item."),
                     StatusCode::FORBIDDEN,
+                    false,
                 )
                 .await,
             );
@@ -2202,9 +2363,11 @@ async fn require_cookie_auth(
             render_work_page(
                 state,
                 job_name,
+                None,
                 headers,
                 Some("Authentication required — enter the job password to unlock downloads."),
                 StatusCode::UNAUTHORIZED,
+                false,
             )
             .await,
         )
@@ -2448,6 +2611,7 @@ mod tests {
                     image_url: String::new(),
                     jpg_download_url: String::new(),
                     raw_download_url: None,
+                    download_action: None,
                     dims: None,
                     srcset: None,
                 })

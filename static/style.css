@@ -27,6 +27,10 @@
      on top of the accent itself. Translucent so it composites over whichever
      surface it lands on. */
   --accent-soft: rgba(87, 115, 63, 0.2);
+  /* Lift shadow for a card-sized surface. A token because the dark theme
+     cannot reuse this value: a near-black shadow on a near-black ground is
+     invisible, so it needs its own opacity rather than its own colour. */
+  --shadow-card: 0 6px 16px rgba(47, 58, 38, 0.14);
 }
 
 /* Dark theme — opt-in site-wide. The inline head script in views.rs sets
@@ -42,6 +46,7 @@ html[data-theme="dark"] {
   --accent: #8db168;
   --accent-hover: #a8c884;
   --accent-soft: rgba(141, 177, 104, 0.26);
+  --shadow-card: 0 8px 20px rgba(0, 0, 0, 0.55);
 }
 
 * {
@@ -83,6 +88,35 @@ header.site {
   align-items: baseline;
   justify-content: space-between;
   gap: 1.5rem;
+}
+
+/* With a title in the middle, the header stops being two ends and becomes three
+   tracks. `1fr auto 1fr` rather than `auto 1fr auto`: equal outer tracks are
+   what put the title in the centre of the *header* instead of the centre of
+   whatever space the brand and the nav happened to leave. */
+header.site.site-titled {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+}
+
+header.site.site-titled .topnav {
+  justify-self: end;
+}
+
+/* The delivery page's `<h1>`. Sized to sit with the brand rather than over it —
+   this names the page, the brand names the site, and neither should look like
+   the other's subtitle. */
+header.site .site-title {
+  margin: 0;
+  text-align: center;
+  min-width: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--text);
+  /* Job names are folder names and can be a long unbroken token. */
+  overflow-wrap: anywhere;
 }
 
 header.site .site-left {
@@ -1049,6 +1083,16 @@ ul.nav-tree ul.nav-tree {
     gap: 0.6rem;
     padding: 0.55rem 1rem;
   }
+  /* `display` is what the rule above cannot override on its own: the titled
+     header is a grid at every other width, and `flex-direction` means nothing
+     to it. Stacked, the title sits between the brand row and the nav. */
+  header.site.site-titled {
+    display: flex;
+  }
+  header.site .site-title {
+    text-align: left;
+    font-size: 1rem;
+  }
   header.site .site-left {
     justify-content: space-between;
   }
@@ -1070,93 +1114,424 @@ ul.nav-tree ul.nav-tree {
 }
 
 /* ---- Work (client delivery) ---- */
-main.work {
+
+/* The index keeps the site's measure — it is a list of names, not photographs.
+
+   `width: 100%` because `body` is a flex column (see the footer rules) and an
+   auto side margin on a flex item suppresses the cross-axis stretch: without it
+   this shrinks to fit its content and `max-width` never comes into play, so a
+   short card list rendered as one narrow column mid-page. */
+main.work-list {
+  width: 100%;
   max-width: 1100px;
   margin: 2rem auto;
 }
 
-.work-title {
-  margin: 0 0 1rem;
-  font-size: 1.5rem;
-  color: var(--text);
+/* A delivery page is photographs, so it gives up the shared gutter exactly as
+   `main.portfolio` does and lets `.mgrid` set its own much narrower one. Nothing
+   on it needs the gutter back any more: the name is in the header, the sets and
+   the download control are in the bar, and the panel sets its own width. */
+main.work {
+  margin: 0;
+  padding: 0;
 }
 
-.banner {
-  border-radius: 6px;
-  padding: 0.7rem 1rem;
-  margin: 0 0 1rem;
-  font-size: 0.95rem;
-}
-
-.banner-error {
-  background: #f8d8c8;
-  border: 1px solid #d4886a;
-  color: #6e2a10;
-}
+/* ---- /work index --------------------------------------------------------- */
 
 ul.work-cards {
   list-style: none;
   padding: 0;
   margin: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: 0.85rem;
+}
+
+/* The <li> is the grid item and stretches to the tallest card in its row; the
+   anchor has to be told to take that height, or a card whose name wraps to two
+   lines leaves its neighbours short. */
+li.work-card {
+  display: flex;
 }
 
 li.work-card a {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  padding: 1rem 1.1rem;
+  flex: 1 1 auto;
+  position: relative;
+  display: grid;
+  /* Text takes what it needs, the chevron sits hard against the far edge, so
+     every card in a row resolves its affordance at the same x. */
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.95rem 1.05rem;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
+  overflow: hidden;
+  transition: transform 0.15s ease, box-shadow 0.15s ease,
+    border-color 0.15s ease;
 }
 
-li.work-card a:hover {
+/* An accent rail plus a lift, rather than the accent flood `ul.dirlist` uses.
+   Same idea at a different size: flooding a chip reads as emphasis, flooding a
+   card this large repaints a third of the viewport to say "the pointer is
+   here". */
+li.work-card a::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
   background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.15s ease;
+}
+
+li.work-card a:hover,
+li.work-card a:focus-visible {
   border-color: var(--accent);
-  color: var(--on-accent);
+  /* Repeated from the base rule: the shared `a:focus-visible` ring sets its
+     own radius, and without this the corners would snap on focus. */
+  border-radius: 6px;
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card);
   text-decoration: none;
+}
+
+li.work-card a:hover::before,
+li.work-card a:focus-visible::before {
+  transform: scaleX(1);
+}
+
+.work-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
 }
 
 .work-name {
   font-weight: 600;
-  font-size: 1rem;
+  font-size: 1.02rem;
+  line-height: 1.3;
+  color: var(--text);
+  /* Job names are folder names and can be a long unbroken token. */
+  overflow-wrap: anywhere;
+  transition: color 0.15s ease;
 }
 
+li.work-card a:hover .work-name,
+li.work-card a:focus-visible .work-name {
+  color: var(--accent);
+}
+
+/* File counts are machine facts about a delivery, not a subtitle, so they take
+   the micro-label treatment the rest of the site gives that kind of value
+   (`.tree-action`, the gallery section headings) instead of sitting at body
+   size directly under the name. Tabular figures so a column of cards lines its
+   digits up. */
 .work-counts {
-  font-size: 0.85rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.05em;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
-li.work-card a:hover .work-counts {
+/* Derived from --muted rather than --border: --border is tuned to read against
+   the page, and at this size on the dark theme it disappeared entirely, so the
+   two counts ran together with nothing between them. */
+.work-count-sep {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.work-card-go {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  /* Quiet at rest, full strength on hover — see below. Same reason as
+     `.work-count-sep` for not reaching for --border. */
+  opacity: 0.6;
+  transition: color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+.work-card-go svg {
+  display: block;
+  width: 1.1rem;
+  height: 1.1rem;
+  /* The shared chevron points down; here it points the way the link goes. */
+  transform: rotate(-90deg);
+}
+
+li.work-card a:hover .work-card-go,
+li.work-card a:focus-visible .work-card-go {
+  color: var(--accent);
+  opacity: 1;
+  transform: translateX(3px);
+}
+
+/* ---- /work/{name}: the bar and the download panel ------------------------- */
+
+/* Sets on the left, the way to the files on the right, in one sticky strip.
+
+   The strip is what is sticky, not the tab bar inside it: `nav.subnav` carries
+   its own `position: sticky` for the portfolio, and two sticky elements nested
+   at the same offset leave the outer one visible with the inner one pinned over
+   it. So the tabs are pinned back to `static` below and the strip owns the
+   position, the background and the border. */
+.work-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.45rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  /* Air between the strip and the first photograph, matching `nav.subnav`'s own
+     on the portfolio so the two pages breathe the same. */
+  margin-bottom: clamp(0.6rem, 1vw, 1.1rem);
+}
+
+/* The tabs give up everything the strip now provides. `min-width: 0` so the
+   scroller can actually shrink rather than pushing the button off the end. */
+.work-bar nav.subnav {
+  position: static;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border-bottom: 0;
+}
+
+/* `margin-left: auto` rather than relying on the tabs to fill the row: a job
+   with one set renders no tab strip at all, and the button still belongs on the
+   right. */
+.dl-open {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dl-open:hover {
+  background: var(--accent);
   color: var(--on-accent);
 }
 
-.work-downloads {
+/* The download panel.
+
+   Base styles are the no-popover fallback: a browser too old for the Popover
+   API ignores the attribute, leaves the element in the flow, and gets an
+   ordinary panel under the bar — the layout this page had before. A supporting
+   browser hides it via the UA stylesheet until it is opened, and `:popover-open`
+   below lifts it into the top layer. */
+.dl-popover {
+  width: min(34rem, calc(100% - 3rem));
+  margin: 0 auto 1.5rem;
+  padding: 1.2rem;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem 1.1rem;
-  margin-bottom: 1.5rem;
+  border-radius: 10px;
+  color: var(--text);
+}
+
+.dl-popover:popover-open {
+  position: fixed;
+  /* `inset: 0` plus auto margins is what centres an element of unknown height in
+     the top layer; `height: max-content` stops it stretching to the viewport. */
+  inset: 0;
+  margin: auto;
+  width: min(34rem, calc(100vw - 2rem));
+  height: max-content;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  box-shadow: var(--shadow-card);
+}
+
+.dl-popover::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.dl-popover-close {
+  float: right;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  margin: -0.4rem -0.4rem 0 0.5rem;
+  font: inherit;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.dl-popover-close:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* Clears the floated close button so the first row does not wrap around it. */
+.dl-rows {
+  clear: both;
+}
+
+/* A refused password, under the input. Not `.banner`: a banner is a block that
+   owns its own strip of page, and this is a note attached to one field inside a
+   panel that is already the only thing being read. */
+.dl-error {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+  color: #b4553f;
+}
+
+html[data-theme="dark"] .dl-error {
+  color: #e8a892;
+}
+
+/* Matches the message, so the field and its note read as one thing. */
+#work-password[aria-invalid="true"] {
+  border-color: #b4553f;
+}
+
+/* Bulk download bar: one row per scope (all / edited / original), each its own
+   <form> so the hidden scope field rides with whichever kind button fires.
+   Grid rather than flex so the label column and the control column line up
+   down the three rows even when a label wraps. */
+.dl-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem 1.25rem;
+  padding: 0.85rem 0;
+  margin: 0;
+  /* Leading edge rather than trailing, so the last row needs no exception and
+     a hairline never sits directly above the panel's bottom border. */
+  border-top: 1px solid var(--border);
+}
+
+.dl-row:first-child {
+  border-top: none;
+}
+
+.dl-row-label {
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* The three kind buttons are one choice, so they read as one segmented control
+   rather than as three separate calls to action. Outline rather than filled:
+   nine filled accent buttons stacked down a page is nine competing primaries,
+   and none of them ends up looking like the thing to press. */
+.dl-kinds {
+  /* Three equal tracks at a fixed group width, not three content-sized
+     buttons: the counts differ per row, and content sizing left the three
+     groups ragged down their left edge while the panel's right edge held them
+     in line. Equal thirds put every JPEG / RAW / Both button on the same
+     column in all three rows. */
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 22rem;
+  max-width: 100%;
+  justify-self: end;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.dl-kinds button {
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  padding: 0.5rem 0.6rem;
+  text-align: center;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dl-kinds button:first-child {
+  border-left: 0;
+}
+
+.dl-kinds button:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.dl-kinds button:disabled {
+  background: transparent;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* The group clips to its radius, which would cut an outset focus ring in half.
+   Inset by the same amount instead, so the focused segment is ringed on all
+   four sides without the group having to stop clipping. */
+.dl-kinds button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 0;
 }
 
 .dl-label {
   display: block;
-  font-size: 0.85rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
   color: var(--muted);
-  margin-bottom: 0.25rem;
-  font-weight: 500;
+  margin-bottom: 0.45rem;
+}
+
+/* Field and submit on one line, wrapping to two when they cannot both fit. */
+.work-auth-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
 }
 
 #work-password {
-  width: 100%;
-  max-width: 320px;
-  padding: 0.45rem 0.6rem;
+  flex: 1 1 16rem;
+  min-width: 0;
+  max-width: 22rem;
+  padding: 0.55rem 0.7rem;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--bg);
   color: var(--text);
   font: inherit;
@@ -1165,6 +1540,7 @@ li.work-card a:hover .work-counts {
 #work-password:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+  border-color: var(--accent);
 }
 
 .dl-locked {
@@ -1173,45 +1549,20 @@ li.work-card a:hover .work-counts {
   font-style: italic;
 }
 
+/* Filled primary — the single-button case (unlock) rather than the segmented
+   choice above. */
 .dl-buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-top: 0.6rem;
-}
-
-/* Bulk download bar uses one row per scope: a label on the left, three
-   submit buttons on the right (JPEG / RAW / Both). Each row is its own
-   <form> so the hidden scope field rides with whichever kind button fires. */
-.dl-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 1rem;
-  padding: 0.5rem 0;
   margin: 0;
-  border-bottom: 1px dashed var(--border);
-}
-
-.dl-row:last-child {
-  border-bottom: none;
-}
-
-.dl-row-label {
-  flex: 1 1 12rem;
-  font-weight: 500;
-  color: var(--text);
-}
-
-.dl-row .dl-buttons {
-  margin-top: 0;
 }
 
 .dl-buttons button {
   font: inherit;
   cursor: pointer;
-  padding: 0.45rem 0.9rem;
-  border-radius: 4px;
+  padding: 0.55rem 1.1rem;
+  border-radius: 6px;
   border: 1px solid var(--accent);
   background: var(--accent);
   color: var(--on-accent);
@@ -1230,39 +1581,27 @@ li.work-card a:hover .work-counts {
   cursor: not-allowed;
 }
 
-/* Work galleries reuse the /all grid scaffolding but with bigger tiles so
-   clients see large previews; the name + per-photo download surface only
-   in the lightbox (see lightbox.js + .lb-caption below). The portfolio used to
-   share this treatment; it has its own layout now, further down. */
-main.work .work-gallery {
-  margin-top: 1.5rem;
+/* Accent-filled button labels on the dark theme.
+   `--on-accent` is pinned light in `:root` and stays light in the dark theme,
+   which is right where the fill is the *light* theme's dark green (#f6f7f1 on
+   #57733f measures 4.96). The dark theme lightens the accent instead, and light
+   text on it drops to 2.26 — 1.73 once hover lightens it further. Both fail AA
+   for the button label, which is the only text those buttons contain.
+   Re-pointing the label at the page ground restores 7.94 / 10.38.
+
+   Scoped to the work download controls because the same pair sits under the
+   notify submit and the lightbox download button, and fixing those means
+   flipping `--on-accent` in the dark theme site-wide — a change worth making
+   deliberately, not as a side effect of restyling this tab. */
+html[data-theme="dark"] .dl-kinds button:hover:not(:disabled),
+html[data-theme="dark"] .dl-buttons button:not(:disabled) {
+  color: var(--bg);
 }
 
-main.work .work-gallery h2 {
-  font-size: 1rem;
-  text-transform: lowercase;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  margin: 0 0 0.6rem;
-}
-
-main.work .work-gallery .section-label {
-  color: var(--text);
-  font-weight: 600;
-}
-
-/* Only the work delivery pages still print a count next to a section label;
-   the home page and /recent dropped theirs. */
-main.work .work-gallery .section-count {
-  font-weight: 400;
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-
-/* Photos land in a CSS-columns masonry rather than a fixed square grid, so each
-   tile renders at the image's natural aspect ratio without leaving gaps for
-   taller portraits next to shorter landscapes. */
-main.work ul.work-grid,
+/* /recent lands its photos in a CSS-columns masonry rather than a fixed square
+   grid, so each tile renders at the image's natural aspect ratio without leaving
+   gaps for taller portraits next to shorter landscapes. The work delivery pages
+   shared this until they moved to the column grid below. */
 main.recent ul.work-grid {
   display: block;
   grid-template-columns: none;
@@ -1271,23 +1610,56 @@ main.recent ul.work-grid {
   column-gap: 1.25rem;
 }
 
-main.work ul.work-grid li.tile,
 main.recent ul.work-grid li.tile {
   break-inside: avoid;
+  /* Equal to the column gap, so the masonry's rhythm is the same in both
+     directions. */
   margin: 0 0 1.25rem;
 }
 
-main.work ul.work-grid li.tile a,
 main.recent ul.work-grid li.tile a {
   display: block;
 }
 
-main.work ul.work-grid li.tile img,
 main.recent ul.work-grid li.tile img {
   aspect-ratio: auto;
   width: 100%;
   height: auto;
   object-fit: initial;
+}
+
+/* Phones: the label/control split in a download row has nowhere to go
+   sideways, so the row stacks and the segmented group spans the panel in three
+   equal thirds — a full-width target each, instead of three shrunken ones
+   pushed against the right edge. */
+@media (max-width: 600px) {
+  .work-bar {
+    padding: 0.4rem 1rem;
+    gap: 0.75rem;
+  }
+
+  .dl-popover {
+    padding: 1rem;
+  }
+
+  .dl-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.55rem;
+    padding: 0.9rem 0;
+  }
+
+  .dl-kinds {
+    justify-self: stretch;
+    width: auto;
+  }
+
+  .dl-kinds button {
+    padding: 0.6rem 0.4rem;
+  }
+
+  .dl-buttons button {
+    flex: 1 1 auto;
+  }
 }
 
 .lb-caption {
@@ -1418,8 +1790,12 @@ main.recent ul.work-grid li.tile img {
    It then briefly used justified rows, which were replaced in turn; the grid
    block further down says why.
 
-   Everything below applies only under `main.portfolio`. `/all`, `/browse`,
-   `/recent` and `/work` are untouched. */
+   The strip and the grid below are shared with the work delivery pages, which
+   tab between sets of photographs the same way and lay them out identically —
+   see `work_page` in `views.rs`. Both are keyed on their own class names rather
+   than on an ancestor page, which is safe because `.mgrid` and the `.m*` classes
+   inside it are emitted by `column_grid` and by nothing else. `/all`, `/browse`
+   and `/recent` keep the square grid and the masonry and are untouched. */
 
 main.portfolio {
   /* Overrides the shared `main` gutter. The grid sets its own, much narrower
@@ -1526,7 +1902,7 @@ nav.subnav a[aria-current="page"] {
    `views.rs`, not here. `columns: 3` would fill top-to-bottom and put the best
    photograph beside two of the weakest; see that function. */
 
-main.portfolio .mgrid {
+.mgrid {
   /* Space *between* photographs. Tight, so a band reads as one field of images
      rather than three framed ones. One token — raise it for more air. */
   --mcols-gap: 6px;
@@ -1548,13 +1924,13 @@ main.portfolio .mgrid {
 /* Phone: dissolve every wrapper so the tiles become flex items of `.mgrid`
    directly and `order` below can reach them. `role="list"` is on these elements
    in the markup because this drops the implicit list semantics. */
-main.portfolio .mcols,
-main.portfolio .mcol,
-main.portfolio .mwide {
+.mcols,
+.mcol,
+.mwide {
   display: contents;
 }
 
-main.portfolio .mtile {
+.mtile {
   /* Reading order, for the single-column view where document order (grouped by
      column) is wrong. Switched off once there are real columns. */
   order: var(--i, 0);
@@ -1566,11 +1942,11 @@ main.portfolio .mtile {
   list-style: none;
 }
 
-main.portfolio .mtile > a {
+.mtile > a {
   display: block;
 }
 
-main.portfolio .mtile img {
+.mtile img {
   display: block;
   width: 100%;
   height: auto;
@@ -1589,7 +1965,7 @@ main.portfolio .mtile img {
    than three cramped ones. A panorama needs no special case there, since every
    tile is already full width. */
 @media (min-width: 1000px) {
-  main.portfolio .mcols {
+  .mcols {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
@@ -1601,7 +1977,7 @@ main.portfolio .mtile img {
     justify-content: center;
   }
 
-  main.portfolio .mcol {
+  .mcol {
     display: flex;
     flex-direction: column;
     gap: var(--mcols-gap);
@@ -1624,21 +2000,22 @@ main.portfolio .mtile img {
   /* A panorama's own row. It is a sibling of the bands rather than a member of
      one, so it spans the full content width simply by being a block — no column
      spanning, and no grid to keep in step with the bands' natural heights. */
-  main.portfolio .mwide {
+  .mwide {
     display: block;
     margin: 0;
     padding: 0;
     list-style: none;
   }
 
-  main.portfolio .mtile {
+  .mtile {
     /* The server already grouped the tiles by column in document order, so
        reordering here would undo it. */
     order: 0;
   }
 }
 
-main.portfolio p.empty {
+main.portfolio p.empty,
+main.work p.empty {
   margin: 3rem 1.5rem;
 }
 

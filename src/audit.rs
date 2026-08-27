@@ -141,6 +141,26 @@ pub async fn record_auth_failure(data_root: &Path, job: &str) {
     }
 }
 
+/// How many times this job's password has been got wrong in the last
+/// `window_secs`.
+///
+/// Reads the same append-only log the owner's report is built from, rather than
+/// keeping a second counter in memory: the count then survives a restart, which
+/// is the difference between a limit and a speed bump.
+///
+/// Per job, not per visitor. The site deliberately keeps no visitor log — the
+/// failure rows carry a job and a timestamp and nothing else — so this is the
+/// finest grain available without starting one. The trade is stated where the
+/// limit is applied; see `WORK_AUTH_MAX_TRIES` in `handlers.rs`.
+pub async fn recent_auth_failures(data_root: &Path, job: &str, window_secs: u64) -> usize {
+    let cutoff = notify::now().saturating_sub(window_secs);
+    read_auth_failures(data_root)
+        .await
+        .iter()
+        .filter(|f| f.job == job && f.ts >= cutoff)
+        .count()
+}
+
 pub async fn read_downloads(data_root: &Path) -> Vec<Download> {
     notify::read_log(&notify::log_path(data_root, DOWNLOADS_LOG)).await
 }
