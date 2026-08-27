@@ -215,6 +215,10 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/people/", get(|| permanent("/people")))
         .route("/work/", get(|| permanent("/work")))
         .route("/nether/", get(|| permanent("/nether")))
+        // On the pages router, and before the layer below, so an unmatched URL
+        // gets the same `no-cache` treatment as a real page — and so the assets
+        // router, merged in below, contributes no fallback of its own.
+        .fallback(handlers::not_found)
         // `private` because /work/:name renders differently pre- vs post-auth
         // off a path-scoped cookie; a shared cache must not reuse the unlocked
         // variant for another visitor. `no-cache` rather than `no-store` so
@@ -752,6 +756,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
+    use std::time::{Duration, UNIX_EPOCH};
     use tower::ServiceExt;
 
     /// Minimal photos/cache/static tree with one real JPEG in it.
@@ -866,6 +871,51 @@ mod tests {
         }
     }
 
+    /// A miss on any page route renders the site rather than a blank page, and
+    /// keeps saying 404 while it does. Both halves matter: an HTML body with a
+    /// 200 on it would tell a crawler the rotted `/browse` URL is still a page.
+    #[tokio::test]
+    async fn misses_render_the_404_page() {
+        let f = fixture();
+        for uri in [
+            "/no-such-page",
+            "/browse/2024/no-such-roll",
+            // Not `/people/:name`: with no digiKam database the route reports
+            // that state in plain text rather than reporting a missing person,
+            // and this fixture has none. The miss branch itself goes through
+            // the same `not_found_response`.
+            "/work/no-such-job",
+            "/nether/no-such-note",
+        ] {
+            let resp = get(&f.router, uri).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} status");
+            let html = body_string(resp).await;
+            assert!(html.contains("notfound-code"), "{uri} did not render the page");
+            assert!(html.contains("<header class=\"site\""), "{uri} has no nav back");
+        }
+    }
+
+    /// The 404 is `noindex` and names no canonical: it exists at no address, so
+    /// stating one would file the miss under a URL that does exist.
+    #[tokio::test]
+    async fn the_404_page_is_not_indexable() {
+        let f = fixture();
+        let html = body_string(get(&f.router, "/no-such-page").await).await;
+        assert!(html.contains("noindex"), "missing robots noindex");
+        assert!(!html.contains("rel=\"canonical\""), "404 named a canonical");
+        assert!(!html.contains("og:url"), "404 named an og:url");
+    }
+
+    /// The fallback sits on the pages router, so an unmatched URL carries the
+    /// same `no-cache` as a real page. Off the pages layer it would inherit
+    /// nothing and a shared cache could store the miss.
+    #[tokio::test]
+    async fn the_404_is_revalidated_like_a_page() {
+        let f = fixture();
+        let cc = cache_control(&get(&f.router, "/no-such-page").await);
+        assert!(cc.contains("no-cache"), "was {cc:?}");
+    }
+
     #[tokio::test]
     async fn static_assets_stay_immutable() {
         let f = fixture();
@@ -906,6 +956,91 @@ mod tests {
     /// holds photos but is not named in `.recent` must not leak onto the page.
     /// This is the assertion that stops `/recent` quietly drifting into a
     /// second `/all`.
+    /// `/all` sorts on two different clocks, and this pins both at once.
+    ///
+    /// Years descend because a year is when the photographs were *taken*. Rolls
+    /// inside a year descend on the newest photograph beneath them, because a
+    /// roll's name says nothing about time and what matters there is when it was
+    /// *published*. The fixture is built so neither rule can pass by accident:
+    /// the newest photo on disk by a wide margin sits in the older year (so
+    /// recency must not reach the top level), and within 2026 the recency order
+    /// is the reverse of the alphabetical one it replaced.
+    ///
+    /// `alpha` earns its place on a photo in its `favs/` rather than its own, so
+    /// a version that read only each folder's direct images would put it last.
+    #[tokio::test]
+    async fn all_reads_newest_year_first_then_most_recently_published_roll() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let photos = root.join("photos");
+        let stamp = |rel: &str, mtime: u64| {
+            let abs = photos.join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            image::RgbImage::from_pixel(8, 8, image::Rgb([10, 20, 30]))
+                .save(&abs)
+                .expect("write test jpeg");
+            std::fs::File::options()
+                .write(true)
+                .open(&abs)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(mtime))
+                .unwrap();
+        };
+        stamp("2026/alpha/a.jpg", 1_000);
+        stamp("2026/alpha/favs/f.jpg", 4_000);
+        stamp("2026/beta/b.jpg", 2_000);
+        stamp("2026/gamma/g.jpg", 9_000);
+        stamp("2025/older/o.jpg", 99_000);
+
+        let state = AppState::new(
+            photos,
+            root.join("cache"),
+            root.join("data"),
+            None,
+            root.join("nether"),
+        );
+        let router = build_router(state, root.join("static"));
+        let html = body_string(get(&router, "/all").await).await;
+
+        let sections = data_paths(&html, "<section class=\"gallery");
+        assert_eq!(
+            sections,
+            vec![
+                "",
+                "2026",
+                "2026/gamma",
+                "2026/alpha",
+                "2026/alpha/favs",
+                "2026/beta",
+                "2025",
+                "2025/older",
+            ],
+            "full page was: {html}"
+        );
+        // The sidebar is built from the same tree and its rows carry the DOM ids
+        // the sections were minted with, so the two orders have to be the one
+        // order. Sorting after `finish` would leave this pair disagreeing and
+        // every sidebar row scrolling to the wrong section.
+        assert_eq!(
+            data_paths(&html, "<li class=\"tree-node\""),
+            sections,
+            "sidebar and sections disagree"
+        );
+    }
+
+    /// The `data-path` of every element whose opening tag starts with `tag`, in
+    /// document order.
+    fn data_paths(html: &str, tag: &str) -> Vec<String> {
+        html.match_indices(tag)
+            .filter_map(|(i, _)| {
+                let open = &html[i..i + html[i..].find('>')?];
+                let key = "data-path=\"";
+                let val = &open[open.find(key)? + key.len()..];
+                Some(val[..val.find('"')?].to_string())
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn recent_renders_only_the_declared_folders() {
         let f = fixture();

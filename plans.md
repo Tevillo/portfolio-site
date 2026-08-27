@@ -16,20 +16,20 @@ nothing copies them anywhere. Losing the first destroys consent I cannot
 reconstruct; losing the second means the next send mails everyone about rolls
 they were already told about. Everything else on this list can wait behind it.
 
-## Page layout: home, About, 404
+## Page layout: home and About
 
-**Portfolio formatting on the home page.** The home page stays at `/`. What it
-should look like is open — big single-column photographs, justified rows at true
-aspect ratios, or a uniform grid — and the layout decision and how much the
-section headings should say are really one decision.
+**Names for the home page's sections.** The layout question is settled — the
+home page is big photographs at their true aspect ratio, uncropped, one column
+on a phone and two on a wide screen. What is left is what sits above them: the
+headings are raw digiKam tag names, so the front door announces `misc`,
+`pastel`, `2026/CALDWELL-35`. Needs somewhere for a display name to live before
+the names themselves can be written.
 
-**About page structure.** Whether it carries a portrait and where, and whether
-it is one column of paragraphs or headed blocks. That choice changes what the
-paragraphs have to be, so it comes before rewriting them.
-
-**A real 404 page.** `/browse` URLs are indexed and the archive gets
-reorganised, so old links will rot. Right now that is a blank white page with no
-way back.
+**Words for the About page.** Its structure is settled too — one column of
+paragraphs, an optional portrait beside them from `about.jpg`, a links list at
+the bottom — so nothing about the page is waiting on a decision any more. It
+still opens "Self hosting enjoyer", which no longer matches the home page
+tagline, and there is no `about.jpg` yet.
 
 ## Work pages
 
@@ -59,17 +59,6 @@ deliberately, not whatever sorts first.
 **Let someone change their mind.** Saying "also tell me about Judy" or "stop
 telling me about Guin" currently means declaring the whole list again from
 memory, and getting one name wrong silently drops the rest.
-
-## Sort order
-
-**`/all` by most recently changed**, within each year. The years stay newest
-first; the rolls I touched last should lead their year.
-
-**A person's photos newest first.** Their page currently opens on their oldest
-photographs, which is the reverse of everywhere else.
-
-Both turn on one unsettled question: whether a photograph's date is when it was
-published or when it was taken. Worth answering once rather than per page.
 
 ## Programming projects page
 

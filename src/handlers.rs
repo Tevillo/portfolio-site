@@ -12,7 +12,7 @@ use tracing::warn;
 
 use crate::audit;
 use crate::work::{self, DownloadKind, Scope};
-use crate::paths::{PathError, safe_resolve};
+use crate::paths::{PathError, leading_year, safe_resolve};
 use crate::people;
 use crate::portfolio;
 use crate::notify;
@@ -28,6 +28,33 @@ use crate::views::{
 enum PageKind {
     BrowseRoot,
     BrowseSub,
+}
+
+/// The router's `.fallback()` — every URL that matches no route.
+///
+/// Page handlers that come up empty call [`not_found_response`] directly rather
+/// than routing through here, since by then the request has already matched.
+pub async fn not_found() -> Response {
+    not_found_response()
+}
+
+/// A 404 that renders the site instead of a blank page: status code plus
+/// [`views::not_found_page`]. Every HTML page route uses this; the image,
+/// rendition and download routes keep returning a bare status, because a client
+/// asking for a JPEG has no use for a page of markup.
+pub fn not_found_response() -> Response {
+    (StatusCode::NOT_FOUND, views::not_found_page()).into_response()
+}
+
+/// A page route's status turned into a response: a miss renders the 404 page,
+/// anything else stays a bare status. Used where a page helper reports failure
+/// as a `StatusCode` rather than returning a rendered body.
+fn page_status_response(status: StatusCode) -> Response {
+    if status == StatusCode::NOT_FOUND {
+        not_found_response()
+    } else {
+        status.into_response()
+    }
 }
 
 /// Home page: one section per `portfolio/<label>` tag in the digiKam database,
@@ -117,6 +144,9 @@ async fn portfolio_groups(state: &AppState) -> Vec<FolderGroup> {
             images,
             // Tag-driven sections have no folder, so no favs/ folder to fold in.
             favs_count: 0,
+            // Only `/all` reads this, and `/all` never sees a tag-driven
+            // section: these have no folder to be recently changed.
+            newest_mtime: None,
         });
     }
 
@@ -292,7 +322,7 @@ pub async fn version() -> Response {
 pub async fn browse_root(State(state): State<AppState>) -> Response {
     match render_dir(&state, "", PageKind::BrowseRoot).await {
         Ok(resp) => resp,
-        Err(status) => status.into_response(),
+        Err(status) => page_status_response(status),
     }
 }
 
@@ -302,7 +332,7 @@ pub async fn browse(
 ) -> Response {
     match render_dir(&state, &rel, PageKind::BrowseSub).await {
         Ok(resp) => resp,
-        Err(status) => status.into_response(),
+        Err(status) => page_status_response(status),
     }
 }
 
@@ -554,9 +584,9 @@ pub async fn person_photos(
         None => return people_unavailable_response(),
     };
     if name.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found_response();
     }
-    let photos = match people::list_person_photos(db, name.clone()).await {
+    let mut photos = match people::list_person_photos(db, name.clone()).await {
         Ok(p) => p,
         Err(e) => {
             warn!(error = ?e, person = %name, "listing person photos failed");
@@ -564,8 +594,9 @@ pub async fn person_photos(
         }
     };
     if photos.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found_response();
     }
+    sort_person_photos(state.photos_root(), &mut photos).await;
     // People photos come from the tag DB as flat rel paths, so there's no
     // directory walk to piggyback the raw-sibling lookup on. Scan each
     // distinct album folder once and cache its stem->raw map.
@@ -607,6 +638,79 @@ pub async fn person_photos(
     ];
     let canonical = format!("/people/{}", encode_path(&name));
     views::page(&name, &canonical, &crumbs, &[], &images, true, views::Nav::People).into_response()
+}
+
+/// The roll a photograph belongs to — a year's own child (`2026/utopia`), or the
+/// top-level folder when the path carries no year.
+///
+/// A roll's `favs/` is a separate album in the tag database but the same roll to
+/// a reader, so keying on this rather than on the album path keeps the two
+/// adjacent and gives them one shared recency, exactly as `/all` renders them.
+fn roll_rel(rel: &str) -> &str {
+    let album = parent_rel(rel);
+    let depth = match album.split('/').next() {
+        Some(first) if leading_year(first).is_some() => 2,
+        _ => 1,
+    };
+    match album.match_indices('/').nth(depth - 1) {
+        Some((i, _)) => &album[..i],
+        None => album,
+    }
+}
+
+/// Order one person's photographs the way `/all` orders the archive.
+///
+/// The tag database hands these back in ascending album path, which opens a
+/// person's page on their *oldest* photographs — the reverse of every other page
+/// on the site. Sorting here rather than in the `ORDER BY` is what lets the key
+/// be the same one `/all` uses: `relativePath` carries no date below the year
+/// segment, so no amount of SQL ordering on it produces this.
+///
+/// The key has the same two halves as the folder tree, for the same reason. The
+/// year segment is when the photographs were *taken*, so years descend and
+/// albums with no year in their path sink below all of them. Inside a year the
+/// rolls are ordered by when they were *published* — newest photograph mtime in
+/// the roll — because a roll's name says nothing about time. Album path and
+/// filename settle the rest, keeping a roll's own `favs/` behind it and each
+/// folder's photographs in the sequence they came off the scanner.
+///
+/// The page stays a flat gallery: ordering by year does not add year headings.
+async fn sort_person_photos(photos_root: &Path, photos: &mut [people::PersonPhoto]) {
+    // One subtree walk per distinct roll, not per photograph. A person appears
+    // in a handful of rolls, so this is a few walks of a few dozen files each.
+    let mut recency: HashMap<String, Option<u64>> = HashMap::new();
+    for p in photos.iter() {
+        let roll = roll_rel(&p.rel);
+        if recency.contains_key(roll) {
+            continue;
+        }
+        let newest = match safe_resolve(photos_root, roll).await {
+            Ok(abs) => newest_subtree_mtime(&abs).await,
+            // A roll the tag database knows about and the filesystem does not:
+            // no recency, so it sorts to the back of its year rather than the
+            // front, and the photographs still render.
+            Err(_) => None,
+        };
+        recency.insert(roll.to_string(), newest);
+    }
+    photos.sort_by_cached_key(|p| {
+        let album = parent_rel(&p.rel);
+        let year = match leading_year(album.split('/').next().unwrap_or("")) {
+            Some(y) => (0, std::cmp::Reverse(y)),
+            None => (1, std::cmp::Reverse(0)),
+        };
+        let newest = recency
+            .get(roll_rel(&p.rel))
+            .copied()
+            .flatten()
+            .unwrap_or(0);
+        (
+            year,
+            std::cmp::Reverse(newest),
+            album.to_lowercase(),
+            p.name.to_lowercase(),
+        )
+    });
 }
 
 fn people_unavailable_response() -> Response {
@@ -1068,13 +1172,16 @@ async fn walk_groups(
             } else {
                 (rel.clone(), format!("/browse/{}", encode_path(&rel)))
             };
-            sources.extend(images.iter().map(|img| abs.join(&img.name)));
+            let files: Vec<PathBuf> = images.iter().map(|img| abs.join(&img.name)).collect();
+            let newest_mtime = newest_mtime_secs(files.clone()).await;
+            sources.extend(files);
             groups.push(FolderGroup {
                 label,
                 path: rel.clone(),
                 browse_url,
                 images,
                 favs_count: 0,
+                newest_mtime,
             });
         }
 
@@ -1098,6 +1205,74 @@ async fn walk_groups(
     }
 
     Ok(groups)
+}
+
+/// Newest mtime among `files`, in seconds since the epoch, or `None` if not one
+/// of them could be stat'd.
+///
+/// This is what "recently changed" means on this site. The alternative was the
+/// containing directory's own mtime, which is one stat instead of many but
+/// records the wrong event: a `rsync` without `-t`, a re-copy of the archive, or
+/// a `chmod` sweep rewrites every directory mtime to the same instant and leaves
+/// an ordering that looks deliberate and is not. Photo mtimes survive all three.
+///
+/// A file that cannot be stat'd is skipped rather than failing the batch: a
+/// folder should lose a little ordering accuracy over one unreadable JPEG, not
+/// the whole page. Taking the vector by value rather than by slice is what lets
+/// the stats run on a blocking thread.
+async fn newest_mtime_secs(files: Vec<PathBuf>) -> Option<u64> {
+    if files.is_empty() {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || {
+        files
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .filter_map(|m| m.modified().ok())
+            .filter_map(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .max()
+    })
+    .await
+    .unwrap_or(None)
+}
+
+/// Newest photograph mtime anywhere under `dir`, by the same rules the tree walk
+/// uses — only visible JPEGs count, and skipped directories are not descended
+/// into — so a roll gets the same recency here as it does on `/all`.
+async fn newest_subtree_mtime(dir: &Path) -> Option<u64> {
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+    let mut newest: Option<u64> = None;
+    while let Some(dir) = stack.pop() {
+        let mut read = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(path = %dir.display(), error = %e, "read_dir failed in mtime scan");
+                continue;
+            }
+        };
+        let mut files: Vec<PathBuf> = Vec::new();
+        while let Ok(Some(entry)) = read.next_entry().await {
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let ftype = match entry.file_type().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+                files.push(entry.path());
+            } else if ftype.is_dir() && !is_skipped_dir(&name) {
+                stack.push(entry.path());
+            }
+        }
+        newest = newest.max(newest_mtime_secs(files).await);
+    }
+    newest
 }
 
 /// Populate `ImageEntry::dims` — and, when `srcset_kind` is set, the second
@@ -1573,11 +1748,11 @@ async fn render_work_page(
     status: StatusCode,
 ) -> Response {
     if !is_valid_work_name(name) {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found_response();
     }
     let detail = match work::read_work(state.photos_root().clone(), name.to_string()).await {
         Ok(Some(d)) => d,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(None) => return not_found_response(),
         Err(e) => {
             warn!(error = ?e, "reading work failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -2124,6 +2299,7 @@ mod tests {
                 })
                 .collect(),
             favs_count: 0,
+            newest_mtime: None,
         }
     }
 
@@ -2209,5 +2385,91 @@ mod tests {
         headers.insert("x-forwarded-for", "203.0.113.7, 10.0.0.1".parse().unwrap());
         assert_eq!(client_key(&headers), "203.0.113.7");
         assert_eq!(client_key(&HeaderMap::new()), "unknown");
+    }
+
+    /// A roll is one level below a year, and everything deeper belongs to it —
+    /// which is what keeps a `favs/` sorted with its roll instead of drifting
+    /// off on a recency of its own.
+    #[test]
+    fn a_roll_is_the_year_folders_own_child() {
+        assert_eq!(roll_rel("2026/utopia/favs/a.jpg"), "2026/utopia");
+        assert_eq!(roll_rel("2026/utopia/a.jpg"), "2026/utopia");
+        assert_eq!(roll_rel("2026/utopia/positive/favs/a.jpg"), "2026/utopia");
+        // Directly in the year folder: the year is the roll.
+        assert_eq!(roll_rel("2026/a.jpg"), "2026");
+        // No year in the path, so the top-level folder is as far as it goes.
+        assert_eq!(roll_rel("misc/deep/a.jpg"), "misc");
+        assert_eq!(roll_rel("a.jpg"), "");
+    }
+
+    /// Write a JPEG at `rel` and stamp it with a known mtime, so a test can say
+    /// exactly which roll was published last.
+    fn photo_at(root: &Path, rel: &str, mtime: u64) {
+        let abs = root.join(rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, b"not really a jpeg").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&abs)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(mtime))
+            .unwrap();
+    }
+
+    fn photo(rel: &str) -> people::PersonPhoto {
+        people::PersonPhoto {
+            rel: rel.to_string(),
+            name: rel.rsplit('/').next().unwrap().to_string(),
+        }
+    }
+
+    /// A person's page opens on their newest year, and inside a year on the
+    /// roll published most recently — the same two rules `/all` sorts by, which
+    /// is the whole point of doing this in Rust rather than in the `ORDER BY`.
+    ///
+    /// The mtimes are chosen so no assertion here can pass by accident: the
+    /// alphabetically first roll is not the newest, and the single newest photo
+    /// on disk sits in the *older* year, so a sort that let recency reach the
+    /// year level would fail.
+    #[tokio::test]
+    async fn a_persons_photos_read_newest_year_then_newest_roll() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        photo_at(root, "2026/alpha/a.jpg", 1_000);
+        // In `alpha`, but newer than anything in `beta` — so `alpha` outranks
+        // `beta` only if the subtree is what counts, not the album.
+        photo_at(root, "2026/alpha/favs/f.jpg", 4_000);
+        photo_at(root, "2026/beta/b.jpg", 2_000);
+        photo_at(root, "2026/gamma/g.jpg", 9_000);
+        photo_at(root, "2025/older/o.jpg", 99_000);
+        photo_at(root, "misc/loose/m.jpg", 50_000);
+
+        let mut photos = vec![
+            photo("misc/loose/m.jpg"),
+            photo("2026/alpha/a.jpg"),
+            photo("2025/older/o.jpg"),
+            photo("2026/beta/b.jpg"),
+            photo("2026/alpha/favs/f.jpg"),
+            photo("2026/gamma/g.jpg"),
+        ];
+        sort_person_photos(root, &mut photos).await;
+
+        let order: Vec<&str> = photos.iter().map(|p| p.rel.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                // 2026 leads despite holding the oldest photo on disk.
+                "2026/gamma/g.jpg",
+                // `alpha` before `beta` on its favs' mtime, and its own photo
+                // stays ahead of that favs — a roll reads like it does on /all.
+                "2026/alpha/a.jpg",
+                "2026/alpha/favs/f.jpg",
+                "2026/beta/b.jpg",
+                "2025/older/o.jpg",
+                // No year in the path, so it sinks below every year however
+                // recently it was published.
+                "misc/loose/m.jpg",
+            ]
+        );
     }
 }

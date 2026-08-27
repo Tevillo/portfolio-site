@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use maud::PreEscaped;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html as md_html};
 
-use crate::handlers::{build_etag, encode_path, matches_etag, not_modified};
+use crate::handlers::{build_etag, encode_path, matches_etag, not_found_response, not_modified};
 use crate::paths::safe_resolve;
 use crate::state::AppState;
 use crate::views::{self, Crumb, NavNode};
@@ -216,7 +216,7 @@ fn percent_decode(s: &str) -> String {
 
 async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
     if is_private(rel_no_ext) {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found_response();
     }
     let root = state.nether_root();
 
@@ -228,11 +228,11 @@ async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
     let file_rel = format!("{rel_no_ext}.md");
     let abs = match safe_resolve(root, &file_rel).await {
         Ok(p) => p,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return not_found_response(),
     };
     let source = match tokio::fs::read_to_string(&abs).await {
         Ok(s) => s,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return not_found_response(),
     };
 
     // Image srcs are resolved relative to the note's own folder.

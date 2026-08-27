@@ -102,6 +102,15 @@ fn list_people_blocking(db_path: &Path) -> Result<Vec<Person>> {
     Ok(out)
 }
 
+/// Every visible photograph tagged with `person_name`, deduplicated by path.
+///
+/// The `ORDER BY` is here only to make the result deterministic and to give the
+/// deduplication a stable notion of which row came first. It is *not* the order
+/// the page renders in: ascending album path would open a person's page on their
+/// oldest photographs, and `relativePath` carries no date below its year segment
+/// anyway, so the display order is settled in Rust by
+/// `handlers::sort_person_photos` — which can reuse the same year rule `/all`
+/// uses instead of reinventing one in SQL.
 fn list_person_photos_blocking(db_path: &Path, person_name: &str) -> Result<Vec<PersonPhoto>> {
     let conn = open_readonly(db_path)?;
     let sql = format!(

@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
+use crate::paths::leading_year;
 use crate::work::WorkCounts;
 
 pub struct DirEntry {
@@ -56,6 +57,14 @@ pub struct FolderGroup {
     /// where the rule ends and the rest of the roll begins — the grid draws a
     /// line there. Zero means no favorites were folded in and no line is drawn.
     pub favs_count: usize,
+    /// Newest mtime among `images`, in seconds since the epoch, or `None` when
+    /// nothing here could be stat'd.
+    ///
+    /// This is how recently the folder was *published* — a negative shot in
+    /// 2019 and scanned last week has a 2019 path and a last-week mtime, and
+    /// this field is the second of those. `/all` rolls it up the tree to order
+    /// each year's rolls; every other page ignores it.
+    pub newest_mtime: Option<u64>,
 }
 
 pub struct PersonEntry {
@@ -329,6 +338,17 @@ pub const ABOUT_LINKS: &[(&str, &str)] = &[
     ("Notes", "/nether"),
 ];
 
+/// The 404 page's heading and the line under it.
+///
+/// **Empty, and waiting for the owner's words.** Even "Not found" is copy, so
+/// nothing here is written for him. Empty is still a working page: the status
+/// code renders as the heading, and the site header's nav — which is the actual
+/// way back — renders either way. See [`not_found_page`].
+pub const NOT_FOUND_HEADING: &str = "";
+/// One line under [`NOT_FOUND_HEADING`], e.g. what to do about a link that has
+/// rotted. Empty renders nothing.
+pub const NOT_FOUND_BODY: &str = "";
+
 /// `<title>` for the home and About pages: the owner's name, followed by the
 /// owner's own tagline when there is one.
 ///
@@ -498,6 +518,9 @@ struct Head<'a> {
     /// `/people/sarah`. Rendered as an absolute `<link rel="canonical">`.
     /// Required rather than optional: a page with no canonical is exactly the
     /// state Search Console flags, so there is no sensible default to omit.
+    ///
+    /// Empty is the one exception, and it means "this page is at no address" —
+    /// the 404, which suppresses both the canonical link and `og:url`.
     canonical: &'a str,
     /// Extra `/static/*.js` to defer-load beyond the theme handler.
     scripts: &'a [&'a str],
@@ -576,7 +599,12 @@ fn head_block(h: Head) -> Markup {
             // user-selected canonical". Absolute, because a relative canonical
             // resolves against the current URL and so cannot correct the
             // host-level duplicates (www vs bare, http vs https).
-            link rel="canonical" href=(canonical);
+            // Empty for the 404 page alone: a page that exists at no address
+            // has no canonical to state, and naming one would file the miss
+            // under a URL that does exist. Every other page passes a real path.
+            @if !h.canonical.is_empty() {
+                link rel="canonical" href=(canonical);
+            }
             @if h.noindex {
                 meta name="robots" content="noindex, follow";
             }
@@ -593,7 +621,9 @@ fn head_block(h: Head) -> Markup {
             // Open Graph resolves nothing relatively, so both of these are
             // absolute. og:url doubles as a canonical hint for the crawlers
             // that read it and not the link element.
-            meta property="og:url" content=(canonical);
+            @if !h.canonical.is_empty() {
+                meta property="og:url" content=(canonical);
+            }
             meta property="og:site_name" content=(OWNER_NAME);
             meta property="og:image" content=(og_image);
             meta name="twitter:card" content="summary_large_image";
@@ -1394,6 +1424,10 @@ struct TreeNode {
     /// Distance from the root, used to indent the inline section headings that
     /// stand in for the tree on narrow screens.
     depth: usize,
+    /// Newest photograph mtime in this folder and every descendant, filled in
+    /// by [`TreeNode::roll_up_mtime`]. `None` means nothing under here could be
+    /// stat'd, which sorts the node last rather than first.
+    newest_mtime: Option<u64>,
     children: Vec<TreeNode>,
 }
 
@@ -1412,8 +1446,24 @@ impl TreeNode {
             direct: 0,
             total: 0,
             depth: 0,
+            newest_mtime: None,
             children: Vec::new(),
         }
+    }
+
+    /// Post-order pass that lifts each folder's newest photograph mtime to
+    /// every ancestor, so an intermediate node with no photographs of its own
+    /// still carries the recency of what is underneath it.
+    ///
+    /// Separate from [`TreeNode::finish`] because the two run either side of
+    /// the sort: this has to be done *before* the children are reordered (the
+    /// key does not exist yet otherwise), and `finish` has to run *after* (its
+    /// ids are positional).
+    fn roll_up_mtime(&mut self) -> Option<u64> {
+        for child in &mut self.children {
+            self.newest_mtime = self.newest_mtime.max(child.roll_up_mtime());
+        }
+        self.newest_mtime
     }
 
     /// Pre-order pass that mints DOM ids, records depth, and rolls the image
@@ -1432,21 +1482,20 @@ impl TreeNode {
     }
 }
 
-/// Sort key for a top-level `/all` folder: the leading run of digits in its
-/// name, when it parses as a number. Top-level folders are years, so "2024"
-/// keys on 2024 and "2024-summer" keys on 2024 too; a folder with no leading
-/// digits (or a digit run too long to be a year) has no key. Returning `None`
-/// rather than a fallback number keeps such folders out of the numeric order
-/// entirely instead of pretending they are year 0.
-fn leading_year(name: &str) -> Option<u32> {
-    let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
-}
-
-/// Rebuild the directory hierarchy from the flat group list. Below the top
-/// level, children keep the order in which `walk_groups` first mentioned them,
-/// which is alphabetical pre-order, so the tree and the page scroll in the same
-/// sequence. The top level is re-sorted newest year first — see below.
+/// Rebuild the directory hierarchy from the flat group list, then order it.
+///
+/// Two sorts, one per level, and they answer different questions because a
+/// photograph has two dates. The top level is years, and a year is when the
+/// photographs in it were *taken*, so years read newest-first. One level down
+/// are the rolls, whose folder names say nothing about time at all, so those
+/// read by when they were *published* — the newest photograph mtime anywhere
+/// beneath them. A 2019 roll rescanned today rises to the top of 2019 and stays
+/// under 2019: the timeline is the outer structure and recency is the order
+/// inside it.
+///
+/// Below the rolls nothing is re-sorted, so a roll's own subfolders keep the
+/// order `walk_groups` first mentioned them in — alphabetical pre-order, which
+/// keeps the tree and the page scroll in the same sequence.
 fn build_tree(groups: &[FolderGroup]) -> TreeNode {
     let mut root = TreeNode::new("All photos", "");
     for g in groups {
@@ -1472,7 +1521,12 @@ fn build_tree(groups: &[FolderGroup]) -> TreeNode {
             cur
         };
         node.direct = g.images.len();
+        node.newest_mtime = g.newest_mtime;
     }
+    // Has to precede both sorts: the recency key below is the rolled-up value,
+    // not the folder's own, since most rolls keep their photographs one level
+    // further down in `favs/` and the like.
+    root.roll_up_mtime();
     // Years read newest-first: the library is browsed from the most recent work
     // backwards, so 2026 belongs above 2025. Compare the parsed number rather
     // than the string — string order only happens to work while every year has
@@ -1480,14 +1534,33 @@ fn build_tree(groups: &[FolderGroup]) -> TreeNode {
     // name has no year in it (one-off buckets like "misc") sink below every year
     // instead of interleaving with the timeline; `sort_by_key` is stable, so
     // among themselves they keep the alphabetical order `walk_groups` produced.
-    // Only the top level is touched: the plan item is about years, and a year's
-    // subfolders are names, not dates, so alphabetical still reads best there.
-    // This runs before `finish` so the positional DOM ids, the sidebar rows and
-    // the page sections are all minted in this one order.
     root.children.sort_by_key(|c| match leading_year(&c.name) {
         Some(year) => (0, std::cmp::Reverse(year)),
         None => (1, std::cmp::Reverse(0)),
     });
+    // Inside a year, the rolls I touched last lead. Directory mtime would have
+    // been the cheap key and it is the wrong one — a `rsync` without `-t`, a
+    // re-copy of the archive, or a `chmod` sweep flattens every folder to the
+    // same instant and the order silently becomes arbitrary. The newest *photo*
+    // mtime in the subtree survives all three, and costs only a stat per file
+    // on a walk that is already reading every directory.
+    //
+    // `sort_by_key` is stable, so rolls that tie — and every roll under a
+    // top-level folder that could not be stat'd at all — keep the alphabetical
+    // order they arrived in. A folder with no readable photograph anywhere
+    // beneath it sorts last rather than first, which is the safer end.
+    //
+    // Applied to every top-level folder's children, not only the years: a
+    // one-off bucket holds rolls too, and the argument for ordering them by
+    // recency does not depend on its name parsing as a number. That keeps the
+    // blast radius at exactly one level.
+    for top in &mut root.children {
+        top.children
+            .sort_by_key(|c| std::cmp::Reverse(c.newest_mtime.unwrap_or(0)));
+    }
+    // Last, so the positional DOM ids, the sidebar rows and the page sections
+    // are all minted in the order both sorts settled on. Sorting after this
+    // point would desynchronise the tree from the page scroll.
     root.finish(&mut 0, 0);
     root
 }
@@ -1915,6 +1988,49 @@ pub fn about_page(portrait: Option<(&str, (u32, u32))>) -> Markup {
                                 }
                             }
                         }
+                    }
+                }
+                (site_footer())
+            }
+        }
+    }
+}
+
+/// The page every unmatched URL gets, and every page route that can't find what
+/// was asked for.
+///
+/// This site needs one more than most: `/browse` URLs are indexed and the
+/// archive gets reorganised, so old links will rot, and until now a rotted one
+/// was a blank white page — no header, no nav, no way back. The words on it are
+/// the owner's and are empty by default (see [`NOT_FOUND_HEADING`]); what makes
+/// this worth rendering even then is the chrome around them.
+///
+/// `noindex` and no canonical: a 404 has no address of its own to name, and
+/// nothing here should be indexed under the URL that produced it.
+pub fn not_found_page() -> Markup {
+    // Mechanical, from the owner's own name — the status code is machinery, not
+    // writing.
+    let page_title = format!("404 \u{2014} {OWNER_NAME}");
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block(
+                Head::new(&page_title, site_description(), "").noindex(),
+            ))
+            body {
+                (site_header(Nav::None))
+                main.notfound {
+                    // The code is the page's heading while there is no copy, and
+                    // steps down to a label once there is, so the owner's words
+                    // become the h1 rather than sitting under a number.
+                    @if NOT_FOUND_HEADING.is_empty() {
+                        h1.notfound-code { "404" }
+                    } @else {
+                        p.notfound-code { "404" }
+                        h1.notfound-heading { (NOT_FOUND_HEADING) }
+                    }
+                    @if !NOT_FOUND_BODY.is_empty() {
+                        p.notfound-body { (NOT_FOUND_BODY) }
                     }
                 }
                 (site_footer())

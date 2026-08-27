@@ -1490,6 +1490,37 @@ main.about {
   margin: 2.5rem auto;
 }
 
+/* The 404 page has no photograph and, until the copy slots are filled, no prose
+   either, so it is centred type over deliberate empty space. The header's nav is
+   the way back; the padding keeps it from sitting alone at the top of a blank
+   viewport. */
+main.notfound {
+  max-width: 900px;
+  margin: 2.5rem auto;
+  padding: 4rem 1.5rem 6rem;
+  text-align: center;
+}
+
+.notfound-code {
+  margin: 0;
+  font-size: clamp(3.5rem, 14vw, 7rem);
+  line-height: 1;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.notfound-heading {
+  margin: 1.5rem 0 0;
+  font-size: 1.5rem;
+}
+
+.notfound-body {
+  margin: 0.75rem auto 0;
+  max-width: 34rem;
+  color: var(--muted);
+}
+
 .about-layout {
   display: flex;
   align-items: flex-start;

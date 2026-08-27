@@ -49,6 +49,24 @@ pub async fn safe_resolve(root: &Path, user_path: &str) -> Result<PathBuf, PathE
     Ok(resolved)
 }
 
+/// The leading run of digits in a folder name, when it parses as a number.
+///
+/// The archive files photographs under a year at the top level, so "2024" keys
+/// on 2024 and "2024-summer" keys on 2024 too. Returning `None` for a name with
+/// no leading digits (or a digit run too long to be a year) keeps one-off
+/// buckets like "misc" out of the numeric order entirely, rather than
+/// pretending they are year 0.
+///
+/// This is the archive's naming convention rather than a containment rule, and
+/// it lives here because two pages now depend on agreeing about it: `/all`
+/// orders its top level by it, and a person's page orders their photographs by
+/// the year segment of each album path. One definition, so the two cannot
+/// drift apart on what counts as a year.
+pub fn leading_year(name: &str) -> Option<u32> {
+    let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +99,15 @@ mod tests {
     #[test]
     fn accepts_trailing_slash() {
         assert_eq!(precheck("portfolio/").unwrap(), PathBuf::from("portfolio"));
+    }
+
+    #[test]
+    fn leading_year_reads_the_digit_prefix() {
+        assert_eq!(leading_year("2024"), Some(2024));
+        assert_eq!(leading_year("2024-summer"), Some(2024));
+        assert_eq!(leading_year("misc"), None);
+        assert_eq!(leading_year(""), None);
+        // Long enough to overflow a u32, so it is not a year.
+        assert_eq!(leading_year("99999999999999999999"), None);
     }
 }

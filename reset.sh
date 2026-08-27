@@ -6,6 +6,7 @@ set -eu
 
 git pull
 cargo build --release
+rm ./portfolio-site
 ln ./target/release/portfolio-site ./portfolio-site
 # Pre-generate every rendition so the first visitor after a deploy
 # never pays the on-demand decode cost. Safe to run against the live server
