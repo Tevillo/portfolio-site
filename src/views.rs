@@ -162,7 +162,13 @@ pub const SITE_ORIGIN: &str = "https://paulborrego.com";
 /// is [`SITE_DESCRIPTION`]. Empty renders nothing in either spot.
 pub const OWNER_TAGLINE: &str = "Full stack film photographer";
 
-/// The home page's opening paragraph, rendered under the name and tagline.
+/// The home page's opening paragraph.
+///
+/// **Rendered nowhere at present.** It was the closing block under the
+/// portfolio's photographs; that block was removed, and the front page now ends
+/// on a photograph. Kept here because these are the owner's words and the slot
+/// they belong in may come back — the About page and any future written page are
+/// both candidates. Nothing reads it, hence the `allow`.
 ///
 /// The owner's own words. This is the prose a search engine reaches for when it
 /// builds the snippet: before it existed the first prose-shaped text on the page
@@ -172,17 +178,11 @@ pub const OWNER_TAGLINE: &str = "Full stack film photographer";
 /// is simply not rendered, so the page is correct either way.
 ///
 /// Renders as a single `<p>`; there is no markup and no paragraph break here.
+#[allow(dead_code)]
 pub const HOME_INTRO: &str = "I do all my own shooting, developing, and \
 scanning. This site is my own repository of my photos, sorted by year and roll. \
 Have a look through the portfolio below, or if you are a friend, look for photos \
 of you and others in the People tab.";
-
-/// Extra links out to the rest of the site, as (href, label) pairs, rendered in
-/// the front door's closing block beneath [`HOME_INTRO`].
-///
-/// Empty: the header already links every section, so this only earns its space
-/// with labels written in your own words. An empty list hides the row entirely.
-pub const HOME_LINKS: &[(&str, &str)] = &[];
 
 /// Display order for the portfolio's sections, by slug.
 ///
@@ -200,7 +200,7 @@ pub const HOME_LINKS: &[(&str, &str)] = &[];
 /// already defines and invents nothing. The separate question of giving a
 /// section a *display name* different from its tag is still open; see
 /// `plans.md`.
-pub const SECTION_ORDER: &[&str] = &["portraits"];
+pub const SECTION_ORDER: &[&str] = &["portraits", "pastel", "wedding", "misc"];
 
 /// Per-section `<meta name="description">`, as (slug, description) pairs — the
 /// sentence that appears under `/portfolio/<slug>` in search results.
@@ -749,8 +749,8 @@ fn site_header(active: Nav) -> Markup {
             // the curated selections through the broader archive, with About
             // last as the page you read once rather than browse.
             nav.topnav {
-                a href="/work" aria-current=[(active == Nav::Work).then_some("page")] { "Work" }
                 a href="/recent" aria-current=[(active == Nav::Recent).then_some("page")] { "Recent" }
+                a href="/work" aria-current=[(active == Nav::Work).then_some("page")] { "Work" }
                 a href="/people" aria-current=[(active == Nav::People).then_some("page")] { "People" }
                 a href="/all" aria-current=[(active == Nav::All).then_some("page")] { "All" }
                 a href="/about" aria-current=[(active == Nav::About).then_some("page")] { "About" }
@@ -1355,11 +1355,7 @@ enum Block<'a> {
 /// One band rather than one per row: a band is a three-column group of any
 /// length, and the columns inside it are free to end at different heights. Only
 /// a panorama splits a section into more than one band.
-fn flush_band<'a>(
-    pending: &mut Vec<&'a ImageEntry>,
-    blocks: &mut Vec<Block<'a>>,
-    seq: &mut usize,
-) {
+fn flush_band<'a>(pending: &mut Vec<&'a ImageEntry>, blocks: &mut Vec<Block<'a>>, seq: &mut usize) {
     if pending.is_empty() {
         return;
     }
@@ -1595,34 +1591,13 @@ pub fn portfolio_page(
                         Some(g) => (column_grid(&g.images, PORTFOLIO_EAGER_TILES)),
                         None => p.empty { "Nothing here yet." }
                     }
-                    // Below the photographs, not above them. The intro is the
-                    // only prose in the page body — every `alt` is a filename —
-                    // so dropping it would leave a crawler nothing but tag names
-                    // to build a snippet from. Below the fold is indexed at full
-                    // weight, so it costs the layout nothing to put the
-                    // photographs first.
-                    //
-                    // Front door only: it introduces the site, and a visitor
-                    // deep in one section has already met it.
-                    //
-                    // This is also where `HOME_LINKS` ended up. It used to be a
-                    // row under the hero; with the hero gone, a closing block is
-                    // where "links out to the rest of the site" belong anyway.
-                    @if is_front && !(HOME_INTRO.is_empty() && HOME_LINKS.is_empty()) {
-                        section.portfolio-note {
-                            @if !HOME_INTRO.is_empty() {
-                                p { (HOME_INTRO) }
-                            }
-                            @if !HOME_LINKS.is_empty() {
-                                nav.portfolio-note-links aria-label="Sections of this site" {
-                                    @for (href, label) in HOME_LINKS {
-                                        a href=(href) { (label) }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
+                // No closing prose block: the photographs run to the footer.
+                // The body therefore has no prose at all (every `alt` is a
+                // filename), so a search snippet for `/` comes from
+                // `SITE_DESCRIPTION` in the `<head>` rather than from anything
+                // on the page. `<title>`, that description and the JSON-LD
+                // `Person` are untouched.
                 (site_footer())
             }
         }

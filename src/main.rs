@@ -1003,12 +1003,20 @@ mod tests {
 
     /// The default three-section portfolio.
     ///
-    /// `Tags.name COLLATE NOCASE ASC` puts these in the order `Black & White`,
-    /// `misc`, `pastel`, so with `SECTION_ORDER` empty the front door is
-    /// `Black & White` — slug `black-white`, which is also the case that proves a
-    /// slug is not merely a lowercased label.
+    /// `Tags.name COLLATE NOCASE ASC` puts these in the order `Dust & Grain`,
+    /// `halation`, `sepia`, and none of the three is named in `SECTION_ORDER`,
+    /// so the front door is the alphabetical leader `Dust & Grain` — slug
+    /// `dust-grain`, which is also the case that proves a slug is not merely a
+    /// lowercased label.
+    ///
+    /// The labels are deliberately tags this archive does not have. These tests
+    /// are about the routing rule — leader at `/`, everyone else at their slug —
+    /// and naming a real section here would make them fail the next time the
+    /// owner reorders `SECTION_ORDER`, which is a display decision and not a
+    /// change in behaviour. `portfolio.rs`'s own unit tests cover the ordering
+    /// itself, against orders they pass in explicitly.
     fn portfolio_fixture() -> Fixture {
-        portfolio_fixture_with(&["pastel", "misc", "Black & White"])
+        portfolio_fixture_with(&["sepia", "halation", "Dust & Grain"])
     }
 
     /// The (only) photograph belonging to `label` in a [`portfolio_fixture_with`]
@@ -1634,7 +1642,7 @@ mod tests {
 
         // And the previous section set's slugs are not routes here — there is no
         // accumulated table of names anywhere.
-        for gone in ["/portfolio/pastel", "/portfolio/misc", "/portfolio/black-white"] {
+        for gone in ["/portfolio/sepia", "/portfolio/halation", "/portfolio/dust-grain"] {
             assert_eq!(
                 get(&f.router, gone).await.status(),
                 StatusCode::NOT_FOUND,
@@ -1647,18 +1655,18 @@ mod tests {
     /// section per route is that no set of photographs is published twice.
     #[tokio::test]
     async fn front_door_renders_only_the_leading_section() {
-        let labels = ["pastel", "misc", "Black & White"];
+        let labels = ["sepia", "halation", "Dust & Grain"];
         let f = portfolio_fixture_with(&labels);
         let resp = get(&f.router, "/").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let html = body_string(resp).await;
-        // `Black & White` leads, so its photograph is here and the other two are
+        // `Dust & Grain` leads, so its photograph is here and the other two are
         // not — the whole point of one section per route.
         assert!(
-            html.contains(&section_photo(&labels, "Black & White")),
+            html.contains(&section_photo(&labels, "Dust & Grain")),
             "leading section's photograph is missing"
         );
-        for other in ["pastel", "misc"] {
+        for other in ["sepia", "halation"] {
             assert!(
                 !html.contains(&section_photo(&labels, other)),
                 "{other}'s photograph leaked onto /"
@@ -1669,9 +1677,9 @@ mod tests {
     /// Every non-leading section is its own page, reachable at its slug.
     #[tokio::test]
     async fn each_section_has_its_own_page() {
-        let labels = ["pastel", "misc", "Black & White"];
+        let labels = ["sepia", "halation", "Dust & Grain"];
         let f = portfolio_fixture_with(&labels);
-        for (slug, label) in [("pastel", "pastel"), ("misc", "misc")] {
+        for (slug, label) in [("sepia", "sepia"), ("halation", "halation")] {
             let uri = format!("/portfolio/{slug}");
             let resp = get(&f.router, &uri).await;
             assert_eq!(resp.status(), StatusCode::OK, "{uri} status");
@@ -1679,7 +1687,7 @@ mod tests {
             let own = section_photo(&labels, label);
             assert!(html.contains(&own), "{uri} is missing {own}");
             assert!(
-                !html.contains(&section_photo(&labels, "Black & White")),
+                !html.contains(&section_photo(&labels, "Dust & Grain")),
                 "{uri} leaked the leading section"
             );
         }
@@ -1690,7 +1698,7 @@ mod tests {
     #[tokio::test]
     async fn the_leading_sections_slug_redirects_to_the_front_door() {
         let f = portfolio_fixture();
-        let resp = get(&f.router, "/portfolio/black-white").await;
+        let resp = get(&f.router, "/portfolio/dust-grain").await;
         assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
         assert_eq!(
             resp.headers().get(header::LOCATION).unwrap().to_str().unwrap(),
@@ -1732,18 +1740,18 @@ mod tests {
         let f = portfolio_fixture();
         let front = body_string(get(&f.router, "/").await).await;
         assert!(front.contains("class=\"subnav\""), "/ has no sub-tab strip");
-        assert!(front.contains("href=\"/portfolio/pastel\""), "/ is missing a tab");
-        assert!(front.contains("href=\"/portfolio/misc\""), "/ is missing a tab");
+        assert!(front.contains("href=\"/portfolio/sepia\""), "/ is missing a tab");
+        assert!(front.contains("href=\"/portfolio/halation\""), "/ is missing a tab");
         // The leading section's tab points at `/`, not at its own slug.
         assert!(
-            !front.contains("href=\"/portfolio/black-white\""),
+            !front.contains("href=\"/portfolio/dust-grain\""),
             "/ links the leading section at its redirecting slug"
         );
 
-        let section = body_string(get(&f.router, "/portfolio/pastel").await).await;
+        let section = body_string(get(&f.router, "/portfolio/sepia").await).await;
         assert!(section.contains("class=\"subnav\""), "section page has no strip");
         assert!(
-            section.contains("href=\"/portfolio/pastel\" aria-current=\"page\""),
+            section.contains("href=\"/portfolio/sepia\" aria-current=\"page\""),
             "the active tab is not marked"
         );
 
@@ -1757,7 +1765,7 @@ mod tests {
     #[tokio::test]
     async fn only_the_archive_pages_load_the_collapse_script() {
         let f = portfolio_fixture();
-        for uri in ["/", "/portfolio/pastel"] {
+        for uri in ["/", "/portfolio/sepia"] {
             let html = body_string(get(&f.router, uri).await).await;
             assert!(!html.contains("collapse.js"), "{uri} still loads collapse.js");
             assert!(html.contains("lightbox.js"), "{uri} lost the lightbox");
@@ -1825,9 +1833,9 @@ mod tests {
         assert!(front.contains("rel=\"canonical\" href=\"https://paulborrego.com/\""));
         assert!(front.contains("application/ld+json"), "/ lost the Person block");
 
-        let section = body_string(get(&f.router, "/portfolio/pastel").await).await;
+        let section = body_string(get(&f.router, "/portfolio/sepia").await).await;
         assert!(
-            section.contains("rel=\"canonical\" href=\"https://paulborrego.com/portfolio/pastel\""),
+            section.contains("rel=\"canonical\" href=\"https://paulborrego.com/portfolio/sepia\""),
             "section canonical is wrong"
         );
         assert!(
@@ -1835,30 +1843,34 @@ mod tests {
             "the Person block is repeated on a section page"
         );
         assert!(
-            section.contains("<title>pastel — Paul Borrego</title>"),
+            section.contains("<title>sepia — Paul Borrego</title>"),
             "section title is wrong"
         );
     }
 
-    /// The intro prose is the only human-language text in the body, so it has to
-    /// survive the move below the photographs — and it introduces the site, so it
-    /// sits on the front door rather than on every section.
+    /// The photographs run straight to the footer: the closing prose block is
+    /// gone, and the footer every other page carries is the last thing on the
+    /// page here too.
     #[tokio::test]
-    async fn the_intro_prose_is_on_the_front_door_below_the_photographs() {
+    async fn the_photographs_run_to_the_footer() {
         let f = portfolio_fixture();
-        let front = body_string(get(&f.router, "/").await).await;
-        if views::HOME_INTRO.is_empty() {
-            return;
+        for uri in ["/", "/portfolio/sepia"] {
+            let html = body_string(get(&f.router, uri).await).await;
+            let grid = html.find("class=\"mgrid\"").expect("no photo grid");
+            assert!(
+                !html.contains("portfolio-note"),
+                "{uri} still carries the closing prose block"
+            );
+            let footer = html
+                .find("site-footer")
+                .unwrap_or_else(|| panic!("{uri} has no footer"));
+            assert!(footer > grid, "{uri} put the footer above the photographs");
         }
-        let intro = front.find(views::HOME_INTRO).expect("HOME_INTRO is not on /");
-        let grid = front.find("class=\"mgrid\"").expect("no photo grid on /");
-        assert!(intro > grid, "the intro renders above the photographs");
 
-        let section = body_string(get(&f.router, "/portfolio/pastel").await).await;
-        assert!(
-            !section.contains(views::HOME_INTRO),
-            "the site intro is repeated on a section page"
-        );
+        for uri in ["/all", "/recent", "/about", "/work"] {
+            let html = body_string(get(&f.router, uri).await).await;
+            assert!(html.contains("site-footer"), "{uri} lost its footer");
+        }
     }
 
     /// Every non-leading section is crawlable; the leading one is already listed
@@ -1867,10 +1879,10 @@ mod tests {
     async fn the_sitemap_lists_sections_but_not_the_redirecting_slug() {
         let f = portfolio_fixture();
         let xml = body_string(get(&f.router, "/sitemap.xml").await).await;
-        assert!(xml.contains("<loc>https://paulborrego.com/portfolio/pastel</loc>"));
-        assert!(xml.contains("<loc>https://paulborrego.com/portfolio/misc</loc>"));
+        assert!(xml.contains("<loc>https://paulborrego.com/portfolio/sepia</loc>"));
+        assert!(xml.contains("<loc>https://paulborrego.com/portfolio/halation</loc>"));
         assert!(
-            !xml.contains("/portfolio/black-white"),
+            !xml.contains("/portfolio/dust-grain"),
             "the sitemap advertises the redirecting slug"
         );
     }
@@ -1888,7 +1900,7 @@ mod tests {
         assert!(html.contains("<header class=\"site\""), "no nav on the empty page");
         assert!(!html.contains("class=\"subnav\""), "an empty portfolio drew tabs");
 
-        let miss = get(&f.router, "/portfolio/pastel").await;
+        let miss = get(&f.router, "/portfolio/sepia").await;
         assert_eq!(miss.status(), StatusCode::NOT_FOUND);
     }
 

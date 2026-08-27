@@ -1638,48 +1638,6 @@ main.portfolio .mtile img {
   }
 }
 
-/* The closing block: HOME_INTRO, and HOME_LINKS under it.
-
-   Below the photographs rather than above them. It is the only prose in this
-   page's body — every `alt` on the site is a filename — so a crawler has
-   nothing else to build a snippet from, and below-the-fold text is indexed at
-   full weight. Putting it here costs the layout nothing and buys the front door
-   its first photograph at the top of the viewport. */
-main.portfolio .portfolio-note {
-  max-width: 62ch;
-  margin: 3rem auto 4rem;
-  padding: 0 1.5rem;
-}
-
-main.portfolio .portfolio-note p {
-  margin: 0;
-  color: var(--text);
-  font-size: 1rem;
-  line-height: 1.6;
-}
-
-/* A row of quiet links, not a nav bar competing with the two real ones above. */
-main.portfolio .portfolio-note-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem 1.25rem;
-  margin-top: 1rem;
-}
-
-main.portfolio .portfolio-note-links a {
-  color: var(--muted);
-  font-size: 0.9rem;
-  border-bottom: 1px solid transparent;
-  transition: color 0.15s ease, border-color 0.15s ease;
-}
-
-main.portfolio .portfolio-note-links a:hover,
-main.portfolio .portfolio-note-links a:focus-visible {
-  color: var(--text);
-  text-decoration: none;
-  border-bottom-color: currentColor;
-}
-
 main.portfolio p.empty {
   margin: 3rem 1.5rem;
 }
@@ -1688,10 +1646,6 @@ main.portfolio p.empty {
   nav.subnav {
     padding: 0.4rem 1rem;
     gap: 1.15rem;
-  }
-
-  main.portfolio .portfolio-note {
-    padding: 0 1rem;
   }
 }
 
