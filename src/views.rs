@@ -167,6 +167,9 @@ pub fn work_set_label(path: &str, job: &str) -> String {
 
 pub struct WorkIndexEntry {
     pub name: String,
+    /// Preview rendition of the job's cover photograph, or `None` when nothing
+    /// in it carries the `thumbnail` tag. See `work::list_thumbnails`.
+    pub thumb_url: Option<String>,
     /// The job's `title.txt`, when it has one. `None` falls back to `name`; see
     /// [`work_display_name`].
     pub title: Option<String>,
@@ -2264,7 +2267,13 @@ pub fn all_photos_page(crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup {
     }
 }
 
-pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) -> Markup {
+/// The `/work` index: one card per job.
+///
+/// **No breadcrumb.** A two-level trail from a page the header's own nav already
+/// marks as current tells a visitor nothing they cannot see, and the delivery
+/// pages it links to dropped theirs for the same reason. The nav is the way
+/// around.
+pub fn work_index_page(title: &str, items: &[WorkIndexEntry]) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -2280,7 +2289,6 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
                 // here. The class exists only to put this page in the same
                 // measure as the delivery pages it links to.
                 main.work-list {
-                    (crumbs_nav(crumbs))
                     (page_heading("Professional photography work by Paul Borrego"))
                     @if items.is_empty() {
                         p.empty { "No work yet." }
@@ -2290,6 +2298,12 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
                                 @for j in items {
                                     li.work-card {
                                         a href=(j.url) {
+                                            // Name, counts and the affordance in
+                                            // one row, with the cover under them:
+                                            // the words are what a card is looked
+                                            // up by and the photograph is what it
+                                            // is recognised by, in that order.
+                                            span.work-card-head {
                                             span.work-card-text {
                                                 span.work-name { (work_display_name(&j.name, j.title.as_deref())) }
                                                 span.work-counts {
@@ -2310,6 +2324,17 @@ pub fn work_index_page(title: &str, crumbs: &[Crumb], items: &[WorkIndexEntry]) 
                                             // chevron only says which way it goes. Reuses the
                                             // collapse chevron, rotated in CSS.
                                             span.work-card-go aria-hidden="true" { (chevron()) }
+                                            }
+                                            // `alt=""`: the row above already
+                                            // names the job, so announcing the
+                                            // cover would read the same thing
+                                            // twice — and the alternative is
+                                            // describing a photograph, which is
+                                            // the owner's writing to do.
+                                            @if let Some(src) = &j.thumb_url {
+                                                img.work-card-thumb src=(src) alt=""
+                                                    loading="lazy" decoding="async";
+                                            }
                                         }
                                     }
                                 }

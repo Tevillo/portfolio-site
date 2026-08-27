@@ -2507,6 +2507,13 @@ mod tests {
     /// it, plus a second family of film scans one level deeper, plus a photograph
     /// sitting at the job root.
     fn work_sets_fixture() -> Fixture {
+        work_sets_fixture_tagged(None)
+    }
+
+    /// As above, plus a digiKam database in which every `(album, filename)` pair
+    /// carries the `thumbnail` tag. `None` writes no database at all, which is
+    /// the state the site is in until a photograph is tagged.
+    fn work_sets_fixture_tagged(tagged: Option<&[(&str, &str)]>) -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         let photos = root.join("photos");
@@ -2533,11 +2540,16 @@ mod tests {
                 .expect("write work jpeg");
         }
         std::fs::write(photos.join("work/big-job/.password"), b"hunter2").unwrap();
+        let db = tagged.map(|rows| {
+            let at = photos.join("digikam4.db");
+            write_thumbnail_db(&at, rows);
+            at
+        });
         let state = AppState::new(
             photos.clone(),
             cache,
             data.clone(),
-            None,
+            db,
             root.join("nether"),
         );
         Fixture {
@@ -2546,6 +2558,117 @@ mod tests {
             data,
             photos,
         }
+    }
+
+    /// Write a digiKam database holding one `thumbnail` tag over the given
+    /// (album path, filename) pairs. Mirrors the shape `write_portfolio_db`
+    /// creates, minus the parts only the portfolio query reads.
+    fn write_thumbnail_db(path: &Path, tagged: &[(&str, &str)]) {
+        let conn = rusqlite::Connection::open(path).expect("create test db");
+        conn.execute_batch(
+            "
+            CREATE TABLE Tags (id INTEGER PRIMARY KEY, pid INTEGER, name TEXT);
+            CREATE TABLE Albums (id INTEGER PRIMARY KEY, relativePath TEXT);
+            CREATE TABLE Images (id INTEGER PRIMARY KEY, album INTEGER, name TEXT, status INTEGER);
+            CREATE TABLE ImageTags (tagid INTEGER, imageid INTEGER);
+            CREATE TABLE ImageInformation (imageid INTEGER PRIMARY KEY, rating INTEGER);
+
+            INSERT INTO Tags (id, pid, name) VALUES (1, 0, 'thumbnail');
+            ",
+        )
+        .expect("create test db schema");
+        for (i, (album, file)) in tagged.iter().enumerate() {
+            let id = i as i64 + 1;
+            conn.execute(
+                "INSERT INTO Albums (id, relativePath) VALUES (?1, ?2)",
+                rusqlite::params![id, album],
+            )
+            .expect("insert album");
+            conn.execute(
+                "INSERT INTO Images (id, album, name, status) VALUES (?1, ?2, ?3, 1)",
+                rusqlite::params![id, id, file],
+            )
+            .expect("insert image");
+            conn.execute(
+                "INSERT INTO ImageTags (tagid, imageid) VALUES (1, ?1)",
+                rusqlite::params![id],
+            )
+            .expect("insert image tag");
+        }
+    }
+
+    /// A job's card carries the photograph tagged `thumbnail` in digiKam.
+    ///
+    /// Which frame represents a wedding is a judgement, and it lives where the
+    /// portfolio's judgements live — the tag database — rather than on disk.
+    #[tokio::test]
+    async fn a_work_card_shows_the_photograph_tagged_thumbnail() {
+        let f = work_sets_fixture();
+
+        // No database at all: cards render, without covers. This is the state
+        // the fixture ships in, and the one the site is in until a tag exists.
+        let plain = body_string(get(&f.router, "/work").await).await;
+        assert!(plain.contains(">big job<"), "{plain}");
+        assert!(!plain.contains("work-card-thumb"), "a cover appeared from nowhere");
+
+        // Tag the JPEG and its RAW together, the way a pair is tagged in
+        // digiKam. Only the JPEG can be rendered, and only it is picked.
+        let f = work_sets_fixture_tagged(Some(&[
+            ("/work/big-job/digital/edited", "digital_frame-02.jpg"),
+            ("/work/big-job/digital/edited", "digital_frame-02.ARW"),
+        ]));
+
+        let html = body_string(get(&f.router, "/work").await).await;
+        assert!(
+            html.contains(
+                r#"<img class="work-card-thumb" src="/preview/work/big-job/digital/edited/digital_frame-02.jpg""#
+            ),
+            "no cover on the card: {html}"
+        );
+        assert!(!html.contains(".ARW"), "the tagged raw was offered as an image: {html}");
+        // Decorative: the card's own text already names the job.
+        assert!(html.contains(r#"alt=""#), "the cover has no alt attribute");
+        assert_eq!(
+            html.matches("work-card-thumb").count(),
+            1,
+            "more than one cover for one job: {html}"
+        );
+    }
+
+    /// A tag on something that is not a job, or on a file digiKam has lost,
+    /// puts no cover on any card.
+    #[tokio::test]
+    async fn only_a_live_file_inside_a_job_becomes_a_cover() {
+        let f = work_sets_fixture_tagged(Some(&[
+            // `/work` itself is not a job.
+            ("/work", "loose.jpg"),
+            // Outside the work tree entirely.
+            ("/2024/roll", "elsewhere.jpg"),
+            // A negative scan, which the shared visibility filter excludes.
+            ("/work/big-job/film/negative", "neg.jpg"),
+        ]));
+        let db = f.photos.join("digikam4.db");
+        let html = body_string(get(&f.router, "/work").await).await;
+        assert!(!html.contains("work-card-thumb"), "a stray tag became a cover: {html}");
+
+        // And a row digiKam kept for a file it can no longer find (status 3)
+        // would point a card at a path that is not there.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO Albums (id, relativePath) VALUES (90, '/work/big-job/digital/edited')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO Images (id, album, name, status) VALUES (90, 90, 'gone.jpg', 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO ImageTags (tagid, imageid) VALUES (1, 90)", [])
+            .unwrap();
+        drop(conn);
+        let html = body_string(get(&f.router, "/work").await).await;
+        assert!(!html.contains("work-card-thumb"), "a lost file became a cover: {html}");
     }
 
     /// The tab strip offers the edited sets and the job root, and nothing else.

@@ -1879,6 +1879,18 @@ pub async fn work_index(State(state): State<AppState>) -> Response {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    // A cover is a garnish on a filesystem feature: no database, an unreadable
+    // one, or nothing tagged all mean "no covers" and never a failed page.
+    let thumbs = match state.db_path() {
+        Some(db) => match work::list_thumbnails(db.clone()).await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(error = ?e, "listing work thumbnails failed");
+                std::collections::HashMap::new()
+            }
+        },
+        None => std::collections::HashMap::new(),
+    };
     let entries: Vec<WorkIndexEntry> = work_list
         .into_iter()
         .map(|j| WorkIndexEntry {
@@ -1888,22 +1900,20 @@ pub async fn work_index(State(state): State<AppState>) -> Response {
             // rather than here so the index and the delivery page cannot answer
             // it differently.
             title: j.title,
+            // The preview rendition, not the 400px grid one. The cover runs
+            // the full width of a card, which is around 500px on a desktop —
+            // the grid rendition would be upscaled and visibly soft there. The
+            // card still sets its own box and crops to it, so there is nothing
+            // for a larger candidate or an intrinsic size to decide.
+            thumb_url: thumbs
+                .get(&j.name)
+                .map(|rel| format!("/preview/{}", encode_path(rel))),
             name: j.name,
             jpeg_count: j.jpeg_count,
             raw_count: j.raw_count,
         })
         .collect();
-    let crumbs = vec![
-        Crumb {
-            label: "Home".into(),
-            url: Some("/".into()),
-        },
-        Crumb {
-            label: "Work".into(),
-            url: None,
-        },
-    ];
-    views::work_index_page("Work", &crumbs, &entries).into_response()
+    views::work_index_page("Work", &entries).into_response()
 }
 
 /// One browsable set inside a job: an edited folder, or the job root.

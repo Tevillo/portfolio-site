@@ -1121,10 +1121,15 @@ ul.nav-tree ul.nav-tree {
    auto side margin on a flex item suppresses the cross-axis stretch: without it
    this shrinks to fit its content and `max-width` never comes into play, so a
    short card list rendered as one narrow column mid-page. */
+/* Left-aligned, not centred. With one or two jobs a centred 1100px column put
+   a lone card in the middle of an empty page, reading as a stray tile rather
+   than as the first of a list. Hugging the left means a second card lands beside
+   it and the block grows rightwards the way a list should. The gutter is the
+   site's own 1.5rem, from the shared `main` rule. */
 main.work-list {
   width: 100%;
   max-width: 1100px;
-  margin: 2rem auto;
+  margin: 2rem 0;
 }
 
 /* A delivery page is photographs, so it gives up the shared gutter exactly as
@@ -1143,7 +1148,15 @@ ul.work-cards {
   padding: 0;
   margin: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  /* Wider than it was: a card carries a cover photograph now, and the name
+     still needs room to wrap beside it. Tracks the cover's width — at 17rem,
+     which is what this was before covers existed, the name had barely half the
+     row. */
+  /* `min(21rem, 100%)`, not a bare 21rem: an `auto-fill` track minimum is a
+     floor the grid will overflow its container to honour, and a track wider than
+     a 390px phone (once the page gutter is taken off) pushes the whole page
+     sideways. The `min()` lets the track collapse to the column instead. */
+  grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr));
   gap: 0.85rem;
 }
 
@@ -1157,12 +1170,11 @@ li.work-card {
 li.work-card a {
   flex: 1 1 auto;
   position: relative;
-  display: grid;
-  /* Text takes what it needs, the chevron sits hard against the far edge, so
-     every card in a row resolves its affordance at the same x. */
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.9rem;
+  /* A column: the words, then the cover under them. */
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.85rem;
   padding: 0.95rem 1.05rem;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1204,10 +1216,38 @@ li.work-card a:focus-visible::before {
   transform: scaleX(1);
 }
 
+/* Name, counts and the chevron: the row that sits above the cover, and the
+   whole card when a job has no cover to show. */
+.work-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+/* The job's cover, the full width of the card and cropped into a fixed ratio
+   rather than sized from the file: the cards line up down the page whatever
+   shape the frame is. Cropping is safe here because the full frame is one click
+   away — this is a card, not a presentation of the photograph.
+
+   3:2 because it is the archive's own landscape ratio, so a landscape frame is
+   shown whole and only a portrait is cut. */
+.work-card-thumb {
+  display: block;
+  width: 100%;
+  /* Holds the box before the bytes arrive, so a card does not resize under the
+     cursor as the page fills in. */
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  border-radius: 5px;
+  background: var(--bg);
+}
+
 .work-card-text {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+  /* Takes the row's slack, so the chevron stays against the far edge. */
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -1251,6 +1291,7 @@ li.work-card a:focus-visible .work-name {
 }
 
 .work-card-go {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;

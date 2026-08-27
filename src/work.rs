@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -174,6 +175,90 @@ pub struct WorkDetail {
     /// True when a `.password` file exists in the job folder. False means
     /// downloads are effectively locked (no password set yet).
     pub has_password: bool,
+}
+
+/// The digiKam tag that marks a job's cover photograph.
+///
+/// Matched by name at any depth rather than only at the top level, so it works
+/// whether the tag was typed into digiKam's tag box (which lands it at the root,
+/// beside `portfolio` and `People`) or filed under something.
+pub const THUMB_TAG: &str = "thumbnail";
+
+/// Cover photograph for each job that has one, as job name → path relative to
+/// the photos root.
+///
+/// The one thing about a job that is *not* read off the filesystem. A cover is a
+/// judgement about which frame represents a wedding, which is the same kind of
+/// judgement the portfolio is curated by and belongs in the same place — the tag
+/// database — rather than in a folder whose contents would then have to be
+/// excluded from the galleries, the counts and the archives.
+///
+/// The RAW alongside the JPEG can carry the tag too and is simply not selected:
+/// `VISIBLE_IMAGE_FILTER` keeps this to `.jpg`/`.jpeg`, so a pair tagged
+/// together in digiKam yields the JPEG and nothing else.
+///
+/// A job with several tagged photographs gets the first by album then filename,
+/// which is stable but arbitrary — tagging one is the way to choose.
+///
+/// Missing DB, unreadable DB, or no such tag are all "no covers", never an
+/// error the index has to render: the work pages are a filesystem feature and a
+/// cover is a garnish on top of one.
+pub async fn list_thumbnails(db_path: PathBuf) -> Result<HashMap<String, String>> {
+    tokio::task::spawn_blocking(move || list_thumbnails_blocking(&db_path))
+        .await
+        .context("work thumbnail listing task panicked")?
+}
+
+fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
+    use crate::people::{VISIBLE_IMAGE_FILTER, combine_rel, open_readonly};
+
+    let conn = open_readonly(db_path)?;
+    // `i.status = 1` for the same reason the portfolio query needs it: digiKam
+    // keeps a row for a file it can no longer find so the tags survive a move,
+    // and reading those back would point a card at a path that is not there.
+    let sql = format!(
+        "
+        SELECT a.relativePath, i.name
+        FROM Tags t
+        JOIN ImageTags it ON it.tagid = t.id
+        JOIN Images i ON i.id = it.imageid
+        JOIN Albums a ON a.id = i.album
+        WHERE t.name = '{THUMB_TAG}' COLLATE NOCASE
+          AND i.status = 1
+          AND (a.relativePath = '/work' OR a.relativePath LIKE '/work/%')
+          AND {VISIBLE_IMAGE_FILTER}
+        ORDER BY a.relativePath, i.name COLLATE NOCASE ASC
+        "
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut out: HashMap<String, String> = HashMap::new();
+    for row in rows {
+        let (album, file) = row?;
+        let Some(job) = job_from_album_path(&album) else {
+            continue;
+        };
+        // First wins: the query is ordered, so which one that is does not move
+        // between requests.
+        out.entry(job).or_insert_with(|| combine_rel(&album, &file));
+    }
+    Ok(out)
+}
+
+/// The job a digiKam album path belongs to: `/work/marisol-sam-wedding/digital`
+/// → `marisol-sam-wedding`. `None` for `/work` itself, which is not a job, and
+/// for anything outside the work tree.
+fn job_from_album_path(album: &str) -> Option<String> {
+    let rest = album.trim_start_matches('/').strip_prefix("work")?;
+    let job = rest.trim_start_matches('/').split('/').next()?;
+    if job.is_empty() {
+        None
+    } else {
+        Some(job.to_string())
+    }
 }
 
 /// `photos_root/work/`. Returns Ok(None) if the directory doesn't exist.
