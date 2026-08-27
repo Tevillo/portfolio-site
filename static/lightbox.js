@@ -156,10 +156,32 @@
 
   // Each (groupSelector, linkSelector) pair renders an independent lightbox
   // sequence, so prev/next wraps within one gallery / work section.
-  const groups = [['ul.grid', 'li.tile a']];
+  //
+  // `.mgrid` is the portfolio's column grid. It uses its own tile class rather
+  // than `li.tile` because it is laid out in flex columns rather than in the
+  // square-crop grid, and the group selector is the outermost container rather
+  // than a column or a band, so prev/next walks the whole section instead of
+  // stopping at the bottom of one column or at the next full-width panorama.
+  //
+  // Its anchors carry the same `data-name` / `data-jpg` / `data-raw` as any
+  // other tile, plus `data-seq`. That last one matters here: the portfolio's
+  // markup is grouped by column, so document order is column-major (1, 4, 7,
+  // 2, 5, 8, ...) while the page *reads* 1, 2, 3. `data-seq` is the reading
+  // index, and the sort below is what stops the arrow keys walking down one
+  // column and back up the next.
+  const groups = [
+    ['ul.grid', 'li.tile a'],
+    ['.mgrid', 'li.mtile a'],
+  ];
   groups.forEach(([groupSel, linkSel]) => {
     document.querySelectorAll(groupSel).forEach((group) => {
       const links = Array.from(group.querySelectorAll(linkSel));
+      // Walk the sequence the way the page reads, when it says so. Absent
+      // `data-seq` this is a no-op and document order stands, which is what
+      // every other grid on the site wants.
+      if (links.length && links[0].dataset.seq !== undefined) {
+        links.sort((a, b) => Number(a.dataset.seq) - Number(b.dataset.seq));
+      }
       const list = links.map((a) => {
         const innerImg = a.querySelector('img');
         return {

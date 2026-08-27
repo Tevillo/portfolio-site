@@ -57,106 +57,243 @@ fn page_status_response(status: StatusCode) -> Response {
     }
 }
 
-/// Home page: one section per `portfolio/<label>` tag in the digiKam database,
-/// photos shown at their natural aspect ratio. The curation lives in the tags
-/// (see [`crate::portfolio`]) rather than in a folder, so the photos themselves
-/// come from all over the tree.
+/// The portfolio front door: whichever section leads [`views::SECTION_ORDER`],
+/// rendered at `/`.
+///
+/// Every other section lives at its own `/portfolio/<slug>` and is reached from
+/// the sub-tab strip; the leading one is served here and *only* here, so the same
+/// photographs are never published at two addresses.
 pub async fn index(State(state): State<AppState>) -> Response {
-    // Every failure mode here — no database, unreadable database, no
-    // `portfolio` tag — collapses to an empty group list, which the view renders
-    // as "Nothing here yet.". The front page of the site is the wrong place to
-    // surface an infrastructure problem, and the log line is the actionable half
-    // anyway.
-    let groups = portfolio_groups(&state).await;
-    views::grouped_gallery_page(&groups).into_response()
+    portfolio_response(&state, None).await
 }
 
-/// Resolve the `portfolio/*` tags into renderable sections, dropping anything
-/// that cannot be turned into a live URL.
-async fn portfolio_groups(state: &AppState) -> Vec<FolderGroup> {
+/// `/portfolio/:slug` — one named portfolio section.
+///
+/// The section that `/` already renders redirects there permanently rather than
+/// serving a second copy of itself: two URLs for one set of photographs is the
+/// duplicate this layout was arranged to avoid.
+pub async fn portfolio_section(
+    State(state): State<AppState>,
+    AxumPath(slug): AxumPath<String>,
+) -> Response {
+    portfolio_response(&state, Some(&slug)).await
+}
+
+/// `/portfolio` with no section named. Not a page of its own — the front door
+/// already is the portfolio.
+pub async fn portfolio_root() -> Response {
+    Redirect::permanent("/").into_response()
+}
+
+/// Shared body of [`index`] and [`portfolio_section`].
+///
+/// `want` is `None` for `/` (meaning "the leading section") and `Some(slug)` for
+/// a named one. Keeping both in one function is what guarantees the two pages
+/// cannot disagree about the section order, the tab strip, or which section is
+/// the front door.
+async fn portfolio_response(state: &AppState, want: Option<&str>) -> Response {
+    // Every failure mode here — no database, unreadable database, no `portfolio`
+    // tag — collapses to an empty section list. For `/` that renders "Nothing
+    // here yet."; for a named section it is a 404, because the URL claimed a
+    // section that is not there. The front page of the site is the wrong place to
+    // surface an infrastructure problem, and the log line is the actionable half
+    // anyway.
+    let sections = portfolio_sections(state).await;
+    let Some(front) = sections.first() else {
+        return match want {
+            Some(_) => not_found_response(),
+            None => views::portfolio_page(None, "", "/", &[]).into_response(),
+        };
+    };
+
+    let active_slug = match want {
+        None => front.slug.clone(),
+        // The leading section is published at `/`, so its own slug is a second
+        // address for the same page. Redirect rather than render.
+        Some(s) if s == front.slug => return Redirect::permanent("/").into_response(),
+        Some(s) => match sections.iter().find(|sec| sec.slug == s) {
+            Some(sec) => sec.slug.clone(),
+            None => return not_found_response(),
+        },
+    };
+
+    let tabs: Vec<views::SectionTab> = sections
+        .iter()
+        .map(|sec| views::SectionTab {
+            label: sec.label.clone(),
+            url: if sec.slug == front.slug {
+                "/".to_string()
+            } else {
+                format!("/portfolio/{}", encode_path(&sec.slug))
+            },
+            active: sec.slug == active_slug,
+        })
+        .collect();
+
+    let canonical = if active_slug == front.slug {
+        "/".to_string()
+    } else {
+        format!("/portfolio/{}", encode_path(&active_slug))
+    };
+
+    // Only the section being rendered is resolved against the filesystem. The
+    // tab strip needs labels and slugs, which the tag query already gave us; a
+    // `safe_resolve` per photograph across every section would be a few hundred
+    // syscalls to draw three links.
+    let Some(active) = sections.iter().find(|sec| sec.slug == active_slug) else {
+        return not_found_response();
+    };
+    let group = portfolio_group(state, active).await;
+    views::portfolio_page(group.as_ref(), &active_slug, &canonical, &tabs).into_response()
+}
+
+/// The `portfolio/*` tags, in display order, with no filesystem access — labels
+/// and slugs only.
+///
+/// Every failure collapses to an empty list; see [`portfolio_response`] for what
+/// each caller does with that.
+async fn portfolio_sections(state: &AppState) -> Vec<portfolio::Section> {
     let Some(db) = state.db_path().cloned() else {
-        warn!("portfolio tag database not available; rendering empty home page");
+        warn!("portfolio tag database not available; rendering empty portfolio");
         return Vec::new();
     };
-    let sections = match portfolio::list_sections(db).await {
+    match portfolio::list_sections(db).await {
         Ok(s) => s,
         Err(e) => {
             warn!(error = ?e, "listing portfolio sections failed");
-            return Vec::new();
+            Vec::new()
         }
-    };
+    }
+}
 
+/// Resolve one section's tagged photos into a renderable [`FolderGroup`],
+/// dropping anything that cannot be turned into a live URL. `None` when nothing
+/// in the section survived.
+async fn portfolio_group(state: &AppState, section: &portfolio::Section) -> Option<FolderGroup> {
     // Tagged photos arrive as flat rel paths scattered across the tree, so —
     // exactly as in `person_photos` — there is no directory walk to piggyback
     // the raw-sibling lookup on. Cache each album folder's stem->raw map, which
     // pays off here because whole sections tend to share one folder.
     let mut dir_raws: HashMap<String, HashMap<String, String>> = HashMap::new();
-    let mut groups: Vec<FolderGroup> = Vec::new();
-    // Absolute source paths in flattened `groups` order, the shape
-    // `fill_image_dims` expects.
+    let mut images: Vec<ImageEntry> = Vec::with_capacity(section.photos.len());
+    // Absolute source paths in `images` order, the shape `fill_image_dims`
+    // expects.
     let mut sources: Vec<PathBuf> = Vec::new();
 
-    for section in sections {
-        let mut images: Vec<ImageEntry> = Vec::with_capacity(section.photos.len());
-        for p in section.photos {
-            // `safe_resolve` doubles as the existence check: a tag can outlive
-            // the file it points at (renamed outside digiKam, moved to a folder
-            // the site skips), and a tile whose source is gone would render as a
-            // broken image with no dimensions to reserve space with.
-            let Ok(abs) = safe_resolve(state.photos_root(), &p.rel).await else {
-                warn!(rel = %p.rel, "portfolio-tagged photo missing on disk; skipping");
-                continue;
-            };
-            let parent = parent_rel(&p.rel).to_string();
-            if !dir_raws.contains_key(&parent) {
-                let map = scan_raw_siblings(state.photos_root(), &parent).await;
-                dir_raws.insert(parent.clone(), map);
-            }
-            let raw_download_url = dir_raws
-                .get(&parent)
-                .and_then(|m| m.get(&file_stem_lower(&p.name)))
-                .map(|raw| format!("/download/{}", encode_path(&join_rel(&parent, raw))));
-            sources.push(abs);
-            images.push(ImageEntry {
-                // The portfolio shows large tiles, so it loads the 1600px
-                // preview rendition rather than the 400px grid thumb that dense
-                // listings use.
-                thumb_url: format!("/preview/{}", encode_path(&p.rel)),
-                image_url: format!("/image/{}", encode_path(&p.rel)),
-                jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
-                raw_download_url,
-                dims: None,
-                srcset: None,
-                name: p.name,
-            });
-        }
-        if images.is_empty() {
+    for p in &section.photos {
+        // `safe_resolve` doubles as the existence check: a tag can outlive the
+        // file it points at (renamed outside digiKam, moved to a folder the site
+        // skips), and a tile whose source is gone would render as a broken image
+        // with no dimensions to reserve space with.
+        let Ok(abs) = safe_resolve(state.photos_root(), &p.rel).await else {
+            warn!(rel = %p.rel, "portfolio-tagged photo missing on disk; skipping");
             continue;
+        };
+        let parent = parent_rel(&p.rel).to_string();
+        if !dir_raws.contains_key(&parent) {
+            let map = scan_raw_siblings(state.photos_root(), &parent).await;
+            dir_raws.insert(parent.clone(), map);
         }
-        groups.push(FolderGroup {
-            label: section.label.clone(),
-            // Namespaced so collapse.js keeps per-section state that cannot
-            // collide with a real folder path of the same name.
-            path: format!("portfolio/{}", section.label),
-            // A tag's photos span many folders, so there is no single folder to
-            // browse to; the view renders a plain heading when this is empty.
-            browse_url: String::new(),
-            images,
-            // Tag-driven sections have no folder, so no favs/ folder to fold in.
-            favs_count: 0,
-            // Only `/all` reads this, and `/all` never sees a tag-driven
-            // section: these have no folder to be recently changed.
-            newest_mtime: None,
+        let raw_download_url = dir_raws
+            .get(&parent)
+            .and_then(|m| m.get(&file_stem_lower(&p.name)))
+            .map(|raw| format!("/download/{}", encode_path(&join_rel(&parent, raw))));
+        sources.push(abs);
+        images.push(ImageEntry {
+            // The portfolio shows large tiles, so it loads the 1600px preview
+            // rendition rather than the 400px grid thumb that dense listings use.
+            thumb_url: format!("/preview/{}", encode_path(&p.rel)),
+            image_url: format!("/image/{}", encode_path(&p.rel)),
+            jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
+            raw_download_url,
+            dims: None,
+            srcset: None,
+            name: p.name.clone(),
         });
     }
+    if images.is_empty() {
+        return None;
+    }
 
-    // Same reason as the folder walk: the natural-ratio masonry carries no CSS
-    // aspect-ratio, so without intrinsic dimensions every tile lays out at zero
-    // height and `loading="lazy"` defers nothing.
-    // The home page's tiles are 410px wide and already on Preview; sizing a
-    // srcset for them is the separate job in FRONTEND.md.
-    fill_image_dims(&sources, &mut groups, ThumbKind::Preview, None).await;
-    groups
+    let mut groups = vec![FolderGroup {
+        label: section.label.clone(),
+        // No longer read by `collapse.js` — the portfolio has no collapsing
+        // sections — but still the section's identity in the group shape the
+        // other pages share.
+        path: format!("portfolio/{}", section.slug),
+        // A tag's photos span many folders, so there is no single folder to
+        // browse to.
+        browse_url: String::new(),
+        images,
+        // Tag-driven sections have no folder, so no favs/ folder to fold in.
+        favs_count: 0,
+        // Only `/all` reads this, and `/all` never sees a tag-driven section:
+        // these have no folder to be recently changed.
+        newest_mtime: None,
+    }];
+
+    // The column grid is built entirely from these: `--ar` on each tile is the
+    // photo's aspect ratio, and without it a tile falls back to a guessed 3:2
+    // rather than laying out at its true shape.
+    fill_portfolio_dims(&sources, &mut groups).await;
+    groups.pop()
+}
+
+/// Dimensions for a portfolio section, plus a higher-resolution candidate for
+/// every panorama in it.
+///
+/// Not [`fill_image_dims`], because the second candidate here is wanted for some
+/// tiles and not others. A column tile is ~500-600 CSS px wide, so the 1600px
+/// Preview it links already covers it twice over. A panorama is promoted to the
+/// full width of the page — ~1840 CSS px at a 1920 viewport — where the same
+/// file is *upscaled* on a 1x screen and half of what a 2x screen wants, so
+/// those tiles, and only those, also offer [`ThumbKind::Wide`].
+///
+/// The `src` stays the Preview either way, so the `width`/`height` attributes
+/// keep describing the bytes a browser with no `srcset` support fetches, and a
+/// phone on the wide tile still picks the small file.
+async fn fill_portfolio_dims(sources: &[PathBuf], groups: &mut [FolderGroup]) {
+    if sources.is_empty() {
+        return;
+    }
+    let sources = sources.to_vec();
+    let dims = match tokio::task::spawn_blocking(move || {
+        sources
+            .into_iter()
+            .map(|p| {
+                let oriented = thumbs::oriented_dimensions(&p).ok()?;
+                let scaled = thumbs::scale_to(oriented, ThumbKind::Preview.max_dim());
+                // `scale_to` never enlarges, so a source narrower than the
+                // Preview cap yields the same bytes under both routes, and a
+                // `srcset` offering one file at two widths tells the browser
+                // nothing.
+                let wide = crate::views::is_wide_ratio(oriented)
+                    .then(|| thumbs::scale_to(oriented, ThumbKind::Wide.max_dim()).0)
+                    .filter(|w| *w > scaled.0);
+                Some((scaled, wide))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, "portfolio dimension batch panicked");
+            return;
+        }
+    };
+    for (img, dim) in groups
+        .iter_mut()
+        .flat_map(|g| g.images.iter_mut())
+        .zip(dims)
+    {
+        let Some((scaled, wide_w)) = dim else { continue };
+        img.dims = Some(scaled);
+        img.srcset = wide_w.and_then(|w| {
+            swap_rendition_route(&img.thumb_url, ThumbKind::Preview, ThumbKind::Wide)
+                .map(|u| (u, w))
+        });
+    }
 }
 
 /// About page. The prose is a compile-time constant in `views`; the only
@@ -244,6 +381,15 @@ pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
         "/people".to_string(),
         "/work".to_string(),
     ];
+
+    // Every portfolio section except the leading one, which is already listed as
+    // "/" above. Adding its slug too would put a URL that 301s into the sitemap.
+    if let Some((_front, rest)) = portfolio_sections(&state).await.split_first() {
+        paths.extend(
+            rest.iter()
+                .map(|s| format!("/portfolio/{}", encode_path(&s.slug))),
+        );
+    }
 
     // Every folder that directly holds photos, i.e. every /browse page with
     // something on it. Intermediate folders come along as each group's parents
@@ -1443,6 +1589,14 @@ pub async fn preview(
     headers: HeaderMap,
 ) -> Response {
     render_thumb_response(&state, &rel, &headers, ThumbKind::Preview).await
+}
+
+pub async fn wide(
+    State(state): State<AppState>,
+    AxumPath(rel): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    render_thumb_response(&state, &rel, &headers, ThumbKind::Wide).await
 }
 
 async fn render_thumb_response(

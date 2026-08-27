@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -176,11 +177,43 @@ scanning. This site is my own repository of my photos, sorted by year and roll. 
 Have a look through the portfolio below, or if you are a friend, look for photos \
 of you and others in the People tab.";
 
-/// Extra home page links out to the rest of the site, as (href, label) pairs.
+/// Extra links out to the rest of the site, as (href, label) pairs, rendered in
+/// the front door's closing block beneath [`HOME_INTRO`].
 ///
 /// Empty: the header already links every section, so this only earns its space
 /// with labels written in your own words. An empty list hides the row entirely.
 pub const HOME_LINKS: &[(&str, &str)] = &[];
+
+/// Display order for the portfolio's sections, by slug.
+///
+/// **The first entry is the front door** — `/` renders whichever section leads
+/// this list. Sections not named here follow, in the alphabetical order the tag
+/// query returns; an entry naming no section is ignored. Empty means pure
+/// alphabetical, which makes the front page whatever tag happens to sort first.
+///
+/// Slugs, not tag names: lowercase, with every run of non-alphanumerics
+/// collapsed to a single `-`. `portfolio::slug` is the exact rule, and
+/// `/portfolio/<slug>` is the URL, so the slug of any section is visible in the
+/// address bar of its own page.
+///
+/// This is plumbing rather than copy — it reorders names the tag database
+/// already defines and invents nothing. The separate question of giving a
+/// section a *display name* different from its tag is still open; see
+/// `plans.md`.
+pub const SECTION_ORDER: &[&str] = &["portraits"];
+
+/// Per-section `<meta name="description">`, as (slug, description) pairs — the
+/// sentence that appears under `/portfolio/<slug>` in search results.
+///
+/// The owner's own words, and empty on purpose: a section with no entry here,
+/// or an entry whose description is empty, falls back to [`SITE_DESCRIPTION`].
+/// That fallback is correct but not ideal — three section pages sharing one
+/// description tells a search engine nothing about what separates them, and it
+/// is the kind of sentence only the person who shot the photographs can write.
+///
+/// Same constraint as [`SITE_DESCRIPTION`] if a value is ever also fed to
+/// JSON-LD: no `"` and no `\`.
+pub const SECTION_DESCRIPTIONS: &[(&str, &str)] = &[];
 
 /// The `<meta name="description">` and `og:description` for the home and About
 /// pages — the sentence that appears under the link in search results.
@@ -372,6 +405,35 @@ fn owner_title(prefix: &str) -> String {
 /// `<meta name="description">` for the home and About pages.
 fn site_description() -> &'static str {
     SITE_DESCRIPTION
+}
+
+/// `<title>` for a portfolio section page: `"pastel — Paul Borrego"`.
+///
+/// Not [`owner_title`], which prefixes its argument to the *name* and appends
+/// the tagline — that would read "pastel Paul Borrego — Full stack film
+/// photographer", claiming the section is the person. A section is a subject the
+/// site contains, so it is separated from the name rather than fused to it, and
+/// the tagline is dropped to keep the section's own word in the ~60 characters a
+/// result actually shows.
+///
+/// A mechanical template over two existing values, which is why it is written
+/// here and not left as an empty slot.
+fn section_title(label: &str) -> String {
+    format!("{label} \u{2014} {OWNER_NAME}")
+}
+
+/// `<meta name="description">` for a portfolio section page.
+///
+/// Reads [`SECTION_DESCRIPTIONS`], falling back to [`SITE_DESCRIPTION`] when a
+/// section has no entry or an empty one. The fallback means a section page is
+/// never missing a description; it does not mean the description is right. See
+/// the constant.
+fn section_description(slug: &str) -> &'static str {
+    SECTION_DESCRIPTIONS
+        .iter()
+        .find(|(s, d)| *s == slug && !d.is_empty())
+        .map(|(_, d)| *d)
+        .unwrap_or(SITE_DESCRIPTION)
 }
 
 /// Absolute URL for a site-root-relative path, e.g. `/about` ->
@@ -806,7 +868,7 @@ fn image_grid(images: &[ImageEntry], masonry: bool, eager: usize, favs_count: us
                       data-name=(img.name)
                       data-jpg=(img.jpg_download_url)
                       data-raw=[img.raw_download_url.as_deref()] {
-                        (grid_img(img, i < eager))
+                        (grid_img(img, i < eager, GRID_SIZES))
                     }
                 }
             }
@@ -818,7 +880,7 @@ fn image_grid(images: &[ImageEntry], masonry: bool, eager: usize, favs_count: us
 /// the browser reserves the tile's real height before the bytes arrive — that
 /// is what makes `loading="lazy"` able to skip off-screen photos at all, and it
 /// removes the layout shift as each image lands.
-fn grid_img(img: &ImageEntry, eager: bool) -> Markup {
+fn grid_img(img: &ImageEntry, eager: bool, sizes: &str) -> Markup {
     // A `srcset` needs the width of *every* candidate, and the first candidate's
     // width is `dims.0` — so no dims means no srcset, and the tile falls back to
     // the plain `src` it had before.
@@ -833,7 +895,7 @@ fn grid_img(img: &ImageEntry, eager: bool) -> Markup {
             Some((w, h)) => img
                 src=(img.thumb_url) alt=(img.name)
                 srcset=[srcset.as_deref()]
-                sizes=[srcset.as_ref().map(|_| GRID_SIZES)]
+                sizes=[srcset.as_ref().map(|_| sizes)]
                 width=(w) height=(h)
                 decoding="async"
                 loading=(if eager { "eager" } else { "lazy" })
@@ -1091,14 +1153,14 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
     }
 }
 
-/// Portfolio home page: one collapsible section per `portfolio/*` tag, photos at
-/// their natural aspect ratio in the work page's masonry chrome. `/all` renders
-/// the same [`FolderGroup`] shape through [`all_photos_page`] instead, which adds
-/// the folder tree.
-/// Collapsible, labelled folder sections — the shared body of the home page and
-/// `/recent`. Both render the same thing (a list of folders, each with its own
-/// grid); only the header above them differs, so the markup lives here once and
-/// the two page functions supply their own surroundings.
+/// Collapsible, labelled folder sections — the body of `/recent`.
+///
+/// This was shared with the home page until the portfolio moved to
+/// [`portfolio_page`], and the two are no longer the same kind of page: the
+/// chevrons and their persisted open/closed state (`collapse.js`) are a control
+/// for working through an archive of folders, which is what `/recent` is and
+/// what the portfolio deliberately stopped being. `/all` renders the same
+/// [`FolderGroup`] shape through [`all_photos_page`], which adds the folder tree.
 fn gallery_sections(groups: &[FolderGroup]) -> Markup {
     html! {
         @if groups.is_empty() {
@@ -1136,65 +1198,430 @@ fn gallery_sections(groups: &[FolderGroup]) -> Markup {
     }
 }
 
-pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
-    // The home page's first tile is the LCP element on every viewport. Telling
-    // the browser about it in <head> starts the fetch during HTML parse instead
-    // of waiting for the image to be discovered in the body.
-    let lcp = groups
-        .first()
+/// How many columns the portfolio's grid has on a desktop viewport.
+///
+/// Fixed rather than derived, because the column each photograph belongs to is
+/// decided here on the server — see [`column_grid`] for why, and `.mcols` in
+/// `style.css` for how the same markup collapses to one column on a phone.
+const PORTFOLIO_COLUMNS: usize = 3;
+
+/// How many leading tiles load eagerly on a portfolio page.
+///
+/// One per column, because with [`PORTFOLIO_COLUMNS`] columns the first
+/// [`PORTFOLIO_COLUMNS`] photographs in reading order are the top of each column
+/// — i.e. the whole first band, all of it above the fold. On a phone the grid is
+/// one column, so two of the three are a small speculative cost; on the viewport
+/// where the Largest Contentful Paint is worst they are all needed.
+const PORTFOLIO_EAGER_TILES: usize = PORTFOLIO_COLUMNS;
+
+/// Aspect ratio at or above which a photograph stops being a column tile and
+/// takes the full width of the page on a row of its own.
+///
+/// A panorama is the one shape equal-width columns handle badly. The column
+/// fixes the width, so the ratio decides the height — which is what makes
+/// portraits big here, and what squashes a 2:1 frame into a letterbox strip a
+/// third of the page wide. Giving it the whole width is the same correction
+/// applied in the other direction.
+///
+/// 1.9 is picked from the archive rather than from a standard. Measured across
+/// every portfolio-tagged photograph, the ratios run 0.63 to 1.50 and then jump
+/// straight to 2.05 — there is nothing in between, so any threshold in that gap
+/// separates the same photographs. 1.9 sits clear of 16:9 (1.78), so a cinematic
+/// crop stays a column tile and only a genuine panorama (2:1, XPan at 2.7, 6x17
+/// at 2.83) is promoted.
+///
+/// Raise it to promote fewer photographs, lower it to promote more; 1.6 would
+/// also catch 3:2 landscapes, which would promote most of the archive and defeat
+/// the point.
+const WIDE_TILE_RATIO: f64 = 1.9;
+
+/// Whether a photograph is wide enough to earn the full width of the page.
+///
+/// Unknown dimensions are not wide: the fallback ratio the tile then lays out at
+/// is 1.5, so promoting it would give the whole width to a photograph nobody has
+/// measured.
+fn is_wide_tile(dims: Option<(u32, u32)>) -> bool {
+    dims.is_some_and(is_wide_ratio)
+}
+
+/// The same test on dimensions that are known, for the two places outside this
+/// module that have to agree with the layout about what a panorama is: the
+/// handler decides which photographs get the 3200px rendition as a second
+/// `srcset` candidate, and the warm pass decides which ones it is worth building
+/// for. Both would waste bytes on a different threshold than the page uses.
+pub fn is_wide_ratio((w, h): (u32, u32)) -> bool {
+    h != 0 && f64::from(w) / f64::from(h) >= WIDE_TILE_RATIO
+}
+
+/// One entry in the portfolio's sub-tab strip.
+///
+/// Built by the handler rather than derived here, because which URL a tab points
+/// at is a routing fact: the front-door section is served at `/` and every other
+/// at `/portfolio/<slug>`, and the view has no way to know which is which.
+pub struct SectionTab {
+    pub label: String,
+    pub url: String,
+    pub active: bool,
+}
+
+/// The strip of section links under the site header — how you move between
+/// portfolio sections now that each one is its own page.
+///
+/// Suppressed entirely below two sections: a tab bar offering one destination is
+/// chrome that explains nothing, and the heading below it already names the
+/// section.
+fn section_tabs(tabs: &[SectionTab]) -> Markup {
+    html! {
+        @if tabs.len() > 1 {
+            nav.subnav aria-label="Portfolio sections" {
+                @for t in tabs {
+                    // Same `aria-current` convention as `nav.topnav`, so a
+                    // screen reader reports position in both bars the same way.
+                    a href=(t.url) aria-current=[t.active.then_some("page")] { (t.label) }
+                }
+            }
+        }
+    }
+}
+
+/// The inline custom properties one tile needs: `--ar`, its aspect ratio, and
+/// `--i`, its position in reading order.
+///
+/// `--ar` reserves the tile's height before the bytes arrive. In equal-width
+/// columns the height follows from the ratio, so this is what stops the page
+/// reflowing as each photograph lands, and what `loading="lazy"` needs in order
+/// to skip anything at all. Omitted when the dimensions could not be read, which
+/// leaves the fallback declared on `.mtile` in force rather than emitting a
+/// broken value. Four decimal places is well past the sub-pixel a browser can
+/// act on and keeps the attribute short.
+///
+/// `--i` is the reading index, and it exists for the phone layout. See
+/// [`column_grid`]: the tiles are grouped by column in the markup, so on a
+/// single-column viewport their document order is wrong, and `order: var(--i)`
+/// is what puts them back. Always emitted — a missing `--i` would silently
+/// scramble the phone view rather than fail visibly.
+fn tile_style(dims: Option<(u32, u32)>, reading_index: usize) -> String {
+    let mut out = String::with_capacity(28);
+    if let Some((w, h)) = dims.filter(|(w, h)| *w != 0 && *h != 0) {
+        let _ = write!(out, "--ar:{:.4};", f64::from(w) / f64::from(h));
+    }
+    let _ = write!(out, "--i:{reading_index}");
+    out
+}
+
+/// `sizes` for the portfolio, where the only tile with more than one candidate
+/// is a full-width panorama (see `portfolio_group` in `handlers.rs`). A column
+/// tile has a single `src` and never reads this.
+///
+/// `100vw` rather than the slot's exact width, which is `100vw` less the grid's
+/// own edge margin — at most 2.5rem a side. Expressing that here would mean
+/// repeating the `--mgrid-edge` clamp from `style.css` as a literal, since
+/// `sizes` cannot read a custom property, and the overstatement costs at most
+/// the larger file in a narrow band of viewport widths just above 1600px.
+const PORTFOLIO_SIZES: &str = "100vw";
+
+/// One tile: the `<li>`, its custom properties, and the anchor `lightbox.js`
+/// reads. Shared by the column tiles and the full-width ones so the two cannot
+/// drift apart on the contract that makes the lightbox work.
+fn tile(img: &ImageEntry, seq: usize, eager: bool, wide: bool) -> Markup {
+    html! {
+        li.mtile.mtile-wide[wide] role="listitem" style=(tile_style(img.dims, seq)) {
+            // Same anchor contract as `image_grid` plus `data-seq`, so
+            // `lightbox.js` needs no knowledge of which grid it was opened from
+            // beyond the order to walk it in.
+            a href=(img.image_url)
+              data-seq=(seq)
+              data-name=(img.name)
+              data-jpg=(img.jpg_download_url)
+              data-raw=[img.raw_download_url.as_deref()] {
+                (grid_img(img, eager, PORTFOLIO_SIZES))
+            }
+        }
+    }
+}
+
+/// One run of the grid: either a band of column tiles or a single photograph
+/// taking the whole width. `usize` is the photograph's position in *display*
+/// order — see [`grid_blocks`], which can move a panorama ahead of the
+/// photographs that preceded it.
+enum Block<'a> {
+    Band(Vec<(usize, &'a ImageEntry)>),
+    Wide(usize, &'a ImageEntry),
+}
+
+/// Move `pending` into `blocks` as one band, numbering its photographs from
+/// `seq`.
+///
+/// One band rather than one per row: a band is a three-column group of any
+/// length, and the columns inside it are free to end at different heights. Only
+/// a panorama splits a section into more than one band.
+fn flush_band<'a>(
+    pending: &mut Vec<&'a ImageEntry>,
+    blocks: &mut Vec<Block<'a>>,
+    seq: &mut usize,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let band = pending
+        .drain(..)
+        .map(|img| {
+            let at = *seq;
+            *seq += 1;
+            (at, img)
+        })
+        .collect();
+    blocks.push(Block::Band(band));
+}
+
+/// Split a section into bands of column tiles separated by full-width
+/// photographs.
+///
+/// A panorama has to interrupt the columns rather than sit in one. Cutting the
+/// band at it is what keeps the sequence intact — everything before is one band,
+/// everything after is the next — so the star ranking still reads top to bottom.
+///
+/// **A panorama outranks a band too short to fill a row.** Cutting naively left
+/// whatever happened to precede the panorama stranded: in this archive a
+/// five-star portrait ranked first and the panorama second, so the page opened
+/// on one lone portrait at a third of the width with two thirds of the row
+/// empty, and the panorama below it. When the photographs waiting for a band
+/// would not fill its first row, the panorama is emitted *first* instead and
+/// they join the band that follows.
+///
+/// The reordering is bounded and one-directional: a panorama can only move ahead
+/// of fewer than [`PORTFOLIO_COLUMNS`] photographs, and only ever earlier. A
+/// band already long enough to fill a row is left exactly where it is, so a
+/// weakly-rated panorama cannot climb the page past a full band of better work.
+///
+/// The numbering follows the result rather than the input, which is what keeps
+/// the page honest about itself: `--i` and `data-seq` are display positions, so
+/// the phone view stacks in the order the desktop reads and the lightbox's
+/// prev/next walks what a visitor actually sees.
+///
+/// A short band at the *end* of a section is left alone. There is nothing after
+/// it to merge into, and trailing space reads as the section finishing rather
+/// than as a hole in the middle of it.
+fn grid_blocks(images: &[ImageEntry]) -> Vec<Block<'_>> {
+    let mut blocks = Vec::new();
+    let mut pending: Vec<&ImageEntry> = Vec::new();
+    let mut seq = 0usize;
+    for img in images {
+        if is_wide_tile(img.dims) {
+            // Enough to fill a row: the band stands, and the panorama follows it.
+            // Otherwise the panorama goes first and `pending` waits for company.
+            if pending.len() >= PORTFOLIO_COLUMNS {
+                flush_band(&mut pending, &mut blocks, &mut seq);
+            }
+            blocks.push(Block::Wide(seq, img));
+            seq += 1;
+        } else {
+            pending.push(img);
+        }
+    }
+    flush_band(&mut pending, &mut blocks, &mut seq);
+    blocks
+}
+
+/// The portfolio's photo grid: equal-width columns, each photograph at its true
+/// aspect ratio and its natural height, interrupted by any panorama wide enough
+/// to earn the whole page.
+///
+/// Deliberately not [`image_grid`], which is a CSS multi-column masonry, and no
+/// longer the justified rows this page shipped with either. Justified rows
+/// equalise *height*, and at equal height a portrait is narrower than a
+/// landscape and so gets less of the page — measured on this archive, 0.48x the
+/// area. Equal-width columns invert that: the ratio decides the height, so a
+/// portrait becomes the tallest tile in its column at 2.1x a landscape's area.
+/// That is the point of the change, not a side effect of it. The exception is a
+/// panorama, which the same rule squashes into a strip; see [`WIDE_TILE_RATIO`].
+///
+/// **The columns are assigned here, not by CSS.** `columns: 3` fills each column
+/// top to bottom, so a section's first third would run down the left column and
+/// the top band of the page would show photographs 1, n/3 and 2n/3 — the best
+/// photograph beside two of the weakest, which defeats the star ranking the
+/// sections are ordered by. Round-robin on the reading index puts photographs 1,
+/// 2 and 3 across the first band instead. The cost is ragged column bottoms,
+/// which is inherent to natural heights and was accepted.
+///
+/// A band narrower than [`PORTFOLIO_COLUMNS`] gets only as many columns as it
+/// has photographs — but a column is a fixed third of the row rather than a
+/// share of it, so those photographs keep the same width as every other column
+/// tile and sit centred instead of stretching to fill the band. See `.mcol` in
+/// `style.css`; letting them stretch put a lone portrait across the whole page.
+/// [`grid_blocks`] then keeps such a band from appearing mid-section at all, by
+/// letting a panorama move above it.
+///
+/// The markup is therefore grouped by column, so document order is column-major
+/// (1, 4, 7, 2, 5, 8, ...) while reading order is 1, 2, 3, ... Two things depend
+/// on knowing the difference, and both are handled explicitly rather than left
+/// to infer it: `--i` on each tile (the phone layout reorders by it) and
+/// `data-seq` on each anchor (`lightbox.js` sorts by it, so its prev/next walks
+/// the page as it reads rather than down one column and back up the next).
+///
+/// Reuses [`grid_img`] for the `<img>` itself, so the intrinsic-size and
+/// lazy-loading markup and the eager budget are handled in one place for every
+/// grid on the site. The only tile here carrying a `srcset` is a panorama, which
+/// `portfolio_group` gives the 3200px rendition as its larger candidate; see
+/// [`PORTFOLIO_SIZES`].
+fn column_grid(images: &[ImageEntry], eager: usize) -> Markup {
+    html! {
+        div.mgrid {
+            @for block in grid_blocks(images) {
+                @match block {
+                    Block::Wide(seq, img) => {
+                        // `role="list"` on a one-item list because the phone
+                        // layout sets `display: contents` here to flatten the
+                        // grid, and that drops the implicit list semantics in
+                        // several browsers.
+                        ul.mwide role="list" {
+                            (tile(img, seq, seq < eager, true))
+                        }
+                    }
+                    Block::Band(run) => {
+                        div.mcols {
+                            @for col in 0..run.len().min(PORTFOLIO_COLUMNS) {
+                                ul.mcol role="list" {
+                                    @for (seq, img) in run
+                                        .iter()
+                                        .enumerate()
+                                        // Round-robin on the position within
+                                        // this band, not the reading index, so a
+                                        // band after a panorama still starts at
+                                        // its leftmost column.
+                                        .filter(|(k, _)| k % PORTFOLIO_COLUMNS == col)
+                                        .map(|(_, v)| v)
+                                    {
+                                        (tile(img, *seq, *seq < eager, false))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One portfolio section, at `/` (the front door) or `/portfolio/<slug>`.
+///
+/// This replaced the old home page, which stacked every section behind the
+/// archive's collapsing folder chrome inside a column two-thirds the width of
+/// the screen. A section is now a page: three wide equal-width columns of
+/// photographs, reached from the [`section_tabs`] strip.
+///
+/// `section` is `None` when there is no portfolio to show at all — no database,
+/// no `portfolio` tag, or every tagged file missing from disk. That renders the
+/// same "Nothing here yet." the old page did; the front page of the site is the
+/// wrong place to report an infrastructure problem.
+///
+/// `canonical` doubles as the "is this the front door" test, since `/` is the
+/// only address the leading section is served at. That governs two things: the
+/// JSON-LD `Person`, which belongs on one page rather than repeated across every
+/// section, and where the trailing prose block appears.
+pub fn portfolio_page(
+    section: Option<&FolderGroup>,
+    slug: &str,
+    canonical: &str,
+    tabs: &[SectionTab],
+) -> Markup {
+    let is_front = canonical == "/";
+    // The first tile is the Largest Contentful Paint element on every viewport.
+    // Naming it in <head> starts the fetch during HTML parse instead of waiting
+    // for the parser to reach the <img>.
+    let lcp = section
         .and_then(|g| g.images.first())
         .map(|img| img.thumb_url.as_str());
     // The preview rendition, not the tile and not the original: a 400px tile
     // renders as a blurry card, and the original is megabytes of file a scraper
     // may refuse. See [`share_image`].
-    let og = groups
-        .first()
+    let og = section
         .and_then(|g| g.images.first())
         .map(|img| share_image(&img.image_url));
     // Bound outside the `html!` block: `Head` borrows its title, so a `format!`
     // temporary built inline would be dropped at the end of the builder chain
     // while the borrow is still live.
-    let page_title = owner_title("");
+    let page_title = match section {
+        // The front door is the site, so it keeps the site's own title rather
+        // than announcing whichever tag happens to lead the order.
+        Some(_) if is_front => owner_title(""),
+        Some(g) => section_title(&g.label),
+        None => owner_title(""),
+    };
+    let description = if is_front {
+        site_description()
+    } else {
+        section_description(slug)
+    };
+    // Visually hidden, like every other listing page's — see `page_heading`.
+    // It restates the <title>, which is what makes hiding it honest: the
+    // structural heading a crawler and a screen reader need, without pushing
+    // the first photograph down the page.
+    let heading = match section {
+        Some(g) if !is_front => section_title(&g.label),
+        _ => page_title.clone(),
+    };
     html! {
         (DOCTYPE)
         html lang="en" {
             (head_block({
-                let h = Head::new(
-                    &page_title,
-                    site_description(),
-                    "/",
-                )
-                .scripts(&["/static/lightbox.js", "/static/collapse.js"])
-                .preload(lcp)
-                .jsonld(person_jsonld());
-                match og {
+                let h = Head::new(&page_title, description, canonical)
+                    // No `collapse.js`: there is nothing to collapse here any
+                    // more. `/recent` and `/all` still load it.
+                    .scripts(&["/static/lightbox.js"])
+                    .preload(lcp);
+                let h = match og {
                     Some(url) => h.og_image(url),
                     None => h,
-                }
+                };
+                // One `Person` per site, on the page that is the person's
+                // address. Repeating it on each section would restate the same
+                // facts at three URLs and describe none of them.
+                if is_front { h.jsonld(person_jsonld()) } else { h }
             }))
             body {
                 (site_header(Nav::Home))
+                (section_tabs(tabs))
                 main.portfolio {
-                    // The home page's own breadcrumb only ever read "Portfolio",
-                    // duplicating the brand; a name and a line of context earn
-                    // that space better.
-                    section.hero {
-                        h1.hero-name { (OWNER_NAME) }
-                        @if !OWNER_TAGLINE.is_empty() {
-                            p.hero-tagline { (OWNER_TAGLINE) }
-                        }
-                        @if !HOME_INTRO.is_empty() {
-                            p.hero-intro { (HOME_INTRO) }
-                        }
-                        @if !HOME_LINKS.is_empty() {
-                            nav.hero-links aria-label="Sections of this site" {
-                                @for (href, label) in HOME_LINKS {
-                                    a href=(href) { (label) }
+                    (page_heading(&heading))
+                    @match section {
+                        // No visible heading. The sub-tab strip above already
+                        // names the section, and with one section per page a
+                        // heading under it restated the same word an inch lower.
+                        // The `page_heading` above is the structural one and is
+                        // visually hidden, so nothing is lost to a crawler or a
+                        // screen reader.
+                        Some(g) => (column_grid(&g.images, PORTFOLIO_EAGER_TILES)),
+                        None => p.empty { "Nothing here yet." }
+                    }
+                    // Below the photographs, not above them. The intro is the
+                    // only prose in the page body — every `alt` is a filename —
+                    // so dropping it would leave a crawler nothing but tag names
+                    // to build a snippet from. Below the fold is indexed at full
+                    // weight, so it costs the layout nothing to put the
+                    // photographs first.
+                    //
+                    // Front door only: it introduces the site, and a visitor
+                    // deep in one section has already met it.
+                    //
+                    // This is also where `HOME_LINKS` ended up. It used to be a
+                    // row under the hero; with the hero gone, a closing block is
+                    // where "links out to the rest of the site" belong anyway.
+                    @if is_front && !(HOME_INTRO.is_empty() && HOME_LINKS.is_empty()) {
+                        section.portfolio-note {
+                            @if !HOME_INTRO.is_empty() {
+                                p { (HOME_INTRO) }
+                            }
+                            @if !HOME_LINKS.is_empty() {
+                                nav.portfolio-note-links aria-label="Sections of this site" {
+                                    @for (href, label) in HOME_LINKS {
+                                        a href=(href) { (label) }
+                                    }
                                 }
                             }
                         }
                     }
-                    (gallery_sections(groups))
                 }
                 (site_footer())
             }
@@ -1204,11 +1631,10 @@ pub fn grouped_gallery_page(groups: &[FolderGroup]) -> Markup {
 
 /// `/recent` — the folders named in `photos/.recent`, newest drop first.
 ///
-/// Same body as the home page (see [`gallery_sections`]) without the hero: this
-/// page is a listing, so it opens on a breadcrumb like every other listing
-/// rather than reintroducing the site. The section order is the order of the
-/// lines in `.recent`, which is deliberate — that file is the owner's statement
-/// of what the current drop is, ordering included.
+/// A listing, so it opens on a breadcrumb like every other listing and keeps the
+/// collapsible sections of [`gallery_sections`]. The section order is the order
+/// of the lines in `.recent`, which is deliberate — that file is the owner's
+/// statement of what the current drop is, ordering included.
 pub fn recent_page(groups: &[FolderGroup]) -> Markup {
     let lcp = groups
         .first()
@@ -1218,9 +1644,9 @@ pub fn recent_page(groups: &[FolderGroup]) -> Markup {
         .first()
         .and_then(|g| g.images.first())
         .map(|img| share_image(&img.image_url));
-    // Bound outside `html!` for the same reason as in `grouped_gallery_page`:
-    // `Head` borrows its title, so an inline `format!` temporary would be
-    // dropped while the borrow is still live.
+    // Bound outside `html!` for the same reason as in `portfolio_page`: `Head`
+    // borrows its title, so an inline `format!` temporary would be dropped while
+    // the borrow is still live.
     let page_title = format!("Recent — Photographs by {OWNER_NAME}");
     let crumbs = [
         Crumb {

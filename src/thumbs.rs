@@ -27,6 +27,21 @@ pub enum ThumbKind {
     /// 1600px medium-size preview, used by the work feed so the page can
     /// show "big" photos without serving the multi-megabyte originals.
     Preview,
+    /// 3200px, for the portfolio's full-width panoramas and nothing else.
+    ///
+    /// Every other tile on the site lands in a slot the Preview covers. A
+    /// panorama does not: it is promoted to the whole width of the portfolio
+    /// page, which is ~1840 CSS px at a 1920 viewport, so the 1600px file is
+    /// *upscaled* on a 1x screen and half the resolution it wants on a 2x one.
+    /// The panoramas in this archive are ~4030px wide at source, so 3200 is a
+    /// real step up rather than the source's own size rounded off; it covers 1x
+    /// to a 3200px viewport and 2x to 1600.
+    ///
+    /// Built only for photographs the portfolio would actually promote — see
+    /// `rendition_wanted` in `main.rs`. A 3200px rendition of every frame in
+    /// the archive would be the largest thing in the cache and no page would
+    /// ever link it.
+    Wide,
 }
 
 impl ThumbKind {
@@ -35,6 +50,7 @@ impl ThumbKind {
             ThumbKind::Grid => "thumbs",
             ThumbKind::Medium => "medium",
             ThumbKind::Preview => "preview",
+            ThumbKind::Wide => "wide",
         }
     }
 
@@ -47,18 +63,25 @@ impl ThumbKind {
             ThumbKind::Grid => "thumb",
             ThumbKind::Medium => "medium",
             ThumbKind::Preview => "preview",
+            ThumbKind::Wide => "wide",
         }
     }
 
     /// Every rendition, so the warm and prune passes cannot silently skip one
     /// that was added later. Both used to carry their own array literal.
-    pub(crate) const ALL: [ThumbKind; 3] = [ThumbKind::Grid, ThumbKind::Medium, ThumbKind::Preview];
+    pub(crate) const ALL: [ThumbKind; 4] = [
+        ThumbKind::Grid,
+        ThumbKind::Medium,
+        ThumbKind::Preview,
+        ThumbKind::Wide,
+    ];
 
     pub(crate) fn max_dim(self) -> u32 {
         match self {
             ThumbKind::Grid => 400,
             ThumbKind::Medium => 800,
             ThumbKind::Preview => 1600,
+            ThumbKind::Wide => 3200,
         }
     }
 }

@@ -188,6 +188,11 @@ async fn permanent(to: &'static str) -> Redirect {
 fn build_router(state: AppState, static_dir: PathBuf) -> Router {
     let pages = Router::new()
         .route("/", get(handlers::index))
+        // One page per `portfolio/*` tag. The section that `/` renders is
+        // reached there and nowhere else; its own slug redirects, so no set
+        // of photographs is published at two addresses.
+        .route("/portfolio", get(handlers::portfolio_root))
+        .route("/portfolio/:slug", get(handlers::portfolio_section))
         .route("/about", get(handlers::about))
         .route("/recent", get(handlers::recent_photos))
         .route("/notify", get(handlers::notify_form).post(handlers::notify_subscribe))
@@ -211,6 +216,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/about/", get(|| permanent("/about")))
         .route("/recent/", get(|| permanent("/recent")))
         .route("/notify/", get(|| permanent("/notify")))
+        .route("/portfolio/", get(|| permanent("/")))
         .route("/browse/", get(|| permanent("/browse")))
         .route("/people/", get(|| permanent("/people")))
         .route("/work/", get(|| permanent("/work")))
@@ -249,6 +255,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/thumb/*path", get(handlers::thumb))
         .route("/medium/*path", get(handlers::medium))
         .route("/preview/*path", get(handlers::preview))
+        .route("/wide/*path", get(handlers::wide))
         .nest_service(
             "/static",
             // Asset URLs carry a `?v=<build id>` stamp (see views::asset), so a
@@ -311,6 +318,7 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
     let next = Arc::new(AtomicUsize::new(0));
     let built = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
+    let skipped = Arc::new(AtomicUsize::new(0));
     let start = std::time::Instant::now();
 
     let mut workers = Vec::with_capacity(concurrency);
@@ -319,6 +327,7 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
         let next = next.clone();
         let built = built.clone();
         let failed = failed.clone();
+        let skipped = skipped.clone();
         let photos_root = photos_root.clone();
         let cache_root = cache_root.clone();
         workers.push(tokio::spawn(async move {
@@ -328,7 +337,20 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
                     break;
                 }
                 let src = &jpegs[idx];
+                // One JPEG-header read, no decode. It exists so `Wide` can be
+                // skipped for everything that is not a panorama; see
+                // `rendition_wanted`.
+                let dims = {
+                    let src = src.clone();
+                    tokio::task::spawn_blocking(move || thumbs::oriented_dimensions(&src).ok())
+                        .await
+                        .unwrap_or(None)
+                };
                 for kind in ThumbKind::ALL {
+                    if !rendition_wanted(kind, dims) {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     match thumbs::ensure_thumb(src, &photos_root, &cache_root, kind).await {
                         Ok(info) => {
                             if info.rebuilt {
@@ -356,11 +378,13 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
     // arithmetic: these are `usize`, and the hardcoded `total * 2` this replaces
     // went negative the moment a third rendition existed, wrapping the "already
     // fresh" figure to about eighteen quintillion.
-    let attempted = total * ThumbKind::ALL.len();
+    let skipped = skipped.load(Ordering::Relaxed);
+    let attempted = (total * ThumbKind::ALL.len()).saturating_sub(skipped);
     let built = built.load(Ordering::Relaxed);
     let failed = failed.load(Ordering::Relaxed);
     println!(
-        "done in {:.1}s — {built} renditions generated, {} already fresh, {failed} failed",
+        "done in {:.1}s — {built} renditions generated, {} already fresh, {failed} failed, \
+         {skipped} not wanted",
         start.elapsed().as_secs_f32(),
         attempted.saturating_sub(built).saturating_sub(failed),
     );
@@ -376,6 +400,22 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
         prune_orphans(&cache_root, &servable).await;
     }
     Ok(())
+}
+
+/// Whether `kind` is worth building for a photograph of these dimensions.
+///
+/// Only [`ThumbKind::Wide`] ever says no. It exists for the portfolio's
+/// full-width panoramas, which are a handful of frames in this archive, and it
+/// is the largest rendition there is — building it for everything would roughly
+/// double the cache to serve a file no page would link. The threshold is the
+/// layout's own (`views::is_wide_ratio`), so the warm pass and the page cannot
+/// disagree about what a panorama is.
+///
+/// Unmeasurable dimensions count as not-wide. `ensure_thumb` still builds the
+/// rendition on demand if a page links it anyway, so the only cost of guessing
+/// wrong here is the first visitor waiting for one downscale.
+fn rendition_wanted(kind: ThumbKind, dims: Option<(u32, u32)>) -> bool {
+    !matches!(kind, ThumbKind::Wide) || dims.is_some_and(views::is_wide_ratio)
 }
 
 /// Remove every file under every `cache/<rendition>/` directory whose
@@ -859,6 +899,997 @@ mod tests {
             .get(header::CACHE_CONTROL)
             .map(|v| v.to_str().unwrap().to_string())
             .unwrap_or_default()
+    }
+
+    /// A fixture whose photos root carries a `digikam4.db` holding one
+    /// `portfolio/<label>` tag per entry in `sections`, with that entry's
+    /// photographs — one per [`Photo`], carrying its rating and its shape.
+    ///
+    /// Separate from [`fixture`] rather than folded into it: adding a tag
+    /// database changes what `/`, `/people` and `/people/:name` do, and every
+    /// existing test here is written against the no-database state.
+    ///
+    /// Section `i`'s photograph `j` is `portfolio/sec<i>-<j>.jpg`, which is how a
+    /// test says "this page should show that photograph and no other" and how the
+    /// ordering tests name an expected sequence. Ratings are digiKam's own
+    /// values, so `-1` (never rated) is expressible alongside `0`.
+    fn portfolio_fixture_shaped(sections: &[(&str, &[Photo])]) -> Fixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let photos = root.join("photos");
+        let cache = root.join("cache");
+        let data = root.join("data");
+        let static_dir = root.join("static");
+        for p in [&photos, &cache, &data, &static_dir] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::create_dir_all(photos.join("portfolio")).unwrap();
+        std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
+        for (i, (_, shots)) in sections.iter().enumerate() {
+            for (j, shot) in shots.iter().enumerate() {
+                image::RgbImage::from_pixel(shot.w, shot.h, image::Rgb([120, 140, 100]))
+                    .save(photos.join(format!("portfolio/sec{i}-{j}.jpg")))
+                    .expect("write test jpeg");
+            }
+        }
+
+        write_portfolio_db(&photos.join("digikam4.db"), sections);
+
+        let state = AppState::new(
+            photos.clone(),
+            cache,
+            data.clone(),
+            Some(photos.join("digikam4.db")),
+            root.join("nether"),
+        );
+        Fixture {
+            router: build_router(state, static_dir),
+            _dir: dir,
+            data,
+        }
+    }
+
+    /// One test photograph: its star rating and its pixel dimensions.
+    ///
+    /// The dimensions matter because the grid promotes a photograph wide enough
+    /// to earn the whole page onto its own row, so a test about that has to be
+    /// able to make a panorama. 900x600 is the default shape — ratio 1.5, the
+    /// widest thing in the real archive that is *not* promoted.
+    #[derive(Clone, Copy)]
+    struct Photo {
+        rating: i64,
+        w: u32,
+        h: u32,
+    }
+
+    impl Photo {
+        /// A 900x600 (ratio 1.5) photograph at `rating` stars.
+        const fn rated(rating: i64) -> Self {
+            Self {
+                rating,
+                w: 900,
+                h: 600,
+            }
+        }
+
+        /// A photograph of a given aspect ratio, unrated. Height is fixed at 600
+        /// so the Preview rendition is always a real downscale.
+        fn shaped(ratio: f64) -> Self {
+            Self {
+                rating: 0,
+                w: (600.0 * ratio).round() as u32,
+                h: 600,
+            }
+        }
+    }
+
+    /// Ratings only, every photograph 900x600.
+    fn portfolio_fixture_rated(sections: &[(&str, &[i64])]) -> Fixture {
+        let shots: Vec<(&str, Vec<Photo>)> = sections
+            .iter()
+            .map(|(l, rs)| (*l, rs.iter().map(|r| Photo::rated(*r)).collect()))
+            .collect();
+        let refs: Vec<(&str, &[Photo])> = shots.iter().map(|(l, v)| (*l, &v[..])).collect();
+        portfolio_fixture_shaped(&refs)
+    }
+
+    /// One photograph per label, all unrated — the shape most of these tests
+    /// want, where the section set is what matters and the ordering inside a
+    /// section does not.
+    fn portfolio_fixture_with(labels: &[&str]) -> Fixture {
+        let sections: Vec<(&str, &[i64])> = labels.iter().map(|l| (*l, &[0i64][..])).collect();
+        portfolio_fixture_rated(&sections)
+    }
+
+    /// The default three-section portfolio.
+    ///
+    /// `Tags.name COLLATE NOCASE ASC` puts these in the order `Black & White`,
+    /// `misc`, `pastel`, so with `SECTION_ORDER` empty the front door is
+    /// `Black & White` — slug `black-white`, which is also the case that proves a
+    /// slug is not merely a lowercased label.
+    fn portfolio_fixture() -> Fixture {
+        portfolio_fixture_with(&["pastel", "misc", "Black & White"])
+    }
+
+    /// The (only) photograph belonging to `label` in a [`portfolio_fixture_with`]
+    /// set.
+    fn section_photo(labels: &[&str], label: &str) -> String {
+        let i = labels.iter().position(|l| *l == label).expect("unknown label");
+        format!("sec{i}-0.jpg")
+    }
+
+    /// The five digiKam tables the portfolio query touches, with one tagged
+    /// photograph per rating in each section.
+    ///
+    /// Only the columns the query reads are declared. A real digiKam database has
+    /// dozens more; adding them here would be transcription, not coverage.
+    ///
+    /// `ImageInformation` is joined for `rating` alone, and a photograph rated
+    /// `i64::MIN` is given *no* row at all — that is how a test reaches the
+    /// missing-row case the query's `COALESCE` exists for.
+    fn write_portfolio_db(path: &Path, sections: &[(&str, &[Photo])]) {
+        let conn = rusqlite::Connection::open(path).expect("create test db");
+        conn.execute_batch(
+            "
+            CREATE TABLE Tags (id INTEGER PRIMARY KEY, pid INTEGER, name TEXT);
+            CREATE TABLE Albums (id INTEGER PRIMARY KEY, relativePath TEXT);
+            CREATE TABLE Images (id INTEGER PRIMARY KEY, album INTEGER, name TEXT, status INTEGER);
+            CREATE TABLE ImageTags (tagid INTEGER, imageid INTEGER);
+            CREATE TABLE ImageInformation (imageid INTEGER PRIMARY KEY, rating INTEGER);
+
+            INSERT INTO Tags (id, pid, name) VALUES (1, 0, 'portfolio');
+            INSERT INTO Albums (id, relativePath) VALUES (1, '/portfolio');
+            ",
+        )
+        .expect("create test db schema");
+        let mut image = 0i64;
+        for (i, (label, shots)) in sections.iter().enumerate() {
+            // Tag ids start at 2, since 1 is the root `portfolio` tag.
+            let tag = i as i64 + 2;
+            conn.execute(
+                "INSERT INTO Tags (id, pid, name) VALUES (?1, 1, ?2)",
+                rusqlite::params![tag, label],
+            )
+            .expect("insert tag");
+            for (j, shot) in shots.iter().enumerate() {
+                image += 1;
+                conn.execute(
+                    "INSERT INTO Images (id, album, name, status) VALUES (?1, 1, ?2, 1)",
+                    rusqlite::params![image, format!("sec{i}-{j}.jpg")],
+                )
+                .expect("insert image");
+                conn.execute(
+                    "INSERT INTO ImageTags (tagid, imageid) VALUES (?1, ?2)",
+                    rusqlite::params![tag, image],
+                )
+                .expect("insert image tag");
+                if shot.rating != i64::MIN {
+                    conn.execute(
+                        "INSERT INTO ImageInformation (imageid, rating) VALUES (?1, ?2)",
+                        rusqlite::params![image, shot.rating],
+                    )
+                    .expect("insert image information");
+                }
+            }
+        }
+    }
+
+    /// The order photographs *read* in a rendered portfolio grid, by filename.
+    ///
+    /// Not document order. The grid groups tiles by column, so the markup runs
+    /// column-major (1, 4, 7, 2, 5, 8, ...) while the page reads 1, 2, 3 across
+    /// the first band. `data-seq` is the reading index each anchor carries for
+    /// exactly this reason, and sorting by it is what makes an assertion here
+    /// about "higher up the page" mean what it says.
+    fn mosaic_order(html: &str) -> Vec<String> {
+        let mut out: Vec<(u32, String)> = Vec::new();
+        for chunk in html.split("data-seq=\"").skip(1) {
+            let (seq, rest) = chunk.split_once('"').expect("unterminated data-seq");
+            let name = rest
+                .split_once("data-name=\"")
+                .and_then(|(_, r)| r.split_once('"'))
+                .map(|(n, _)| n.to_string())
+                .expect("anchor has data-seq but no data-name");
+            out.push((seq.parse().expect("data-seq is not a number"), name));
+        }
+        out.sort_by_key(|(seq, _)| *seq);
+        out.into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// Which column each photograph was assigned to, keyed by filename.
+    fn tile_columns(html: &str) -> Vec<Vec<String>> {
+        let mut cols = Vec::new();
+        for col in html.split("<ul class=\"mcol\"").skip(1) {
+            let body = col.split("</ul>").next().unwrap_or("");
+            cols.push(
+                body.split("data-name=\"")
+                    .skip(1)
+                    .filter_map(|c| c.split_once('"').map(|(n, _)| n.to_string()))
+                    .collect(),
+            );
+        }
+        cols
+    }
+
+    /// A panorama takes the whole width, on a row of its own.
+    ///
+    /// Equal-width columns fix the width and let the ratio decide the height,
+    /// which is what makes portraits large here and what would squash a 2:1
+    /// frame into a strip a third of the page wide. `caldwell-utopia-wide-07` in
+    /// the real archive is 2.05 and the reason this exists.
+    #[tokio::test]
+    async fn a_panorama_is_promoted_to_the_full_width() {
+        let f = portfolio_fixture_shaped(&[(
+            "solo",
+            &[
+                Photo::shaped(0.7),  // 0 portrait
+                Photo::shaped(2.05), // 1 panorama, like caldwell-utopia-wide-07
+                Photo::shaped(1.5),  // 2 landscape
+            ],
+        )]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        // The panorama is a full-width row and is in no column.
+        assert!(
+            html.contains("<ul class=\"mwide\""),
+            "no full-width row was emitted"
+        );
+        assert!(
+            html.contains("class=\"mtile mtile-wide\""),
+            "the panorama did not get the wide tile class"
+        );
+        let in_columns: Vec<String> = tile_columns(&html).into_iter().flatten().collect();
+        assert!(
+            !in_columns.contains(&"sec0-1.jpg".to_string()),
+            "the panorama is still sitting in a column"
+        );
+        // Its neighbours are not promoted.
+        assert_eq!(html.matches("<ul class=\"mwide\"").count(), 1);
+        for stays in ["sec0-0.jpg", "sec0-2.jpg"] {
+            assert!(
+                in_columns.contains(&stays.to_string()),
+                "{stays} should still be a column tile"
+            );
+        }
+        // The lone portrait that preceded it could not fill a row, so the
+        // panorama took priority and leads the page. See
+        // `a_panorama_outranks_a_band_too_short_to_fill_a_row`.
+        assert_eq!(
+            mosaic_order(&html),
+            ["sec0-1.jpg", "sec0-0.jpg", "sec0-2.jpg"]
+        );
+    }
+
+    /// The threshold sits above 16:9, so a cinematic crop stays a column tile
+    /// and only a genuine panorama is promoted.
+    ///
+    /// Measured on the archive the ratios jump from 1.50 straight to 2.05, so
+    /// the boundary cases that matter are the ones checked here rather than
+    /// anything in that gap.
+    #[tokio::test]
+    async fn only_genuinely_wide_photographs_are_promoted() {
+        let f = portfolio_fixture_shaped(&[(
+            "solo",
+            &[
+                Photo::shaped(1.50), // 3:2 landscape, the archive's widest column tile
+                Photo::shaped(1.78), // 16:9
+                Photo::shaped(1.90), // exactly at the threshold
+                Photo::shaped(2.83), // 6x17
+            ],
+        )]);
+        let html = body_string(get(&f.router, "/").await).await;
+        let in_columns: Vec<String> = tile_columns(&html).into_iter().flatten().collect();
+
+        for stays in ["sec0-0.jpg", "sec0-1.jpg"] {
+            assert!(
+                in_columns.contains(&stays.to_string()),
+                "{stays} was promoted but should not have been"
+            );
+        }
+        // At or above the threshold, so both promoted.
+        assert_eq!(html.matches("<ul class=\"mwide\"").count(), 2);
+        for promoted in ["sec0-2.jpg", "sec0-3.jpg"] {
+            assert!(
+                !in_columns.contains(&promoted.to_string()),
+                "{promoted} should have been promoted"
+            );
+        }
+    }
+
+    /// A panorama cuts the band it lands in, when that band can fill a row.
+    ///
+    /// Cutting is what preserves the sequence: everything before the panorama is
+    /// one band, everything after is the next. A band is a three-column group of
+    /// any length, not a single row, so the four photographs before the panorama
+    /// stay one band and its columns simply end at different heights.
+    #[tokio::test]
+    async fn a_panorama_cuts_the_band_around_it() {
+        let f = portfolio_fixture_shaped(&[(
+            "solo",
+            &[
+                Photo::shaped(0.7), // 0 \
+                Photo::shaped(0.7), // 1  | band of four: fills a row, so it stands
+                Photo::shaped(0.7), // 2  |
+                Photo::shaped(0.7), // 3 /
+                Photo::shaped(2.2), // 4 -- panorama
+                Photo::shaped(0.7), // 5 \
+                Photo::shaped(0.7), // 6  | band of three
+                Photo::shaped(0.7), // 7 /
+            ],
+        )]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        assert_eq!(
+            html.matches("<div class=\"mcols\">").count(),
+            2,
+            "the panorama did not cut the band"
+        );
+        // Four photographs round-robin into three columns, so the first column
+        // takes two; the second band deals one each.
+        assert_eq!(
+            tile_columns(&html),
+            vec![
+                vec!["sec0-0.jpg".to_string(), "sec0-3.jpg".to_string()],
+                vec!["sec0-1.jpg".to_string()],
+                vec!["sec0-2.jpg".to_string()],
+                vec!["sec0-5.jpg".to_string()],
+                vec!["sec0-6.jpg".to_string()],
+                vec!["sec0-7.jpg".to_string()],
+            ]
+        );
+        // The band filled its row, so nothing moved: order is untouched.
+        assert_eq!(
+            mosaic_order(&html),
+            [
+                "sec0-0.jpg", "sec0-1.jpg", "sec0-2.jpg", "sec0-3.jpg",
+                "sec0-4.jpg", "sec0-5.jpg", "sec0-6.jpg", "sec0-7.jpg",
+            ]
+        );
+    }
+
+    /// A panorama outranks a band too short to fill a row, and moves above it.
+    ///
+    /// Cutting naively stranded whatever preceded the panorama. In the real
+    /// archive a five-star portrait ranks first and the panorama second, so
+    /// `/portfolio/portraits` opened on one lone portrait at a third of the width
+    /// with two thirds of the row empty, and the panorama underneath it.
+    #[tokio::test]
+    async fn a_panorama_outranks_a_band_too_short_to_fill_a_row() {
+        // The shape of the real portraits section: one portrait, the panorama,
+        // then the rest.
+        let f = portfolio_fixture_shaped(&[(
+            "solo",
+            &[
+                Photo::shaped(0.78), // 0 alone before the panorama
+                Photo::shaped(2.05), // 1 panorama
+                Photo::shaped(0.67), // 2
+                Photo::shaped(0.78), // 3
+                Photo::shaped(0.81), // 4
+                Photo::shaped(0.75), // 5
+            ],
+        )]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        // One band, not two, and the panorama is above it.
+        assert_eq!(
+            html.matches("<div class=\"mcols\">").count(),
+            1,
+            "the lone portrait was left in a band of its own"
+        );
+        let wide_at = html.find("<ul class=\"mwide\"").expect("no panorama row");
+        let band_at = html.find("<div class=\"mcols\">").expect("no band");
+        assert!(wide_at < band_at, "the panorama is not above the band");
+
+        // The stranded portrait joined the following band, so no column tile is
+        // ever alone: every column holds at least one and the band fills a row.
+        let cols = tile_columns(&html);
+        assert_eq!(cols.len(), 3, "the band is not three columns wide");
+        assert!(
+            cols.iter().all(|c| !c.is_empty()),
+            "a column came out empty: {cols:?}"
+        );
+        assert_eq!(
+            cols,
+            vec![
+                vec!["sec0-0.jpg".to_string(), "sec0-4.jpg".to_string()],
+                vec!["sec0-2.jpg".to_string(), "sec0-5.jpg".to_string()],
+                vec!["sec0-3.jpg".to_string()],
+            ]
+        );
+
+        // Display order leads with the panorama, and everything else keeps its
+        // relative sequence behind it.
+        assert_eq!(
+            mosaic_order(&html),
+            [
+                "sec0-1.jpg", // the panorama, moved up
+                "sec0-0.jpg", "sec0-2.jpg", "sec0-3.jpg", "sec0-4.jpg", "sec0-5.jpg",
+            ]
+        );
+    }
+
+    /// The reordering is bounded: a panorama can pass fewer than three
+    /// photographs and never a full band.
+    ///
+    /// Otherwise a weakly-rated panorama could climb the page past better work,
+    /// which would quietly undo the star ranking the sections are sorted by.
+    #[tokio::test]
+    async fn a_panorama_never_climbs_past_a_full_band() {
+        let f = portfolio_fixture_shaped(&[(
+            "solo",
+            &[
+                Photo::shaped(0.7), // 0 \
+                Photo::shaped(0.7), // 1  | exactly enough to fill a row
+                Photo::shaped(0.7), // 2 /
+                Photo::shaped(2.4), // 3 -- panorama, stays put
+            ],
+        )]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        let band_at = html.find("<div class=\"mcols\">").expect("no band");
+        let wide_at = html.find("<ul class=\"mwide\"").expect("no panorama row");
+        assert!(
+            band_at < wide_at,
+            "the panorama climbed above a band that already filled a row"
+        );
+        assert_eq!(
+            mosaic_order(&html),
+            ["sec0-0.jpg", "sec0-1.jpg", "sec0-2.jpg", "sec0-3.jpg"]
+        );
+    }
+
+    /// Consecutive panoramas stack, and the photographs they would have stranded
+    /// collect into one band below them.
+    #[tokio::test]
+    async fn back_to_back_panoramas_stack_above_the_band() {
+        let f = portfolio_fixture_shaped(&[(
+            "solo",
+            &[
+                Photo::shaped(0.7), // 0 stranded by the first panorama
+                Photo::shaped(2.1), // 1 panorama
+                Photo::shaped(0.7), // 2 stranded by the second
+                Photo::shaped(2.6), // 3 panorama
+                Photo::shaped(0.7), // 4
+                Photo::shaped(0.7), // 5
+            ],
+        )]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        assert_eq!(html.matches("<ul class=\"mwide\"").count(), 2);
+        assert_eq!(
+            html.matches("<div class=\"mcols\">").count(),
+            1,
+            "the stranded photographs did not collect into one band"
+        );
+        assert_eq!(
+            mosaic_order(&html),
+            [
+                "sec0-1.jpg", "sec0-3.jpg", // both panoramas, in their own order
+                "sec0-0.jpg", "sec0-2.jpg", "sec0-4.jpg", "sec0-5.jpg",
+            ]
+        );
+    }
+
+    /// A panorama spans the whole page, where the 1600px Preview every other
+    /// tile links is smaller than the slot, so it offers the 3200px rendition as
+    /// well. The column tiles beside it do not: their slot is a third of the
+    /// page and the Preview covers it twice over.
+    #[tokio::test]
+    async fn a_panorama_offers_the_higher_resolution_rendition() {
+        let f = portfolio_fixture_shaped(&[(
+            "solo",
+            &[
+                Photo {
+                    rating: 0,
+                    w: 4000,
+                    h: 1900,
+                },
+                Photo::rated(0),
+                Photo::rated(0),
+                Photo::rated(0),
+            ],
+        )]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        let srcsets: Vec<&str> = html
+            .split("srcset=\"")
+            .skip(1)
+            .map(|s| s.split('"').next().unwrap())
+            .collect();
+        assert_eq!(
+            srcsets.len(),
+            1,
+            "exactly one tile should carry a srcset: {srcsets:?}"
+        );
+        let srcset = srcsets[0];
+        assert!(
+            srcset.contains("/preview/portfolio/sec0-0.jpg 1600w"),
+            "small candidate wrong: {srcset}"
+        );
+        assert!(
+            srcset.contains("/wide/portfolio/sec0-0.jpg 3200w"),
+            "large candidate wrong: {srcset}"
+        );
+        assert!(
+            html.contains("sizes=\"100vw\""),
+            "the full-width tile declared no slot width"
+        );
+        // The `src` stays the Preview, so the intrinsic size attributes still
+        // describe what a browser without srcset support fetches.
+        assert!(html.contains("src=\"/preview/portfolio/sec0-0.jpg\" alt=\"sec0-0.jpg\""));
+    }
+
+    /// A panorama the Preview already covers gets no second candidate. Both
+    /// routes would downscale the same source to the same width, and a srcset
+    /// offering one file at two widths tells the browser nothing.
+    #[tokio::test]
+    async fn a_small_panorama_offers_no_second_candidate() {
+        let f = portfolio_fixture_shaped(&[("solo", &[Photo::shaped(2.2)])]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        assert!(html.contains("class=\"mtile mtile-wide\""), "not promoted");
+        assert!(
+            !html.contains("srcset="),
+            "a source smaller than the Preview cap offered a second candidate"
+        );
+    }
+
+    /// The warm pass builds the biggest rendition only for the photographs the
+    /// page would link it for, and never skips any other rendition.
+    #[test]
+    fn only_panoramas_are_warmed_at_the_wide_size() {
+        let panorama = Some((4000, 1900));
+        let portrait = Some((2000, 3000));
+        for kind in ThumbKind::ALL {
+            assert!(
+                rendition_wanted(kind, panorama),
+                "{kind:?} skipped for a panorama"
+            );
+        }
+        for dims in [portrait, None] {
+            assert!(!rendition_wanted(ThumbKind::Wide, dims), "{dims:?} warmed wide");
+            for kind in [ThumbKind::Grid, ThumbKind::Medium, ThumbKind::Preview] {
+                assert!(rendition_wanted(kind, dims), "{kind:?} skipped for {dims:?}");
+            }
+        }
+    }
+
+    /// The top band of the page shows the three best photographs, not the best    /// The top band of the page shows the three best photographs, not the best
+    /// beside two of the weakest.
+    ///
+    /// This is the whole reason the columns are assigned on the server. CSS
+    /// `columns: 3` fills top-to-bottom, so a nine-photo section would put 1,2,3
+    /// down the left column and the first thing a visitor sees would be
+    /// photographs 1, 4 and 7 — the five-star shot flanked by two of the worst.
+    /// Round-robin on the reading index puts 1, 2, 3 across instead.
+    #[tokio::test]
+    async fn the_top_band_is_the_top_ranked_photographs() {
+        // Nine photographs, rated 9 down to 1, so reading order is also rank
+        // order and any scrambling is visible.
+        let f = portfolio_fixture_rated(&[("solo", &[5, 5, 5, 3, 3, 3, 0, 0, 0])]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        let cols = tile_columns(&html);
+        assert_eq!(cols.len(), 3, "expected three columns");
+        // The first entry of each column is the top band, left to right.
+        let band: Vec<&str> = cols.iter().map(|c| c[0].as_str()).collect();
+        assert_eq!(
+            band,
+            ["sec0-0.jpg", "sec0-1.jpg", "sec0-2.jpg"],
+            "the top band is not the first three photographs in reading order"
+        );
+        // Which is the same as saying every five-star photo is in the top band.
+        assert_eq!(
+            cols.iter().map(|c| c.len()).collect::<Vec<_>>(),
+            [3, 3, 3],
+            "photographs were not dealt evenly across the columns"
+        );
+    }
+
+    /// Document order is column-major, and that is fine as long as everything
+    /// that cares about reading order is told what it is.
+    ///
+    /// A regression here would be invisible on a desktop and wrong on a phone,
+    /// where `order: var(--i)` is the only thing restoring the sequence.
+    #[tokio::test]
+    async fn tiles_carry_a_reading_index_that_disagrees_with_document_order() {
+        let f = portfolio_fixture_rated(&[("solo", &[0, 0, 0, 0, 0, 0])]);
+        let html = body_string(get(&f.router, "/").await).await;
+
+        // Document order: column 0 (0, 3), column 1 (1, 4), column 2 (2, 5).
+        let document: Vec<String> = html
+            .split("data-name=\"")
+            .skip(1)
+            .filter_map(|c| c.split_once('"').map(|(n, _)| n.to_string()))
+            .collect();
+        assert_eq!(
+            document,
+            [
+                "sec0-0.jpg", "sec0-3.jpg", // column 0
+                "sec0-1.jpg", "sec0-4.jpg", // column 1
+                "sec0-2.jpg", "sec0-5.jpg", // column 2
+            ]
+        );
+
+        // Reading order, recovered from `data-seq`, is the original sequence.
+        assert_eq!(
+            mosaic_order(&html),
+            [
+                "sec0-0.jpg", "sec0-1.jpg", "sec0-2.jpg",
+                "sec0-3.jpg", "sec0-4.jpg", "sec0-5.jpg",
+            ]
+        );
+        assert_ne!(document, mosaic_order(&html), "the test proves nothing");
+
+        // And every tile declares its reading index for the phone layout.
+        for i in 0..6 {
+            assert!(html.contains(&format!("--i:{i}")), "tile {i} has no --i");
+        }
+    }
+
+    /// Stars order a section: more stars, higher up the page.
+    ///
+    /// The fixture rates five photographs 3, 0, 5, -1, 1 in filename order, so
+    /// the star order and the filename order share no prefix — a page that
+    /// ignored the rating entirely would come out `0,1,2,3,4` and fail here.
+    #[tokio::test]
+    async fn stars_order_a_section_highest_first() {
+        let f = portfolio_fixture_rated(&[("solo", &[3, 0, 5, -1, 1])]);
+        let html = body_string(get(&f.router, "/").await).await;
+        assert_eq!(
+            mosaic_order(&html),
+            [
+                "sec0-2.jpg", // 5 stars
+                "sec0-0.jpg", // 3
+                "sec0-4.jpg", // 1
+                // 0 stars and never-rated tie, and fall back to filename order.
+                "sec0-1.jpg", // 0
+                "sec0-3.jpg", // -1
+            ]
+        );
+    }
+
+    /// digiKam's `-1` means "never rated", not "below zero stars", and a photo
+    /// can have no `ImageInformation` row at all. All three are the same thing to
+    /// a visitor — no stars — so they rank together and sort by filename, rather
+    /// than by which of the three digiKam happened to record.
+    ///
+    /// This is a real state in the archive, not a hypothetical: one section there
+    /// holds a mix of `-1` and `0` with no difference in intent behind it.
+    #[tokio::test]
+    async fn unrated_zero_star_and_missing_rows_rank_together() {
+        // Ratings in filename order: no row, 0, -1, no row, 2.
+        let f = portfolio_fixture_rated(&[("solo", &[i64::MIN, 0, -1, i64::MIN, 2])]);
+        let html = body_string(get(&f.router, "/").await).await;
+        assert_eq!(
+            mosaic_order(&html),
+            [
+                "sec0-4.jpg", // the only starred photo leads
+                // Everything else ranks 0 and holds filename order.
+                "sec0-0.jpg",
+                "sec0-1.jpg",
+                "sec0-2.jpg",
+                "sec0-3.jpg",
+            ]
+        );
+    }
+
+    /// Stars rank photographs *within* a section, never across them.
+    ///
+    /// The label has to sort first or the section-cutting loop in
+    /// `list_sections_blocking` shatters: it starts a new section every time the
+    /// label changes, so a five-star photograph sorting ahead of another
+    /// section's rows would split that section into fragments. Here the
+    /// five-star photo lives in the section that sorts *last*, which is exactly
+    /// the case that would break.
+    #[tokio::test]
+    async fn stars_do_not_reorder_or_split_sections() {
+        let f = portfolio_fixture_rated(&[("alpha", &[0, 0]), ("beta", &[5, 0])]);
+
+        // Section order is untouched: `alpha` still leads and is served at `/`.
+        let front = body_string(get(&f.router, "/").await).await;
+        assert_eq!(mosaic_order(&front), ["sec0-0.jpg", "sec0-1.jpg"]);
+
+        // `beta` is intact — both of its photographs on one page, starred first.
+        let beta = body_string(get(&f.router, "/portfolio/beta").await).await;
+        assert_eq!(mosaic_order(&beta), ["sec1-0.jpg", "sec1-1.jpg"]);
+
+        // And there are exactly two sections, not three or four.
+        let tabs = front.matches("<a href=\"/portfolio/").count() + 1;
+        assert_eq!(tabs, 2, "sections were split by the star sort");
+    }
+
+    /// The portfolio's pages come from the database and nowhere else.
+    ///
+    /// There is one route pattern, `/portfolio/:slug`, and the set of slugs it
+    /// accepts is resolved per request from the children of the `portfolio` tag.
+    /// So tagging a new sub-tag in digiKam publishes a page, a sub-tab and a
+    /// sitemap entry with no code change and no restart — and a tag that goes
+    /// away takes its page with it.
+    ///
+    /// Asserted with labels that appear nowhere in `src/`, which is the point: if
+    /// any section name were baked into the routing, these would 404.
+    #[tokio::test]
+    async fn routes_follow_the_database_not_the_code() {
+        let labels = ["Dust & Scratches", "kodachrome 64", "Zone V"];
+        let f = portfolio_fixture_with(&labels);
+
+        // NOCASE alphabetical: "Dust & Scratches", "kodachrome 64", "Zone V".
+        // The first is the front door and is served at "/" alone.
+        let front = body_string(get(&f.router, "/").await).await;
+        assert!(front.contains(&section_photo(&labels, "Dust & Scratches")));
+        assert!(front.contains("href=\"/portfolio/kodachrome-64\""));
+        assert!(front.contains("href=\"/portfolio/zone-v\""));
+
+        for (slug, label) in [("kodachrome-64", "kodachrome 64"), ("zone-v", "Zone V")] {
+            let uri = format!("/portfolio/{slug}");
+            let resp = get(&f.router, &uri).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} status");
+            let html = body_string(resp).await;
+            assert!(
+                html.contains(&section_photo(&labels, label)),
+                "{uri} is missing its photograph"
+            );
+        }
+
+        // And the previous section set's slugs are not routes here — there is no
+        // accumulated table of names anywhere.
+        for gone in ["/portfolio/pastel", "/portfolio/misc", "/portfolio/black-white"] {
+            assert_eq!(
+                get(&f.router, gone).await.status(),
+                StatusCode::NOT_FOUND,
+                "{gone} resolved against a database that does not contain it"
+            );
+        }
+    }
+
+    /// `/` is the leading section and nothing else: the whole point of one
+    /// section per route is that no set of photographs is published twice.
+    #[tokio::test]
+    async fn front_door_renders_only_the_leading_section() {
+        let labels = ["pastel", "misc", "Black & White"];
+        let f = portfolio_fixture_with(&labels);
+        let resp = get(&f.router, "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        // `Black & White` leads, so its photograph is here and the other two are
+        // not — the whole point of one section per route.
+        assert!(
+            html.contains(&section_photo(&labels, "Black & White")),
+            "leading section's photograph is missing"
+        );
+        for other in ["pastel", "misc"] {
+            assert!(
+                !html.contains(&section_photo(&labels, other)),
+                "{other}'s photograph leaked onto /"
+            );
+        }
+    }
+
+    /// Every non-leading section is its own page, reachable at its slug.
+    #[tokio::test]
+    async fn each_section_has_its_own_page() {
+        let labels = ["pastel", "misc", "Black & White"];
+        let f = portfolio_fixture_with(&labels);
+        for (slug, label) in [("pastel", "pastel"), ("misc", "misc")] {
+            let uri = format!("/portfolio/{slug}");
+            let resp = get(&f.router, &uri).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} status");
+            let html = body_string(resp).await;
+            let own = section_photo(&labels, label);
+            assert!(html.contains(&own), "{uri} is missing {own}");
+            assert!(
+                !html.contains(&section_photo(&labels, "Black & White")),
+                "{uri} leaked the leading section"
+            );
+        }
+    }
+
+    /// The leading section's own slug is a second address for `/`, which is the
+    /// duplicate this layout exists to avoid. It redirects instead.
+    #[tokio::test]
+    async fn the_leading_sections_slug_redirects_to_the_front_door() {
+        let f = portfolio_fixture();
+        let resp = get(&f.router, "/portfolio/black-white").await;
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap().to_str().unwrap(),
+            "/"
+        );
+    }
+
+    /// `/portfolio` names no section, and is not a page of its own.
+    #[tokio::test]
+    async fn portfolio_root_and_trailing_slash_redirect() {
+        let f = portfolio_fixture();
+        for uri in ["/portfolio", "/portfolio/"] {
+            let resp = get(&f.router, uri).await;
+            assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT, "{uri} status");
+            assert_eq!(
+                resp.headers().get(header::LOCATION).unwrap().to_str().unwrap(),
+                "/",
+                "{uri} location"
+            );
+        }
+    }
+
+    /// A slug naming no tag is a miss, and renders the site's 404 rather than a
+    /// blank page — same contract as every other page route.
+    #[tokio::test]
+    async fn an_unknown_section_slug_is_a_404_page() {
+        let f = portfolio_fixture();
+        let resp = get(&f.router, "/portfolio/no-such-section").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let html = body_string(resp).await;
+        assert!(html.contains("notfound-code"), "did not render the 404 page");
+    }
+
+    /// The sub-tab strip lists every section, links the leading one at `/`, and
+    /// marks the page you are on. It belongs to the portfolio alone — `/recent`
+    /// is an archive listing and keeps the header it always had.
+    #[tokio::test]
+    async fn the_sub_tab_strip_is_portfolio_only() {
+        let f = portfolio_fixture();
+        let front = body_string(get(&f.router, "/").await).await;
+        assert!(front.contains("class=\"subnav\""), "/ has no sub-tab strip");
+        assert!(front.contains("href=\"/portfolio/pastel\""), "/ is missing a tab");
+        assert!(front.contains("href=\"/portfolio/misc\""), "/ is missing a tab");
+        // The leading section's tab points at `/`, not at its own slug.
+        assert!(
+            !front.contains("href=\"/portfolio/black-white\""),
+            "/ links the leading section at its redirecting slug"
+        );
+
+        let section = body_string(get(&f.router, "/portfolio/pastel").await).await;
+        assert!(section.contains("class=\"subnav\""), "section page has no strip");
+        assert!(
+            section.contains("href=\"/portfolio/pastel\" aria-current=\"page\""),
+            "the active tab is not marked"
+        );
+
+        let recent = body_string(get(&f.router, "/recent").await).await;
+        assert!(!recent.contains("class=\"subnav\""), "/recent grew a sub-tab strip");
+    }
+
+    /// The portfolio dropped the archive's collapsing sections; the archive
+    /// pages kept them. Asserted through the script tag, which is the whole
+    /// mechanism.
+    #[tokio::test]
+    async fn only_the_archive_pages_load_the_collapse_script() {
+        let f = portfolio_fixture();
+        for uri in ["/", "/portfolio/pastel"] {
+            let html = body_string(get(&f.router, uri).await).await;
+            assert!(!html.contains("collapse.js"), "{uri} still loads collapse.js");
+            assert!(html.contains("lightbox.js"), "{uri} lost the lightbox");
+        }
+        for uri in ["/recent", "/all"] {
+            let html = body_string(get(&f.router, uri).await).await;
+            assert!(html.contains("collapse.js"), "{uri} lost collapse.js");
+        }
+    }
+
+    /// Each tile carries the photo's aspect ratio, which is the single input the
+    /// justified rows are built from — without it the mosaic collapses.
+    #[tokio::test]
+    async fn mosaic_tiles_carry_an_aspect_ratio() {
+        let f = portfolio_fixture();
+        let html = body_string(get(&f.router, "/").await).await;
+        // The test JPEGs are 900x600.
+        assert!(html.contains("--ar:1.5000"), "no --ar on the tiles");
+        // The reading index the phone layout and the lightbox both order by.
+        assert!(html.contains("--i:0"), "no --i on the tiles");
+    }
+
+    /// The mosaic's tiles are wired to the lightbox.
+    ///
+    /// `lightbox.js` binds by selector pair, and the portfolio's grid uses its
+    /// own classes (`ul.mosaic` / `li.mtile`) rather than the square grid's
+    /// `ul.grid` / `li.tile`. When it was added those classes matched no pair, so
+    /// every tile was a plain link and a click navigated to the bare JPEG instead
+    /// of opening the lightbox — the markup was right and the binding was
+    /// missing, which is invisible to any assertion about the HTML alone.
+    ///
+    /// So this reads the script. It cannot prove the handler works, but it does
+    /// catch the two classes drifting apart again, which is the failure that
+    /// actually happened.
+    #[tokio::test]
+    async fn the_mosaic_classes_are_ones_the_lightbox_binds_to() {
+        let js = std::fs::read_to_string("static/lightbox.js").expect("read lightbox.js");
+        assert!(js.contains("'.mgrid'"), "lightbox.js does not bind .mgrid");
+        assert!(js.contains("'li.mtile a'"), "lightbox.js does not bind li.mtile a");
+        // The group selector must be the container, not a single column, or
+        // prev/next would stop at the bottom of whichever column was clicked.
+        for narrower in ["'ul.mcol'", "'.mcols'", "'.mwide'"] {
+            assert!(
+                !js.contains(narrower),
+                "lightbox.js binds {narrower} rather than the whole grid, so \
+                 prev/next would stop at a column or a panorama"
+            );
+        }
+        // And it has to walk the reading order the tiles declare.
+        assert!(js.contains("dataset.seq"), "lightbox.js ignores data-seq");
+
+        let f = portfolio_fixture();
+        let html = body_string(get(&f.router, "/").await).await;
+        assert!(html.contains("<div class=\"mgrid\">"), "the grid is not div.mgrid");
+        assert!(html.contains("<li class=\"mtile\""), "the tiles are not li.mtile");
+        assert!(html.contains("data-seq=\"0\""), "the tiles carry no reading index");
+    }
+
+    /// One canonical per address, and the `Person` block on the one page that is
+    /// the person's address rather than on all three.
+    #[tokio::test]
+    async fn section_pages_carry_their_own_canonical_and_no_person_block() {
+        let f = portfolio_fixture();
+        let front = body_string(get(&f.router, "/").await).await;
+        assert!(front.contains("rel=\"canonical\" href=\"https://paulborrego.com/\""));
+        assert!(front.contains("application/ld+json"), "/ lost the Person block");
+
+        let section = body_string(get(&f.router, "/portfolio/pastel").await).await;
+        assert!(
+            section.contains("rel=\"canonical\" href=\"https://paulborrego.com/portfolio/pastel\""),
+            "section canonical is wrong"
+        );
+        assert!(
+            !section.contains("application/ld+json"),
+            "the Person block is repeated on a section page"
+        );
+        assert!(
+            section.contains("<title>pastel — Paul Borrego</title>"),
+            "section title is wrong"
+        );
+    }
+
+    /// The intro prose is the only human-language text in the body, so it has to
+    /// survive the move below the photographs — and it introduces the site, so it
+    /// sits on the front door rather than on every section.
+    #[tokio::test]
+    async fn the_intro_prose_is_on_the_front_door_below_the_photographs() {
+        let f = portfolio_fixture();
+        let front = body_string(get(&f.router, "/").await).await;
+        if views::HOME_INTRO.is_empty() {
+            return;
+        }
+        let intro = front.find(views::HOME_INTRO).expect("HOME_INTRO is not on /");
+        let grid = front.find("class=\"mgrid\"").expect("no photo grid on /");
+        assert!(intro > grid, "the intro renders above the photographs");
+
+        let section = body_string(get(&f.router, "/portfolio/pastel").await).await;
+        assert!(
+            !section.contains(views::HOME_INTRO),
+            "the site intro is repeated on a section page"
+        );
+    }
+
+    /// Every non-leading section is crawlable; the leading one is already listed
+    /// as `/`, and listing its slug too would advertise a URL that redirects.
+    #[tokio::test]
+    async fn the_sitemap_lists_sections_but_not_the_redirecting_slug() {
+        let f = portfolio_fixture();
+        let xml = body_string(get(&f.router, "/sitemap.xml").await).await;
+        assert!(xml.contains("<loc>https://paulborrego.com/portfolio/pastel</loc>"));
+        assert!(xml.contains("<loc>https://paulborrego.com/portfolio/misc</loc>"));
+        assert!(
+            !xml.contains("/portfolio/black-white"),
+            "the sitemap advertises the redirecting slug"
+        );
+    }
+
+    /// No database, no tags, nothing on disk: the front page says so quietly
+    /// rather than reporting an infrastructure problem, and a named section is a
+    /// miss because the URL claimed something that is not there.
+    #[tokio::test]
+    async fn an_empty_portfolio_still_renders_the_front_page() {
+        let f = fixture();
+        let resp = get(&f.router, "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("Nothing here yet."));
+        assert!(html.contains("<header class=\"site\""), "no nav on the empty page");
+        assert!(!html.contains("class=\"subnav\""), "an empty portfolio drew tabs");
+
+        let miss = get(&f.router, "/portfolio/pastel").await;
+        assert_eq!(miss.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1373,7 +2404,7 @@ mod tests {
         );
         // Google Images is a real discovery path for a photography site, so the
         // image routes must stay crawlable.
-        for route in ["/image/", "/thumb/", "/medium/", "/preview/"] {
+        for route in ["/image/", "/thumb/", "/medium/", "/preview/", "/wide/"] {
             assert!(
                 !robots.contains(&format!("Disallow: {route}")),
                 "robots.txt blocked {route}, which hides the photographs"

@@ -74,7 +74,10 @@ a:hover {
 
 header.site {
   border-bottom: 1px solid var(--border);
-  padding: 1rem 1.5rem;
+  /* Vertical only. The 1.5rem sides are the site's gutter — `main` and the
+     subnav use the same figure — so trimming them would leave the brand out of
+     line with the page under it. */
+  padding: 0.6rem 1.5rem;
   background: var(--surface);
   display: flex;
   align-items: baseline;
@@ -1043,8 +1046,8 @@ ul.nav-tree ul.nav-tree {
   header.site {
     flex-direction: column;
     align-items: stretch;
-    gap: 0.75rem;
-    padding: 0.85rem 1rem;
+    gap: 0.6rem;
+    padding: 0.55rem 1rem;
   }
   header.site .site-left {
     justify-content: space-between;
@@ -1229,15 +1232,13 @@ li.work-card a:hover .work-counts {
 
 /* Work galleries reuse the /all grid scaffolding but with bigger tiles so
    clients see large previews; the name + per-photo download surface only
-   in the lightbox (see lightbox.js + .lb-caption below). The Portfolio home
-   page (main.portfolio) shares this exact treatment. */
-main.work .work-gallery,
-main.portfolio .work-gallery {
+   in the lightbox (see lightbox.js + .lb-caption below). The portfolio used to
+   share this treatment; it has its own layout now, further down. */
+main.work .work-gallery {
   margin-top: 1.5rem;
 }
 
-main.work .work-gallery h2,
-main.portfolio .work-gallery h2 {
+main.work .work-gallery h2 {
   font-size: 1rem;
   text-transform: lowercase;
   letter-spacing: 0.02em;
@@ -1245,8 +1246,7 @@ main.portfolio .work-gallery h2 {
   margin: 0 0 0.6rem;
 }
 
-main.work .work-gallery .section-label,
-main.portfolio .work-gallery .section-label {
+main.work .work-gallery .section-label {
   color: var(--text);
   font-weight: 600;
 }
@@ -1263,8 +1263,7 @@ main.work .work-gallery .section-count {
    tile renders at the image's natural aspect ratio without leaving gaps for
    taller portraits next to shorter landscapes. */
 main.work ul.work-grid,
-main.recent ul.work-grid,
-main.portfolio ul.work-grid {
+main.recent ul.work-grid {
   display: block;
   grid-template-columns: none;
   gap: 0;
@@ -1272,43 +1271,19 @@ main.portfolio ul.work-grid {
   column-gap: 1.25rem;
 }
 
-/* Portfolio is single-column by default so phones read the shots top-to-bottom.
-   This also overrides the shared 360px multi-column rule above for narrow
-   viewports. */
-main.portfolio ul.work-grid {
-  columns: 1;
-}
-
-/* Wide screens only: two side-by-side columns with generous, viewport-scaled
-   side margins so the large shots have room to breathe. Below this breakpoint
-   the layout stays single-column with the standard page padding. */
-@media (min-width: 1000px) {
-  main.portfolio {
-    padding-left: clamp(1.5rem, 20vw, 20rem);
-    padding-right: clamp(1.5rem, 20vw, 20rem);
-  }
-
-  main.portfolio ul.work-grid {
-    columns: 2;
-  }
-}
-
 main.work ul.work-grid li.tile,
-main.recent ul.work-grid li.tile,
-main.portfolio ul.work-grid li.tile {
+main.recent ul.work-grid li.tile {
   break-inside: avoid;
   margin: 0 0 1.25rem;
 }
 
 main.work ul.work-grid li.tile a,
-main.recent ul.work-grid li.tile a,
-main.portfolio ul.work-grid li.tile a {
+main.recent ul.work-grid li.tile a {
   display: block;
 }
 
 main.work ul.work-grid li.tile img,
-main.recent ul.work-grid li.tile img,
-main.portfolio ul.work-grid li.tile img {
+main.recent ul.work-grid li.tile img {
   aspect-ratio: auto;
   width: 100%;
   height: auto;
@@ -1430,58 +1405,294 @@ main.portfolio ul.work-grid li.tile img {
   display: none;
 }
 
-/* ---- Home hero ---- */
-/* Replaces the home page's old breadcrumb, which only ever read "Portfolio"
-   and duplicated the brand in the header. */
-.hero {
-  margin-bottom: 2.25rem;
-}
+/* ---- Portfolio: wide column grid --------------------------------------
 
-.hero-name {
+   The portfolio is the one page on this site meant to be looked at rather than
+   used, and it is laid out on its own terms. It replaced a two-column masonry
+   inside `padding-inline: clamp(1.5rem, 20vw, 20rem)`, which spent roughly 40%
+   of a 1920px viewport on empty margin, and the collapsible folder sections the
+   archive pages still use — chevrons and persisted open/closed state are the
+   right control for working through 300 folders, and the wrong one for looking
+   at photographs.
+
+   It then briefly used justified rows, which were replaced in turn; the grid
+   block further down says why.
+
+   Everything below applies only under `main.portfolio`. `/all`, `/browse`,
+   `/recent` and `/work` are untouched. */
+
+main.portfolio {
+  /* Overrides the shared `main` gutter. The grid sets its own, much narrower
+     one (`--mgrid-edge` below) so the photographs still run most of the width;
+     anything on this page that is *not* a photograph puts the site's 1.5rem
+     back, so type still lines up with the rest of the site. */
   margin: 0;
-  font-size: clamp(1.75rem, 5vw, 2.5rem);
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  line-height: 1.1;
-  color: var(--text);
+  padding: 0;
 }
 
-.hero-tagline {
-  margin: 0.4rem 0 0;
+/* Sub-tab strip: one link per `portfolio/*` tag, and the only way between
+   sections now that each is its own page. Sticky, because the grid is long and
+   the site header above it is not sticky — without this you would have to
+   scroll back to the top to reach another section. */
+nav.subnav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 1.5rem;
+  padding: 0.45rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  /* Air between the strip and the first photograph. The grid was flush against
+     the border, which read as the tabs being part of the top row rather than
+     chrome above it. Scales with the viewport like `--mgrid-edge` does, so the
+     two margins stay in proportion. */
+  margin-bottom: clamp(0.6rem, 1vw, 1.1rem);
+  /* Smaller than the top nav's 0.95rem: caps read larger than lowercase at the
+     same size, and this strip should sit under the header rather than compete
+     with it. */
+  font-size: 0.85rem;
+  /* Sections scroll sideways rather than wrapping onto a second line, which on
+     a phone would push the first photograph off the screen. The scrollbar is
+     hidden because the overflowing tabs are their own affordance. */
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+nav.subnav::-webkit-scrollbar {
+  display: none;
+}
+
+nav.subnav a {
   color: var(--muted);
-  font-size: 1rem;
-  max-width: 46ch;
+  white-space: nowrap;
+  scroll-snap-align: start;
+  padding-bottom: 0.15rem;
+  border-bottom: 2px solid transparent;
+  /* The tab labels are digiKam tag names, which are written lowercase; caps are
+     a presentational choice about the strip, not an edit to the names. */
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
-.hero-intro {
-  margin: 0.9rem 0 0;
+nav.subnav a:hover {
+  color: var(--accent-hover);
+  text-decoration: none;
+}
+
+/* Same marker as the top nav's current tab: position, not a hover state. */
+nav.subnav a[aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+/* Equal-width columns, natural heights, and full-width panoramas.
+
+   This replaced justified rows, and the reason is arithmetic rather than taste.
+   Justified rows equalise *height*: every photograph in a row is the same height
+   and the row fills the width exactly. At equal height a portrait is narrower
+   than a landscape, so it gets less of the page — measured on this archive, a
+   0.68 portrait took 0.48x the area of a 1.40 landscape. Equal-width columns
+   invert it. The width is fixed, the ratio decides the height, so a portrait is
+   the *tallest* tile in its column: 2.1x a landscape's area at the same column
+   width. Portrait-heavy sections stop being penalised for being portrait-heavy.
+
+   Photographs also got much bigger in the process. At a 1600px viewport a
+   portrait went from 217x320 under justified rows to 520x765 here.
+
+   One shape this gets wrong is a panorama: the column fixes the width, so a 2:1
+   frame becomes a letterbox strip a third of the page wide. Those are promoted
+   to a row of their own at the full width — see `WIDE_TILE_RATIO` and
+   `grid_blocks` in `views.rs` for the threshold and how a band is cut around
+   one.
+
+   Two layouts share this markup, and which one applies is the only thing the
+   media query below changes:
+
+   - Phone (default): one column. Every wrapper is `display: contents`, so the
+     tiles stop being children of their band or column and become flex items of
+     `.mgrid` directly, and `order: var(--i)` sorts them back into reading order.
+     This is what makes a server-assigned column grouping survive a viewport that
+     has no columns.
+   - Desktop: three columns. Each `.mcols` band becomes a row, each `.mcol` a
+     flex item with `flex: 1 1 0` so the columns are exactly equal, and the tiles
+     inside stack in document order — which the server already grouped correctly,
+     so `order` is switched off.
+
+   The column each photograph belongs to is decided in `column_grid` in
+   `views.rs`, not here. `columns: 3` would fill top-to-bottom and put the best
+   photograph beside two of the weakest; see that function. */
+
+main.portfolio .mgrid {
+  /* Space *between* photographs. Tight, so a band reads as one field of images
+     rather than three framed ones. One token — raise it for more air. */
+  --mcols-gap: 6px;
+
+  /* Space *outside* the outermost photographs, left and right. The grid was
+     edge-to-edge full bleed; this holds it off the viewport edges instead,
+     scaling with the viewport so a phone spends almost nothing on margin and a
+     wide desktop gets a visible one. Set to 0 to go back to full bleed.
+     The columns below are sized in % of the padded content box, so the three of
+     them still fill the width exactly between these margins. */
+  --mgrid-edge: clamp(0.5rem, 2vw, 2.5rem);
+
+  display: flex;
+  padding-inline: var(--mgrid-edge);
+  flex-direction: column;
+  gap: var(--mcols-gap);
+}
+
+/* Phone: dissolve every wrapper so the tiles become flex items of `.mgrid`
+   directly and `order` below can reach them. `role="list"` is on these elements
+   in the markup because this drops the implicit list semantics. */
+main.portfolio .mcols,
+main.portfolio .mcol,
+main.portfolio .mwide {
+  display: contents;
+}
+
+main.portfolio .mtile {
+  /* Reading order, for the single-column view where document order (grouped by
+     column) is wrong. Switched off once there are real columns. */
+  order: var(--i, 0);
+  /* In force only when the server could not read the photo's dimensions, which
+     is also the case `object-fit: cover` below exists for. Without it such a
+     tile would lay out at zero height. */
+  --ar: 1.5;
+  margin: 0;
+  list-style: none;
+}
+
+main.portfolio .mtile > a {
+  display: block;
+}
+
+main.portfolio .mtile img {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* Reserves the tile's height from the ratio before the bytes arrive, which is
+     what lets `loading="lazy"` skip off-screen photographs at all. With real
+     dimensions this agrees with the `width`/`height` attributes exactly, so it
+     changes nothing; it bites only on the `--ar: 1.5` fallback above, where
+     `cover` makes the failure a slightly trimmed frame rather than a stretched
+     one. */
+  aspect-ratio: var(--ar);
+  object-fit: cover;
+}
+
+/* Three columns. Below this the layout above stands: one column, full width,
+   which is also what a 700-1000px tablet gets — a ~900px-wide photograph rather
+   than three cramped ones. A panorama needs no special case there, since every
+   tile is already full width. */
+@media (min-width: 1000px) {
+  main.portfolio .mcols {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: var(--mcols-gap);
+    /* Only matters for a band with fewer photographs than columns, which happens
+       when a panorama cuts one short. Those photographs keep the normal column
+       width (see below) and sit centred, which reads as deliberate space rather
+       than as a row that failed to fill. */
+    justify-content: center;
+  }
+
+  main.portfolio .mcol {
+    display: flex;
+    flex-direction: column;
+    gap: var(--mcols-gap);
+    /* A fixed third of the row, not `flex: 1 1 0`.
+       Growth would make a band's columns share the whole width however many
+       there are, so a band of one — a photograph between two panoramas — would
+       stretch that single photograph across the page. A 0.78 portrait at a
+       1600px viewport came out 1600x2051. A fixed basis keeps every column tile
+       on the page the same width whatever band it is in.
+       The three columns and two gaps add back to exactly 100%, so a full band
+       still fills the row edge to edge. `min-width: 0` stops a wide image
+       forcing its column past its share. */
+    flex: 0 0 calc((100% - 2 * var(--mcols-gap)) / 3);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  /* A panorama's own row. It is a sibling of the bands rather than a member of
+     one, so it spans the full content width simply by being a block — no column
+     spanning, and no grid to keep in step with the bands' natural heights. */
+  main.portfolio .mwide {
+    display: block;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  main.portfolio .mtile {
+    /* The server already grouped the tiles by column in document order, so
+       reordering here would undo it. */
+    order: 0;
+  }
+}
+
+/* The closing block: HOME_INTRO, and HOME_LINKS under it.
+
+   Below the photographs rather than above them. It is the only prose in this
+   page's body — every `alt` on the site is a filename — so a crawler has
+   nothing else to build a snippet from, and below-the-fold text is indexed at
+   full weight. Putting it here costs the layout nothing and buys the front door
+   its first photograph at the top of the viewport. */
+main.portfolio .portfolio-note {
+  max-width: 62ch;
+  margin: 3rem auto 4rem;
+  padding: 0 1.5rem;
+}
+
+main.portfolio .portfolio-note p {
+  margin: 0;
   color: var(--text);
   font-size: 1rem;
   line-height: 1.6;
-  max-width: 62ch;
 }
 
-/* Reads as a row of quiet links on desktop and wraps to a stacked list on a
-   phone, rather than a nav bar competing with the real one in the header. */
-.hero-links {
+/* A row of quiet links, not a nav bar competing with the two real ones above. */
+main.portfolio .portfolio-note-links {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem 1.25rem;
-  margin-top: 0.9rem;
+  margin-top: 1rem;
 }
 
-.hero-links a {
+main.portfolio .portfolio-note-links a {
   color: var(--muted);
   font-size: 0.9rem;
-  text-decoration: none;
   border-bottom: 1px solid transparent;
   transition: color 0.15s ease, border-color 0.15s ease;
 }
 
-.hero-links a:hover,
-.hero-links a:focus-visible {
+main.portfolio .portfolio-note-links a:hover,
+main.portfolio .portfolio-note-links a:focus-visible {
   color: var(--text);
+  text-decoration: none;
   border-bottom-color: currentColor;
+}
+
+main.portfolio p.empty {
+  margin: 3rem 1.5rem;
+}
+
+@media (max-width: 600px) {
+  nav.subnav {
+    padding: 0.4rem 1rem;
+    gap: 1.15rem;
+  }
+
+  main.portfolio .portfolio-note {
+    padding: 0 1rem;
+  }
 }
 
 /* ---- About ---- */

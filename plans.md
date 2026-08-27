@@ -18,12 +18,31 @@ they were already told about. Everything else on this list can wait behind it.
 
 ## Page layout: home and About
 
-**Names for the home page's sections.** The layout question is settled — the
-home page is big photographs at their true aspect ratio, uncropped, one column
-on a phone and two on a wide screen. What is left is what sits above them: the
-headings are raw digiKam tag names, so the front door announces `misc`,
-`pastel`, `2026/CALDWELL-35`. Needs somewhere for a display name to live before
-the names themselves can be written.
+**Names for the portfolio's sections.** The layout question is settled and
+built: the portfolio is one section per page, photographs at their true aspect
+ratio in three wide equal-width columns, ranked by star level, with any
+panorama promoted to the full width, reached from a sub-tab strip under the
+header. `/` is whichever section leads `SECTION_ORDER`,
+and every other lives at `/portfolio/<slug>`. The section order is now mine to
+set — `SECTION_ORDER` in `views.rs` takes slugs, and the first entry is the
+front door. It is empty, so the front page currently opens on whatever tag sorts
+first alphabetically, which is `misc`.
+
+What is still open is the *names*. The headings are raw digiKam tag names, so
+the page announces `misc` and `pastel`, and there is nowhere for a display name
+to live yet. Adding that mapping is small; deciding what the names should be is
+mine.
+
+Two other empty slots the layout left behind, both needing words rather than
+code:
+
+- `SECTION_DESCRIPTIONS` in `views.rs` — the `<meta name="description">` for
+  each section page. Empty entries fall back to `SITE_DESCRIPTION`, so all three
+  sections currently share one description, which tells a search engine nothing
+  about what separates them.
+- Every `alt` attribute on the site is the photo's filename (`aruba-4.jpg`),
+  which is useless to a crawler and unhelpful to a screen reader. It is also,
+  besides `HOME_INTRO`, the only text in a photo page's body.
 
 **Words for the About page.** Its structure is settled too — one column of
 paragraphs, an optional portrait beside them from `about.jpg`, a links list at
