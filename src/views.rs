@@ -683,17 +683,15 @@ fn site_header(active: Nav) -> Markup {
                     }
                 }
             }
-            // Alphabetical by label, not by importance: with five one-word
-            // tabs there is no reading order to communicate, and a rule a
-            // visitor can infer beats one only the author knows. Adding a tab
-            // later means slotting it in by name rather than re-deciding the
-            // whole order.
+            // Ordered by what the author wants a visitor to reach first, from
+            // the curated selections through the broader archive, with About
+            // last as the page you read once rather than browse.
             nav.topnav {
-                a href="/about" aria-current=[(active == Nav::About).then_some("page")] { "About" }
-                a href="/all" aria-current=[(active == Nav::All).then_some("page")] { "All" }
-                a href="/people" aria-current=[(active == Nav::People).then_some("page")] { "People" }
-                a href="/recent" aria-current=[(active == Nav::Recent).then_some("page")] { "Recent" }
                 a href="/work" aria-current=[(active == Nav::Work).then_some("page")] { "Work" }
+                a href="/recent" aria-current=[(active == Nav::Recent).then_some("page")] { "Recent" }
+                a href="/people" aria-current=[(active == Nav::People).then_some("page")] { "People" }
+                a href="/all" aria-current=[(active == Nav::All).then_some("page")] { "All" }
+                a href="/about" aria-current=[(active == Nav::About).then_some("page")] { "About" }
             }
         }
     }
