@@ -1141,6 +1141,118 @@ main.work {
   padding: 0;
 }
 
+/* ---- /people ------------------------------------------------------------- */
+
+/* A tile per person rather than the chip list this used to be. The chips were
+   a list of names in a page whose whole subject is faces, and a name is the
+   slowest way to find someone you would recognise on sight.
+
+   `auto-fill` with a small floor, so the row count follows the viewport
+   instead of a breakpoint: five across a laptop, two across a phone, no media
+   query. `min()` for the same reason `ul.work-cards` needs it — a bare track
+   minimum wider than the column would push the page sideways. */
+ul.people-cards {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(9rem, 100%), 1fr));
+  gap: 1rem;
+}
+
+li.person-card {
+  display: flex;
+}
+
+li.person-card a {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.8rem 0.6rem 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  text-align: center;
+  transition: transform 0.15s ease, box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+
+li.person-card a:hover,
+li.person-card a:focus-visible {
+  border-color: var(--accent);
+  /* Repeated for the same reason the work card repeats it: the shared
+     `a:focus-visible` ring sets its own radius. */
+  border-radius: 6px;
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card);
+  text-decoration: none;
+}
+
+/* Round, and sized in `rem` against the tile rather than in the crop's own
+   pixels: the served file is at most 320px square and often smaller, since a
+   small face in a wide frame is never enlarged to fill a ceiling it does not
+   have the pixels for.
+
+   `aspect-ratio` rather than `width`/`height` attributes on the <img> holds the
+   box before the bytes arrive without claiming a pixel size that would
+   sometimes be wrong — every crop is square, which is the part that is always
+   true. */
+.person-face,
+.person-initial {
+  width: 6.5rem;
+  max-width: 100%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+.person-face {
+  display: block;
+  object-fit: cover;
+}
+
+/* The tile for someone with no tagged face. A letter in a plain disc, at the
+   same size as a crop, so a row with one in it still lines up. Deliberately
+   quiet: it is a placeholder and should read as one rather than competing with
+   the faces beside it. */
+.person-initial {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+
+.person-name {
+  font-weight: 600;
+  line-height: 1.25;
+  /* Tag names come out of someone else's database and can be long. */
+  overflow-wrap: anywhere;
+  transition: color 0.15s ease;
+}
+
+li.person-card a:hover .person-name,
+li.person-card a:focus-visible .person-name {
+  color: var(--accent);
+}
+
+/* The photo count, given the same micro-label treatment as the work cards'
+   file counts, and for the same reason: it is a machine fact about the person's
+   page, not a subtitle under their name. */
+.person-count {
+  font-size: 0.78rem;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- /work index --------------------------------------------------------- */
 
 ul.work-cards {

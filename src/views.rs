@@ -84,6 +84,11 @@ pub struct PersonEntry {
     pub name: String,
     pub url: String,
     pub photo_count: u32,
+    /// `/face/<name>`, or `None` for someone with no confirmed face in the
+    /// archive. The tile falls back to [`PersonEntry::initial`].
+    pub face_url: Option<String>,
+    /// First letter of the name, for the tile with no face to show.
+    pub initial: String,
 }
 
 /// A folder or file name as a client should read it: `-` and `_` become spaces.
@@ -1107,7 +1112,7 @@ pub fn page(
     }
 }
 
-pub fn people_index_page(title: &str, crumbs: &[Crumb], people: &[PersonEntry]) -> Markup {
+pub fn people_index_page(title: &str, people: &[PersonEntry]) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -1119,18 +1124,56 @@ pub fn people_index_page(title: &str, crumbs: &[Crumb], people: &[PersonEntry]) 
             body {
                 (site_header(Nav::People))
                 main {
-                    (crumbs_nav(crumbs))
+                    // No breadcrumb bar. Everywhere else one earns its place by
+                    // naming a path that is several folders deep; here it was
+                    // "Home / People" above a page called People, reached from
+                    // the top nav — a row of chrome saying nothing the header
+                    // does not. A person's own page keeps its crumbs, which do
+                    // name a real way back.
                     (page_heading("People in Paul Borrego's photographs"))
                     @if people.is_empty() {
                         p.empty { "No people tagged yet." }
                     } @else {
                         section.dirs {
-                            ul.dirlist {
+                            ul.people-cards {
                                 @for p in people {
-                                    li {
+                                    li.person-card {
                                         a href=(p.url) {
-                                            (p.name)
-                                            span.count { " (" (p.photo_count) ")" }
+                                            @if let Some(src) = &p.face_url {
+                                                // `alt=""`: the name is right
+                                                // underneath, and the only
+                                                // other thing to say about the
+                                                // crop is what the person looks
+                                                // like, which is the owner's
+                                                // writing to do.
+                                                // No `width`/`height`: a crop
+                                                // is never enlarged past its
+                                                // own pixels, so a small face
+                                                // in a wide frame renders
+                                                // smaller than the 320px
+                                                // ceiling and any number here
+                                                // would be a claim about bytes
+                                                // that is sometimes false. The
+                                                // box is held by
+                                                // `aspect-ratio: 1` in CSS
+                                                // instead, which is true of
+                                                // every crop.
+                                                img.person-face src=(src) alt=""
+                                                    loading="lazy" decoding="async";
+                                            } @else {
+                                                // Nobody has tagged a face for
+                                                // this person, so the tile says
+                                                // so quietly rather than
+                                                // borrowing a photograph they
+                                                // merely appear in. Decorative:
+                                                // it is the name's first letter
+                                                // and the name follows it.
+                                                span.person-initial aria-hidden="true" {
+                                                    (p.initial)
+                                                }
+                                            }
+                                            span.person-name { (p.name) }
+                                            span.person-count { (p.photo_count) }
                                         }
                                     }
                                 }

@@ -252,6 +252,10 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         // under /nether so it keeps its own ETag/max-age handling.
         .route("/nether-media/*path", get(nether::media))
         .route("/download/*path", get(handlers::download))
+        // Keyed by person, not by path: a face is a crop the database chooses,
+        // so it cannot ride the `/<rendition>/<photo path>` shape the four
+        // below share. See `handlers::face`.
+        .route("/face/:name", get(handlers::face))
         .route("/thumb/*path", get(handlers::thumb))
         .route("/medium/*path", get(handlers::medium))
         .route("/preview/*path", get(handlers::preview))
@@ -389,6 +393,8 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
         attempted.saturating_sub(built).saturating_sub(failed),
     );
 
+    let faces = warm_faces(&photos_root, &cache_root).await;
+
     if prune {
         // Relative paths the server can serve; any cached rendition outside
         // this set is an orphan. Mirrors the `cache/<kind>/<rel>` layout that
@@ -398,8 +404,120 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
             .filter_map(|p| p.strip_prefix(&photos_root).ok().map(Path::to_path_buf))
             .collect();
         prune_orphans(&cache_root, &servable).await;
+        prune_faces(&cache_root, &faces).await;
     }
     Ok(())
+}
+
+/// Build the face crop for every person on /people, and return the cache
+/// filenames the current database asks for.
+///
+/// A separate pass from the rendition warm above, because a face is not one of
+/// the renditions: it is keyed by person rather than by path, there is one per
+/// person rather than one per photograph, and it exists only when the database
+/// is there to say where a face is. A missing or unreadable database is not a
+/// failure here — every other command works without one, and the People page
+/// itself reports the absence in plain text.
+///
+/// Sequential, unlike the rendition pass. There are ~30 of them against
+/// thousands of photographs, and every one is a full decode of a frame the
+/// pass above has already pulled through the page cache.
+async fn warm_faces(photos_root: &Path, cache_root: &Path) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let db_path = photos_root.join("digikam4.db");
+    if !db_path.is_file() {
+        return names;
+    }
+    let people = match people::list_people(db_path).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  faces skipped: {e:#}");
+            return names;
+        }
+    };
+
+    let mut built = 0usize;
+    let mut failed = 0usize;
+    let mut faceless = 0usize;
+    for person in &people {
+        let Some(face) = &person.face else {
+            faceless += 1;
+            continue;
+        };
+        let rect = (face.rect.x, face.rect.y, face.rect.w, face.rect.h);
+        let cache_name = thumbs::face_cache_name(&person.name, &face.rel, rect);
+        let source = photos_root.join(&face.rel);
+        match thumbs::ensure_face(&source, cache_root, rect, &cache_name).await {
+            Ok(info) => {
+                if info.rebuilt {
+                    built += 1;
+                }
+                names.insert(cache_name);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("  FAILED face for {}: {e:#}", person.name);
+                eprintln!("    from {}", face.rel);
+            }
+        }
+    }
+    println!(
+        "faces: {built} built, {} already fresh, {failed} failed, {faceless} with no tagged face",
+        people.len().saturating_sub(built + failed + faceless),
+    );
+    // Said plainly, because every failure here is the same fixable mistake and
+    // the tile it belongs to is a broken image until it is fixed.
+    if failed > 0 {
+        eprintln!(
+            "  ^ {failed} of these are set on a file the site cannot render. \
+             In digiKam, set that person's tag thumbnail on the JPEG."
+        );
+    }
+    names
+}
+
+/// Delete cached face crops the database no longer asks for.
+///
+/// Two ways one goes stale, and neither is a deleted photograph: a face
+/// re-tagged onto a different frame mints a different filename and abandons the
+/// old one, and a person removed from the archive stops asking for theirs at
+/// all. So this prunes against the *current pick set* rather than against the
+/// servable photographs `prune_orphans` uses — a crop whose source is still on
+/// disk can be an orphan here.
+async fn prune_faces(cache_root: &Path, wanted: &HashSet<String>) {
+    let base = cache_root.join(thumbs::FACE_SUBDIR);
+    let mut read = match tokio::fs::read_dir(&base).await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    while let Ok(Some(entry)) = read.next_entry().await {
+        if !entry.file_type().await.map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // A concurrent render's temp file, same exemption `prune_orphans` makes.
+        if name.starts_with('.') && name.ends_with(".tmp") {
+            continue;
+        }
+        if wanted.contains(name.as_ref()) {
+            continue;
+        }
+        let sz = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(_) => {
+                removed += 1;
+                freed += sz;
+            }
+            Err(e) => eprintln!("  prune failed {}: {e}", entry.path().display()),
+        }
+    }
+    println!(
+        "pruned {removed} orphan face crops ({} freed)",
+        human_bytes(freed)
+    );
 }
 
 /// Whether `kind` is worth building for a photograph of these dimensions.
@@ -904,6 +1022,413 @@ mod tests {
             .get(header::CACHE_CONTROL)
             .map(|v| v.to_str().unwrap().to_string())
             .unwrap_or_default()
+    }
+
+    /// One person in a test database: their name, the faces digiKam has
+    /// confirmed for them as `(photo, x, y, w, h)`, and which photograph — if
+    /// any — is set as their tag thumbnail.
+    struct TestPerson<'a> {
+        name: &'a str,
+        faces: &'a [(&'a str, u32, u32, u32, u32)],
+        /// Photographs they are tagged in with no face rectangle drawn — the
+        /// state one of the real people is in, and the only way onto the page
+        /// with no face to show, since a person with no photographs at all is
+        /// not listed. Also how a test gives a non-JPEG face a JPEG to resolve
+        /// to, since that sibling has to be a row digiKam knows about.
+        plain: &'a [&'a str],
+        /// `Tags.icon` — the face digiKam's "Set as Tag Thumbnail" writes.
+        icon: Option<&'a str>,
+    }
+
+    /// A fixture whose database holds a People tag tree — the people named,
+    /// each tagged into every photograph they have a face in.
+    ///
+    /// Separate from [`portfolio_fixture_shaped`] for the reason that one is
+    /// separate from [`fixture`]: the People page reads a different tag tree
+    /// with different properties on it, and a database carrying both would make
+    /// every assertion here depend on the portfolio fixture's shape.
+    fn people_fixture(people: &[TestPerson]) -> Fixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let photos = root.join("photos");
+        let cache = root.join("cache");
+        let data = root.join("data");
+        let static_dir = root.join("static");
+        for p in [&photos, &cache, &data, &static_dir] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::create_dir_all(photos.join("2024")).unwrap();
+        std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
+
+        let db = photos.join("digikam4.db");
+        let conn = rusqlite::Connection::open(&db).expect("create test db");
+        conn.execute_batch(
+            "
+            CREATE TABLE Tags (id INTEGER PRIMARY KEY, pid INTEGER, name TEXT, icon INTEGER);
+            CREATE TABLE TagProperties (tagid INTEGER, property TEXT, value TEXT);
+            CREATE TABLE Albums (id INTEGER PRIMARY KEY, relativePath TEXT);
+            CREATE TABLE Images (id INTEGER PRIMARY KEY, album INTEGER, name TEXT, status INTEGER);
+            CREATE TABLE ImageTags (tagid INTEGER, imageid INTEGER);
+            CREATE TABLE ImageTagProperties (imageid INTEGER, tagid INTEGER, property TEXT, value TEXT);
+            CREATE TABLE ImageInformation (imageid INTEGER PRIMARY KEY, rating INTEGER);
+
+            INSERT INTO Tags (id, pid, name) VALUES (1, 0, 'People');
+            INSERT INTO Albums (id, relativePath) VALUES (1, '/2024');
+            ",
+        )
+        .expect("create test db schema");
+
+        let mut image_id = 0i64;
+        let mut images: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        // Every photograph named anywhere gets a row and a file. 400x400,
+        // which is wider than every rectangle below, so a padded crop has
+        // somewhere to grow into. A non-JPEG name gets JPEG bytes: nothing ever
+        // decodes it, and what is under test is that it is *not* the file the
+        // crop is taken from.
+        let mut ensure_image = |file: &str, conn: &rusqlite::Connection| -> i64 {
+            *images.entry(file.to_string()).or_insert_with(|| {
+                image_id += 1;
+                let path = photos.join("2024").join(file);
+                if file.to_ascii_lowercase().ends_with(".jpg") {
+                    image::RgbImage::from_pixel(400, 400, image::Rgb([120, 140, 100]))
+                        .save(&path)
+                        .expect("write test jpeg");
+                } else {
+                    // A stand-in for the scan. Nothing decodes it — the point of
+                    // the tests that name one is that the crop comes off the
+                    // JPEG beside it — and `image` refuses to *write* a TIFF
+                    // with only the JPEG feature built in.
+                    std::fs::write(&path, b"not an image").expect("write test scan");
+                }
+                conn.execute(
+                    "INSERT INTO Images (id, album, name, status) VALUES (?1, 1, ?2, 1)",
+                    rusqlite::params![image_id, file],
+                )
+                .unwrap();
+                image_id
+            })
+        };
+
+        for (i, person) in people.iter().enumerate() {
+            let tag = i as i64 + 2;
+            conn.execute(
+                "INSERT INTO Tags (id, pid, name) VALUES (?1, 1, ?2)",
+                rusqlite::params![tag, person.name],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO TagProperties (tagid, property, value) VALUES (?1, 'person', '')",
+                rusqlite::params![tag],
+            )
+            .unwrap();
+
+            for file in person.plain {
+                let id = ensure_image(file, &conn);
+                conn.execute(
+                    "INSERT INTO ImageTags (tagid, imageid) VALUES (?1, ?2)",
+                    rusqlite::params![tag, id],
+                )
+                .unwrap();
+            }
+
+            for (file, x, y, w, h) in person.faces {
+                let id = ensure_image(file, &conn);
+                conn.execute(
+                    "INSERT INTO ImageTags (tagid, imageid) VALUES (?1, ?2)",
+                    rusqlite::params![tag, id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO ImageTagProperties (imageid, tagid, property, value)
+                     VALUES (?1, ?2, 'tagRegion', ?3)",
+                    rusqlite::params![
+                        id,
+                        tag,
+                        format!(r#"<rect x="{x}" y="{y}" width="{w}" height="{h}"/>"#)
+                    ],
+                )
+                .unwrap();
+            }
+
+            if let Some(icon) = person.icon {
+                let id = ensure_image(icon, &conn);
+                conn.execute(
+                    "UPDATE Tags SET icon = ?1 WHERE id = ?2",
+                    rusqlite::params![id, tag],
+                )
+                .unwrap();
+            }
+        }
+        drop(conn);
+
+        let state = AppState::new(
+            photos.clone(),
+            cache,
+            data.clone(),
+            Some(db),
+            root.join("nether"),
+        );
+        Fixture {
+            router: build_router(state, static_dir),
+            _dir: dir,
+            data,
+            photos,
+        }
+    }
+
+
+    /// digiKam's own region format, and the shapes that are not it.
+    #[test]
+    fn a_face_rectangle_is_read_off_the_tag_region() {
+        use people::FaceRect;
+        assert_eq!(
+            FaceRect::parse(r#"<rect x="2751" y="1301" width="681" height="888"/>"#),
+            Some(FaceRect {
+                x: 2751,
+                y: 1301,
+                w: 681,
+                h: 888
+            })
+        );
+        // A zero-width region is not a crop, and neither is a missing
+        // attribute, a negative coordinate, or something that is not a number.
+        for bad in [
+            r#"<rect x="0" y="0" width="0" height="10"/>"#,
+            r#"<rect x="1" y="2" width="3"/>"#,
+            r#"<rect x="-4" y="2" width="3" height="4"/>"#,
+            r#"<rect x="e" y="2" width="3" height="4"/>"#,
+            "",
+        ] {
+            assert_eq!(FaceRect::parse(bad), None, "{bad}");
+        }
+    }
+
+    /// The padded square, when the face has room for it on every side.
+    #[test]
+    fn a_face_is_cut_square_with_room_around_it() {
+        // 100x100 face in the middle of a 1000x1000 frame: 1.6x padding, and
+        // the centre of the crop is the centre of the face.
+        let (x, y, side) = thumbs::face_crop_box((450, 450, 100, 100), (1000, 1000));
+        assert_eq!(side, 160);
+        assert_eq!((x + side / 2, y + side / 2), (500, 500));
+    }
+
+    /// The case a naive clamp gets wrong: a face too close to an edge for the
+    /// full padding gives up the padding and keeps the centring, rather than
+    /// keeping the padding and sliding the face off to one side.
+    #[test]
+    fn a_face_near_an_edge_loses_padding_before_it_loses_centring() {
+        // 100x100 face 20px from the left edge of a 1000x1000 frame. The full
+        // 160px square would not fit centred; 140px does, exactly.
+        let (x, y, side) = thumbs::face_crop_box((20, 450, 100, 100), (1000, 1000));
+        assert_eq!(side, 140, "did not trade padding for centring");
+        assert_eq!((x + side / 2, y + side / 2), (70, 500), "face drifted");
+    }
+
+    /// Miguel's real numbers — 557x721 at (792, 66) in a 1412x2092 frame — where
+    /// no square centred on the face is even as large as the face. The padding
+    /// still goes first, and what is left is a crop the face sits in the middle
+    /// of rather than against the right-hand rim, which is what clamping the
+    /// full 1154px square produced.
+    #[test]
+    fn the_real_frame_that_the_clamp_pushed_a_face_out_of() {
+        let (x, y, side) = thumbs::face_crop_box((792, 66, 557, 721), (1412, 2092));
+        assert!(side < 1154, "kept the full padded square: {side}");
+        assert!(side >= 721, "cut into the face itself: {side}");
+        assert!(x + side <= 1412 && y + side <= 2092, "ran off the frame");
+        assert!(x <= 792 && x + side >= 792 + 557, "face is not in the crop");
+
+        // Off-centre by pixels rather than by the ~235 the clamp drifted.
+        let fx = 792 + 557 / 2;
+        assert!((x + side / 2).abs_diff(fx) <= 25, "drifted horizontally");
+    }
+
+    /// Ned's real numbers: a face digiKam cut off at `x = 0`, so no square
+    /// centred on it fits. Here the crop does shift — the alternative is
+    /// cutting into a face that the frame has already cut into.
+    #[test]
+    fn a_face_against_the_frame_edge_shifts_rather_than_shrink() {
+        let (x, y, side) = thumbs::face_crop_box((0, 448, 202, 351), (1439, 2172));
+        assert_eq!(x, 0, "cannot move left of the frame");
+        assert_eq!(side, 351, "shrank past the face itself");
+        assert!(y + side <= 2172);
+    }
+
+    /// A crop is never larger than the photograph it comes out of, however
+    /// large the padded square would like to be.
+    #[test]
+    fn a_crop_never_leaves_the_photograph() {
+        let (x, y, side) = thumbs::face_crop_box((10, 10, 380, 380), (400, 300));
+        assert_eq!(side, 300, "square is bigger than the short side");
+        assert!(x + side <= 400 && y + side <= 300);
+    }
+
+    /// The pick rule: the tag thumbnail beats the bigger face.
+    #[tokio::test]
+    async fn the_tag_thumbnail_outranks_a_bigger_face() {
+        let f = people_fixture(&[TestPerson {
+            name: "Ada",
+            faces: &[("big.jpg", 100, 100, 200, 200), ("chosen.jpg", 10, 10, 40, 40)],
+            plain: &[],
+            icon: Some("chosen.jpg"),
+        }]);
+        let db = f.photos.join("digikam4.db");
+        let people = people::list_people(db).await.expect("list people");
+        let face = people[0].face.as_ref().expect("Ada has a face");
+        assert_eq!(face.rel, "2024/chosen.jpg");
+        assert_eq!(face.rect, people::FaceRect { x: 10, y: 10, w: 40, h: 40 });
+    }
+
+    /// A tag thumbnail set on a scan the site cannot decode is kept as the
+    /// pick, not quietly swapped for the JPEG beside it and not quietly
+    /// dropped for another face. The substitution would be a guess about which
+    /// two files are the same photograph; the fallback would hide a setup
+    /// mistake behind a page that looks right.
+    #[tokio::test]
+    async fn a_tag_thumbnail_on_a_tiff_is_kept_and_not_substituted() {
+        let f = people_fixture(&[TestPerson {
+            name: "Ada",
+            faces: &[("scan.tif", 40, 50, 60, 70), ("other.jpg", 100, 100, 90, 90)],
+            plain: &["scan.jpg"],
+            icon: Some("scan.tif"),
+        }]);
+        let db = f.photos.join("digikam4.db");
+        let people = people::list_people(db).await.expect("list people");
+        let face = people[0].face.as_ref().expect("Ada has a face");
+        assert_eq!(face.rel, "2024/scan.tif", "the pick was substituted");
+    }
+
+    /// ...and rendering it fails, loudly, rather than serving something else.
+    /// A broken tile is the point: it is the only thing that gets the tag
+    /// thumbnail moved onto the JPEG.
+    #[tokio::test]
+    async fn an_undecodable_tag_thumbnail_fails_to_render() {
+        let f = people_fixture(&[TestPerson {
+            name: "Ada",
+            faces: &[("scan.tif", 40, 50, 60, 70), ("other.jpg", 100, 100, 90, 90)],
+            plain: &["scan.jpg"],
+            icon: Some("scan.tif"),
+        }]);
+        let resp = get(&f.router, "/face/Ada").await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// The failure names the file and the fix, since a decoder's own "unknown
+    /// format" says nothing about what to do about it.
+    #[tokio::test]
+    async fn the_failure_says_which_file_and_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("scan.tif");
+        std::fs::write(&src, b"not an image").unwrap();
+        let msg = match thumbs::ensure_face(&src, dir.path(), (0, 0, 10, 10), "x.jpg").await {
+            Ok(_) => panic!("a TIFF rendered"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(msg.contains("scan.tif"), "{msg}");
+        assert!(msg.contains("tag thumbnail"), "{msg}");
+    }
+
+    /// With no tag thumbnail set, the biggest face wins — the crop is enlarged
+    /// from that rectangle, so it is the one with the pixels to survive it.
+    #[tokio::test]
+    async fn the_biggest_face_is_the_one_shown() {
+        let f = people_fixture(&[TestPerson {
+            name: "Ada",
+            faces: &[
+                ("small.jpg", 10, 10, 40, 40),
+                ("big.jpg", 100, 100, 200, 200),
+                ("middling.jpg", 50, 50, 90, 90),
+            ],
+            plain: &[],
+            icon: None,
+        }]);
+        let db = f.photos.join("digikam4.db");
+        let people = people::list_people(db).await.expect("list people");
+        let face = people[0].face.as_ref().expect("Ada has a face");
+        assert_eq!(face.rel, "2024/big.jpg");
+    }
+
+    /// The two tiles: a face for someone who has one, a letter for someone who
+    /// does not. Nobody borrows a photograph they merely appear in.
+    #[tokio::test]
+    async fn a_person_with_no_face_gets_a_letter_and_not_a_photograph() {
+        let f = people_fixture(&[
+            TestPerson {
+                name: "Ada",
+                faces: &[("ada.jpg", 100, 100, 120, 120)],
+                plain: &[],
+                icon: None,
+            },
+            TestPerson {
+                name: "Bram",
+                faces: &[],
+                plain: &["bram.jpg"],
+                icon: None,
+            },
+        ]);
+        let html = body_string(get(&f.router, "/people").await).await;
+        assert!(
+            html.contains(r#"<img class="person-face" src="/face/Ada""#),
+            "Ada has no face tile: {html}"
+        );
+        assert!(!html.contains("/face/Bram"), "Bram was given a face");
+        assert!(
+            html.contains(r#"<span class="person-initial" aria-hidden="true">B<"#),
+            "Bram has no letter: {html}"
+        );
+    }
+
+    /// `/face/:name` renders a square crop, and answers a person with no face
+    /// with a bare 404 — an asset route, so no page of markup.
+    #[tokio::test]
+    async fn the_face_route_serves_a_square_crop_or_nothing() {
+        let f = people_fixture(&[
+            TestPerson {
+                name: "Ada",
+                faces: &[("ada.jpg", 100, 100, 120, 120)],
+                plain: &[],
+                icon: None,
+            },
+            TestPerson {
+                name: "Bram",
+                faces: &[],
+                plain: &["bram.jpg"],
+                icon: None,
+            },
+        ]);
+        let resp = get(&f.router, "/face/Ada").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/jpeg"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let img = image::load_from_memory(&bytes).expect("decode face crop");
+        assert_eq!(img.width(), img.height(), "crop is not square");
+
+        let missing = get(&f.router, "/face/Bram").await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert!(
+            body_string(missing).await.is_empty(),
+            "an asset route answered with a page"
+        );
+    }
+
+    /// A re-tagged face has to reach the visitor. The URL is stable, so the
+    /// cache filename is what changes — one hash over the photograph and the
+    /// rectangle, so a new pick cannot be served the old crop.
+    #[test]
+    fn a_different_face_is_a_different_cached_file() {
+        let a = thumbs::face_cache_name("Ada", "2024/one.jpg", (0, 0, 10, 10));
+        assert_eq!(a, thumbs::face_cache_name("Ada", "2024/one.jpg", (0, 0, 10, 10)));
+        assert_ne!(a, thumbs::face_cache_name("Ada", "2024/two.jpg", (0, 0, 10, 10)));
+        assert_ne!(a, thumbs::face_cache_name("Ada", "2024/one.jpg", (0, 0, 20, 20)));
+        // A name is a tag out of someone else's database; the filename it makes
+        // has to be one path segment whatever is in it.
+        let odd = thumbs::face_cache_name("../Ada Q", "2024/one.jpg", (0, 0, 10, 10));
+        assert!(!odd.contains('/') && !odd.contains(".."), "{odd}");
     }
 
     /// A fixture whose photos root carries a `digikam4.db` holding one

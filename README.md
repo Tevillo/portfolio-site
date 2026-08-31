@@ -114,7 +114,9 @@ box (which lands it at the root, beside `portfolio` and `People`) is enough.
 
 Constraints worth knowing:
 
-- Only photographs inside `photos/work/<job>/…` are considered.
+- Only photographs inside `photos/work/<job>/…` are considered. The tag does
+  nothing anywhere else; a person's tile on /people is chosen by digiKam's own
+  tag thumbnail instead — see "Faces on the People tab" below.
 - Only `.jpg`/`.jpeg`. A filename containing `hidden`, or anything under a
   `negative/` folder, is excluded — the same visibility filter the portfolio and
   People pages use. So a negative scan cannot be a cover even though it can be in
@@ -207,6 +209,7 @@ on demand and cached under `cache/`:
 | `thumbs` | 400px | `/browse`, `/people`, `/all` grids |
 | `medium` | 800px | second `srcset` candidate on natural-ratio grids |
 | `preview` | 1600px | delivery-page tiles, `/work` card covers, link previews |
+| `faces` | 320px square | `/people` tiles — a crop, not a downscale; keyed by person |
 | `wide` | 3200px | full-width portfolio panoramas only |
 
 `./portfolio-site warm` builds every missing rendition so the first visitor after
@@ -229,6 +232,52 @@ quarter hour. `WORK_AUTH_MAX_TRIES` and `WORK_AUTH_WINDOW_SECS` in
 Failures are counted in `data/logs/work-auth-failures.log` — job and timestamp,
 nothing identifying — which is both what the limit reads and what the owner's
 report means by "is someone guessing at this job".
+
+### Faces on the People tab
+
+`/people` is a tile per person, and the face on it comes from digiKam's own face
+rectangles — the boxes it drew and you confirmed a name for.
+
+Which of a person's faces gets used:
+
+1. **Their tag thumbnail.** In digiKam, right-click the face you want and
+   *Set as Tag Thumbnail*. That is the deliberate pick, it is one per person,
+   and it is set in the same window where the faces are confirmed.
+2. Otherwise the **biggest** face rectangle they have. The crop is enlarged from
+   it, so the face with the most pixels is the one that survives being a tile.
+
+So there is nothing to set up: confirming faces is enough to fill the page, and
+setting a tag thumbnail is how you overrule the automatic pick for one person.
+Either way it needs `./update_db.sh` before the site sees it.
+
+**Set the tag thumbnail on a JPEG.** Only `.jpg`/`.jpeg` can be rendered, so a
+tag thumbnail set on a TIFF or a RAW is an error and shows as a broken tile — it
+is not quietly swapped for the JPEG beside it, and it does not quietly fall back
+to another face. Both would hide a five-second fix behind a page that looks
+right. `./portfolio-site warm` names every person in that state:
+
+```
+  FAILED face for Guin: …/zoo-4thJuly-13.tif is not a .jpg/.jpeg, and only
+  those can be rendered — set the tag thumbnail on the JPEG instead
+```
+
+It happens easily: a face gets confirmed on whichever copy was open at the time,
+and for a scan that is often the TIFF. Re-setting it on the JPEG beside it is
+the whole fix.
+
+Same visibility rules as everywhere else — nothing under a `negative/` folder,
+nothing with `hidden` in the name — so a person's tile can never show a frame
+the site would not publish.
+
+A person with no confirmed face anywhere, and no tag thumbnail, gets their
+initial in a plain disc rather than a photograph they merely appear in.
+
+Crops are cached under `cache/faces/` and served from `/face/<person>`. They are
+built by `./portfolio-site warm` along with everything else, and `warm --prune`
+deletes the ones the database has stopped asking for — which includes the old
+crop of a face you have since replaced. A visitor whose browser already has the
+old crop keeps it for up to an hour; the URL is per person and does not change
+when the pick does.
 
 ### Indexing
 
@@ -256,7 +305,7 @@ anything the site reads: `portfolio/*`, People, or a job's `thumbnail`.
 ```
 photos/          the archive (sibling of this checkout)
 ├── work/        client jobs
-└── digikam4.db  tags: portfolio, People, thumbnail
+└── digikam4.db  tags: portfolio, People (faces + tag thumbnails), thumbnail
 cache/           renditions and prebuilt zips — disposable
 data/            subscriber logs and API credentials — not disposable
 ```

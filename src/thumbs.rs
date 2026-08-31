@@ -202,6 +202,210 @@ pub async fn ensure_thumb(
     })
 }
 
+/// Edge of a face crop, in pixels.
+///
+/// The tile renders at ~150 CSS px, so this covers a 2x screen with a little
+/// room and nothing more. It is a ceiling and not a target: a crop is never
+/// enlarged past its own pixels, so a small face in a wide frame produces a
+/// small file rather than a blurred large one.
+pub const FACE_SIZE: u32 = 320;
+
+/// How much wider than the face rectangle the square crop is cut.
+///
+/// digiKam's rectangle is the face alone — hairline to chin, ear to ear — and a
+/// tile cut to exactly that reads as a specimen rather than a portrait. Half
+/// again on each axis puts hair, chin and a little of the shoulders back in,
+/// which is the framing a face is recognised at.
+const FACE_PAD: f64 = 1.6;
+
+/// The square this face is cut from, as `(x, y, side)` in the photograph's
+/// oriented pixel space.
+///
+/// Square, because the tiles are a grid and a row of mixed shapes is a mess.
+/// Pure arithmetic on the dimensions, so the crop can be reasoned about (and
+/// tested) without decoding a photograph.
+///
+/// **A face near the edge of the frame gives up padding, not centring.** The
+/// padded square is first shrunk to the largest one that still centres on the
+/// face, and only a face so close to the edge that even its own rectangle will
+/// not centre gets shifted. Cutting the square short is what a tile wants:
+/// keeping the full padding and sliding it inwards instead puts the face
+/// against the rim of a round tile, which is the one place it must not be.
+/// Measured on a real one — Miguel's largest face is 557x721 in a 1412x2092
+/// frame, where the full 1154px square can only sit 258px from the left and
+/// leaves him hard against the right edge.
+///
+/// A square larger than the whole photograph shrinks to the short side.
+pub fn face_crop_box(rect: (u32, u32, u32, u32), (img_w, img_h): (u32, u32)) -> (u32, u32, u32) {
+    let (x, y, w, h) = rect;
+    let (cx, cy) = (x + w / 2, y + h / 2);
+
+    let want = ((w.max(h) as f64) * FACE_PAD).round() as u32;
+    // Largest square that fits inside the frame centred on the face: twice the
+    // distance to the nearest edge.
+    let centred = 2 * cx
+        .min(img_w.saturating_sub(cx))
+        .min(cy)
+        .min(img_h.saturating_sub(cy));
+    // ...but never smaller than the face itself. Below this the crop would be
+    // cutting into the thing it exists to show, so it shifts instead.
+    let floor = w.max(h);
+    let side = want.min(centred.max(floor)).clamp(1, img_w.min(img_h).max(1));
+
+    let origin = |c: u32, limit: u32| -> u32 {
+        c.saturating_sub(side / 2).min(limit.saturating_sub(side))
+    };
+    (origin(cx, img_w), origin(cy, img_h), side)
+}
+
+/// Ensure a fresh square crop of one face exists at `cache_root/faces/<name>`.
+///
+/// Keyed by `cache_name` rather than by the source path the way [`ensure_thumb`]
+/// is, because a face is not a rendition of a photograph: two people in one
+/// frame are two different crops of one file, and the same person's tile moves
+/// to a different file entirely the moment a better face is tagged. The caller
+/// mints the name from both halves — see [`face_cache_name`] — so a re-tag
+/// lands on a new path and the old crop is left for `warm --prune` rather than
+/// being served stale.
+pub async fn ensure_face(
+    source: &Path,
+    cache_root: &Path,
+    rect: (u32, u32, u32, u32),
+    cache_name: &str,
+) -> Result<ThumbInfo> {
+    // A hard failure, not a fallback. A tag thumbnail set on a TIFF or a RAW is
+    // a five-second fix in digiKam — set it on the JPEG instead — and the only
+    // way that fix gets made is if the site says so. Quietly substituting the
+    // JPEG beside it, or quietly dropping back to another face, would leave a
+    // page that looks right and a setup that is wrong.
+    if !is_renderable(source) {
+        anyhow::bail!(
+            "{} is not a .jpg/.jpeg, and only those can be rendered — \
+             set the tag thumbnail on the JPEG instead",
+            source.display(),
+        );
+    }
+    let cache_path = cache_root.join(FACE_SUBDIR).join(cache_name);
+
+    let source_meta = tokio::fs::metadata(source).await?;
+    let source_mtime = source_meta.modified()?;
+
+    // Same freshness rule as `ensure_thumb`: the crop is stale if the negative
+    // was rescanned under it. The *choice* of face needs no check — a different
+    // choice is a different `cache_name`.
+    let needs_rebuild = match tokio::fs::metadata(&cache_path).await {
+        Ok(m) => match m.modified() {
+            Ok(face_mtime) => face_mtime < source_mtime,
+            Err(_) => true,
+        },
+        Err(_) => true,
+    };
+
+    if needs_rebuild {
+        if let Some(parent) = cache_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let src = source.to_path_buf();
+        let dst = cache_path.clone();
+        tokio::task::spawn_blocking(move || render_face(&src, &dst, rect))
+            .await
+            .context("face crop task panicked")??;
+    }
+
+    let final_meta = tokio::fs::metadata(&cache_path).await?;
+    Ok(ThumbInfo {
+        path: cache_path,
+        mtime: final_meta.modified()?,
+        size: final_meta.len(),
+        rebuilt: needs_rebuild,
+    })
+}
+
+/// Whether this is a file the renderer can decode at all. The `image` crate is
+/// built with the JPEG feature and nothing else, deliberately — the archive
+/// publishes JPEGs and the TIFFs and RAWs beside them are masters, not pages.
+fn is_renderable(source: &Path) -> bool {
+    source
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+}
+
+/// Cache subdirectory the face crops live in. Not a [`ThumbKind`]: every kind
+/// there mirrors the photo tree path for path, and these are keyed by person.
+pub const FACE_SUBDIR: &str = "faces";
+
+/// Filename for one person's face crop: their name, then a hash of the exact
+/// photograph and rectangle it was cut from.
+///
+/// The hash is what makes a re-tag show up. The URL is `/face/<person>` and
+/// never changes, so without it a new pick would have to wait out the cached
+/// crop's hour; with it the handler simply computes a different filename and
+/// renders. The old file is then unreferenced, which is what `warm --prune`
+/// clears.
+///
+/// FNV-1a, inline, because this names a file in a disposable cache — the
+/// requirement is that the same input gives the same name within one build, not
+/// that the name is a cryptographic anything.
+pub fn face_cache_name(person: &str, rel: &str, rect: (u32, u32, u32, u32)) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    eat(rel.as_bytes());
+    for n in [rect.0, rect.1, rect.2, rect.3] {
+        eat(&n.to_le_bytes());
+    }
+
+    // A person's name is a tag in someone else's database and can hold anything
+    // a filesystem would rather it did not. Everything outside the safe set
+    // becomes `-`, and the hash is what actually keeps two people apart.
+    let slug: String = person
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("{slug}-{hash:016x}.jpg")
+}
+
+/// Crop `rect`'s padded square out of `src` and write it to `dst`.
+///
+/// Orientation is applied *before* the crop, unlike [`render_thumb`], which
+/// applies it after: digiKam's rectangle is in oriented space, so cropping the
+/// raw pixels would cut the wrong part of a rotated frame — see
+/// [`crate::people::FaceRect`].
+fn render_face(src: &Path, dst: &Path, rect: (u32, u32, u32, u32)) -> Result<()> {
+    let src_bytes = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+
+    let img = ImageReader::new(Cursor::new(&src_bytes))
+        .with_guessed_format()
+        .with_context(|| format!("guessing format for {}", src.display()))?
+        .decode()
+        .with_context(|| format!("decoding {}", src.display()))?;
+    let oriented = apply_orientation(img, read_exif_orientation(&src_bytes));
+
+    let (x, y, side) = face_crop_box(rect, (oriented.width(), oriented.height()));
+    let face = oriented
+        .crop_imm(x, y, side, side)
+        .thumbnail(FACE_SIZE, FACE_SIZE);
+
+    let mut bytes = Vec::new();
+    face.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+        .with_context(|| format!("encoding face crop for {}", src.display()))?;
+    let final_bytes = splice_icc_profile(&bytes, &src_bytes)
+        .with_context(|| format!("splicing ICC profile for {}", src.display()))?;
+
+    write_atomic(dst, &final_bytes)
+}
+
 fn render_thumb(src: &Path, dst: &Path, max_dim: u32) -> Result<()> {
     let src_bytes =
         std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
@@ -222,13 +426,22 @@ fn render_thumb(src: &Path, dst: &Path, max_dim: u32) -> Result<()> {
     let final_bytes = splice_icc_profile(&thumb_bytes, &src_bytes)
         .with_context(|| format!("splicing ICC profile for {}", src.display()))?;
 
-    let parent = dst.parent().context("thumb dst has no parent")?;
-    let file_name = dst.file_name().context("thumb dst has no file name")?;
+    write_atomic(dst, &final_bytes)
+}
+
+/// Write `bytes` to `dst` through a temp file in the same directory.
+///
+/// The rename is what makes a rendition safe to build against a live server:
+/// a request either finds no file or finds a complete one, never the half of
+/// one a crashed render left behind. Same rule the work zips are built by.
+fn write_atomic(dst: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = dst.parent().context("rendition dst has no parent")?;
+    let file_name = dst.file_name().context("rendition dst has no file name")?;
     let mut tmp = parent.to_path_buf();
     tmp.push(format!(".{}.tmp", file_name.to_string_lossy()));
 
-    std::fs::write(&tmp, &final_bytes)
-        .with_context(|| format!("writing tmp thumb {}", tmp.display()))?;
+    std::fs::write(&tmp, bytes)
+        .with_context(|| format!("writing tmp rendition {}", tmp.display()))?;
     std::fs::rename(&tmp, dst)
         .with_context(|| format!("renaming {} -> {}", tmp.display(), dst.display()))?;
     Ok(())

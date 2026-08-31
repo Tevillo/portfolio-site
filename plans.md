@@ -50,34 +50,13 @@ the bottom — so nothing about the page is waiting on a decision any more. It
 still opens "Self hosting enjoyer", which no longer matches the home page
 tagline, and there is no `about.jpg` yet.
 
-## Work pages
-
-**Make `/work` more professional.** It is the page a client lands on from a link
-I sent them, and it is currently one bordered card carrying a folder slug and a
-file count — a directory listing wearing a border. `frontend-audit.md` items 7
-and 9 measure what is actually there.
-
-Undecided, and it is really two decisions that keep getting made as one:
-
-- **What a job presents.** Cover photo, client-facing title, date, one card per
-  job. The cover can come from the job's `favs/` and needs no new data model.
-  The title is copy, so it is mine.
-- **What the handover feels like.** The password gate, the download buttons, and
-  what a client sees after clicking one. This is the half that really is a
-  delivery portal, and it can be plain without being unprofessional.
-
-Presentation is the cheaper one to settle first: it changes what the page is,
-and the handover has to sit inside whatever that turns out to be.
-
-## People tab
-
-**Covers on the People tab.** A tile per person — their photograph, their name,
-their count — instead of a list of names. The cover should be a photo I tag
-deliberately, not whatever sorts first.
+## Notifications
 
 **Let someone change their mind.** Saying "also tell me about Judy" or "stop
 telling me about Guin" currently means declaring the whole list again from
-memory, and getting one name wrong silently drops the rest.
+memory, and getting one name wrong silently drops the rest. This sat under
+"People tab" while the tab was still being built; it is a /notify job and
+nothing on /people is waiting on it.
 
 ## Programming projects page
 

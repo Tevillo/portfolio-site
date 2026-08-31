@@ -709,25 +709,8 @@ pub async fn people_index(State(state): State<AppState>) -> Response {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let entries: Vec<PersonEntry> = people_list
-        .into_iter()
-        .map(|p| PersonEntry {
-            url: format!("/people/{}", encode_path(&p.name)),
-            name: p.name,
-            photo_count: p.photo_count,
-        })
-        .collect();
-    let crumbs = vec![
-        Crumb {
-            label: "Home".into(),
-            url: Some("/".into()),
-        },
-        Crumb {
-            label: "People".into(),
-            url: None,
-        },
-    ];
-    views::people_index_page("People", &crumbs, &entries).into_response()
+    let entries: Vec<PersonEntry> = people_list.into_iter().map(person_entry).collect();
+    views::people_index_page("People", &entries).into_response()
 }
 
 pub async fn person_photos(
@@ -871,6 +854,102 @@ async fn sort_person_photos(photos_root: &Path, photos: &mut [people::PersonPhot
     });
 }
 
+/// One row of the People page, and one row of the /notify form — the same
+/// values, since /notify is a list of the same people with checkboxes on it.
+///
+/// The face URL is `/face/<name>` and carries no photograph path: which frame a
+/// person's tile is cut from is a database answer that can change under a
+/// re-tag, and putting it in the URL would publish a path the page does not
+/// otherwise link. See [`face`].
+fn person_entry(p: people::Person) -> PersonEntry {
+    PersonEntry {
+        url: format!("/people/{}", encode_path(&p.name)),
+        face_url: p
+            .face
+            .as_ref()
+            .map(|_| format!("/face/{}", encode_path(&p.name))),
+        initial: person_initial(&p.name),
+        name: p.name,
+        photo_count: p.photo_count,
+    }
+}
+
+/// The letter shown in place of a face for someone digiKam has no confirmed
+/// face rectangle for. Empty when the name opens with something that has no
+/// uppercase form, which the tile then renders as a plain block.
+fn person_initial(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default()
+}
+
+/// `GET /face/:name` — the square face crop for one person's tile.
+///
+/// Addressed by person rather than by photograph because that is what the tile
+/// is: one face per person — their digiKam tag thumbnail, or their biggest
+/// confirmed face — and the page has no
+/// business knowing which frame it came out of. The pick is recomputed here per
+/// request, the same way every other page reads the database per request, so a
+/// re-tag in digiKam shows up as soon as `update_db.sh` has run.
+///
+/// A bare status rather than the 404 page, like the other asset routes: a
+/// client asking for a JPEG has no use for a page of markup.
+pub async fn face(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(db) = state.db_path().cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let people_list = match people::list_people(db).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = ?e, "listing people for a face failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    // No face is a 404 and not an error: three of the people on the page have
+    // no confirmed face anywhere in the archive, and their tiles link no image
+    // at all. A request for one is a stale page or a guess.
+    let Some(face) = people_list
+        .into_iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.face)
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let source = match safe_resolve(state.photos_root(), &face.rel).await {
+        Ok(p) => p,
+        Err(e) => return map_path_err(e).into_response(),
+    };
+    let rect = (face.rect.x, face.rect.y, face.rect.w, face.rect.h);
+    let cache_name = thumbs::face_cache_name(&name, &face.rel, rect);
+    let info = match thumbs::ensure_face(&source, state.cache_root(), rect, &cache_name).await {
+        Ok(i) => i,
+        Err(e) => {
+            // Named by person as well as by path: the fix is in digiKam, on
+            // that person's tag, and the path alone does not say whose tile is
+            // broken.
+            warn!(person = %name, source = %source.display(), error = ?e, "face crop failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let etag = build_etag(info.mtime, info.size);
+    if matches_etag(&headers, &etag) {
+        return not_modified(&etag);
+    }
+    match tokio::fs::read(&info.path).await {
+        Ok(bytes) => image_response(bytes, &etag),
+        Err(e) => {
+            warn!(path = %info.path.display(), error = %e, "face read failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 fn people_unavailable_response() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -922,14 +1001,7 @@ async fn person_entries(state: &AppState) -> Result<Vec<PersonEntry>, Response> 
         None => return Err(people_unavailable_response()),
     };
     match people::list_people(db).await {
-        Ok(list) => Ok(list
-            .into_iter()
-            .map(|p| PersonEntry {
-                url: format!("/people/{}", encode_path(&p.name)),
-                name: p.name,
-                photo_count: p.photo_count,
-            })
-            .collect()),
+        Ok(list) => Ok(list.into_iter().map(person_entry).collect()),
         Err(e) => {
             warn!(error = ?e, "listing people for /notify failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR.into_response())
