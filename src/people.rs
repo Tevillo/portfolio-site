@@ -134,15 +134,19 @@ macro_rules! jpeg_name_filter {
         "(i.name LIKE '%.jpg' OR i.name LIKE '%.jpeg')"
     };
 }
-macro_rules! published_place_filter {
+macro_rules! outside_negatives_filter {
     () => {
         "
-        i.name NOT LIKE '%hidden%'
-        AND a.relativePath NOT LIKE '%/negative/%'
+        a.relativePath NOT LIKE '%/negative/%'
         AND a.relativePath NOT LIKE '%/negative'
         AND a.relativePath NOT LIKE '/negative/%'
         AND a.relativePath NOT LIKE '/negative'
         "
+    };
+}
+macro_rules! published_place_filter {
+    () => {
+        concat!("i.name NOT LIKE '%hidden%' AND ", outside_negatives_filter!())
     };
 }
 pub(crate) const PUBLISHED_PLACE_FILTER: &str = published_place_filter!();
@@ -171,6 +175,11 @@ const PERSON_TAG_FILTER: &str = "
 ";
 pub(crate) const VISIBLE_IMAGE_FILTER: &str =
     concat!(jpeg_name_filter!(), " AND ", published_place_filter!());
+/// A work job's cover: a JPEG outside any `negative/` folder, `hidden` name or
+/// not. A frame cropped for the card is named `hidden` precisely so it stays out
+/// of the job's gallery — see `work::is_hidden_name`.
+pub(crate) const COVER_IMAGE_FILTER: &str =
+    concat!(jpeg_name_filter!(), " AND ", outside_negatives_filter!());
 
 fn list_people_blocking(db_path: &Path) -> Result<Vec<Person>> {
     let conn = open_readonly(db_path)?;

@@ -136,7 +136,7 @@ fn list_sections_blocking(db_path: &Path) -> Result<Vec<Section>> {
 ///
 /// So: unrated, zero-star and missing-row all rank 0, and 1–5 stars rank above
 /// them in order.
-const STAR_RANK: &str = "MAX(COALESCE(ii.rating, 0), 0)";
+pub(crate) const STAR_RANK: &str = "MAX(COALESCE(ii.rating, 0), 0)";
 
 /// URL-safe identifier for a section, derived from its digiKam tag name.
 ///

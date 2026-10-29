@@ -3235,6 +3235,110 @@ mod tests {
         );
     }
 
+    /// A cover cropped for the card is named `hidden`: it renders on the card
+    /// and nowhere in the job itself — not its gallery, not its downloads.
+    #[tokio::test]
+    async fn a_hidden_cover_shows_on_the_card_and_not_in_the_job() {
+        let cover = "work/big-job/digital/edited/hidden-album-cover.jpg";
+        let f = work_sets_fixture_tagged(Some(&[(
+            "/work/big-job/digital/edited",
+            "hidden-album-cover.jpg",
+        )]));
+        for rel in [cover, "work/big-job/digital/edited/hidden-untagged.jpg"] {
+            image::RgbImage::from_pixel(900, 600, image::Rgb([90, 90, 90]))
+                .save(f.photos.join(rel))
+                .unwrap();
+        }
+
+        let index = body_string(get(&f.router, "/work").await).await;
+        assert!(
+            index.contains(&format!(r#"<img class="work-card-thumb" src="/preview/{cover}""#)),
+            "the hidden cover is not on the card: {index}"
+        );
+        assert_eq!(get(&f.router, &format!("/preview/{cover}")).await.status(), StatusCode::OK);
+
+        // The exception is the card's rendition of a tagged cover, nothing wider.
+        for uri in [
+            format!("/thumb/{cover}"),
+            format!("/image/{cover}"),
+            "/preview/work/big-job/digital/edited/hidden-untagged.jpg".to_string(),
+        ] {
+            assert_eq!(get(&f.router, &uri).await.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+
+        let gallery = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
+        for name in ["hidden-album-cover", "hidden-untagged"] {
+            assert!(!gallery.contains(name), "{name} reached the gallery: {gallery}");
+        }
+
+        let unlocked = post(&f.router, "/work/big-job/auth", "password=hunter2").await;
+        let cookie = unlocked
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .expect("auth issued a cookie")
+            .to_string();
+        let one = f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/work/big-job/file/digital/edited/hidden-album-cover.jpg")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(one.status(), StatusCode::NOT_FOUND, "the cover crop is downloadable");
+    }
+
+    /// A tab is ordered by digiKam's stars, highest first, as the portfolio is,
+    /// with filename order as the tie-break and the fallback.
+    #[tokio::test]
+    async fn work_tabs_put_the_highest_rated_photographs_first() {
+        let order = |html: &str| {
+            let one = html.find("digital_frame-01.jpg").expect("no frame 01");
+            let two = html.find("digital_frame-02.jpg").expect("no frame 02");
+            one < two
+        };
+
+        // No database: filename order.
+        let f = work_sets_fixture();
+        let html = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
+        assert!(order(&html), "unrated frames out of filename order: {html}");
+
+        // Frame 02 rated, frame 01 never rated: 02 leads.
+        let f = work_sets_fixture_tagged(Some(&[]));
+        let conn = rusqlite::Connection::open(f.photos.join("digikam4.db")).unwrap();
+        conn.execute_batch(
+            "
+            INSERT INTO Albums (id, relativePath) VALUES
+                (1, '/work/big-job/digital/edited'),
+                (2, '/work/big_job/digital/edited');
+            INSERT INTO Images (id, album, name, status) VALUES
+                (1, 1, 'digital_frame-01.jpg', 1),
+                (2, 1, 'digital_frame-02.jpg', 1),
+                (3, 2, 'digital_frame-01.jpg', 1),
+                (4, 1, 'digital_frame-01.jpg', 3);
+            INSERT INTO ImageInformation (imageid, rating) VALUES
+                (1, -1), (2, 3), (3, 5), (4, 5);
+            ",
+        )
+        .unwrap();
+        let html = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
+        assert!(!order(&html), "the rated frame did not lead: {html}");
+
+        // A higher rating on another job's file, or on a row digiKam keeps for
+        // a file it lost, does not lift frame 01 back above it.
+        conn.execute("UPDATE ImageInformation SET rating = 3 WHERE imageid = 1", [])
+            .unwrap();
+        let html = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
+        assert!(order(&html), "a tie did not fall back to filename order: {html}");
+    }
+
     /// `?set=` picks the gallery, and an unknown slug falls back to the first
     /// set rather than 404ing — a client following a stale link should get their
     /// photographs, not an error.

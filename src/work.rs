@@ -8,17 +8,17 @@ use std::collections::HashMap;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-/// Extensions we treat as "raw" deliverables. Camera raws plus layered
-/// edit masters (PSD/PSB) — for photographers, the .psd next to a
-/// retouched .jpg is the source-of-truth file the client wants alongside
-/// the export. Anything else (sidecars like .xmp, .DS_Store, etc) is
+/// Extensions we treat as "raw" deliverables. Camera raws plus edit and
+/// scan masters (PSD/PSB/TIFF) — for photographers, the .psd or .tif next
+/// to a retouched .jpg is the source-of-truth file the client wants
+/// alongside the export. Anything else (sidecars like .xmp, .DS_Store, etc) is
 /// ignored when building the raw archive.
 const RAW_EXTS: &[&str] = &[
     // Camera raws
     "cr2", "cr3", "nef", "nrw", "arw", "raf", "dng", "orf", "rw2", "pef", "srw", "x3f", "raw",
     "rwl", "iiq", "3fr",
-    // Layered edit masters
-    "psd", "psb",
+    // Edit and scan masters
+    "psd", "psb", "tif", "tiff",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -194,7 +194,7 @@ pub const THUMB_TAG: &str = "thumbnail";
 /// excluded from the galleries, the counts and the archives.
 ///
 /// The RAW alongside the JPEG can carry the tag too and is simply not selected:
-/// `VISIBLE_IMAGE_FILTER` keeps this to `.jpg`/`.jpeg`, so a pair tagged
+/// `COVER_IMAGE_FILTER` keeps this to `.jpg`/`.jpeg`, so a pair tagged
 /// together in digiKam yields the JPEG and nothing else.
 ///
 /// A job with several tagged photographs gets the first by album then filename,
@@ -210,12 +210,16 @@ pub async fn list_thumbnails(db_path: PathBuf) -> Result<HashMap<String, String>
 }
 
 fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
-    use crate::people::{VISIBLE_IMAGE_FILTER, combine_rel, open_readonly};
+    use crate::people::{COVER_IMAGE_FILTER, combine_rel, open_readonly};
 
     let conn = open_readonly(db_path)?;
     // `i.status = 1` for the same reason the portfolio query needs it: digiKam
     // keeps a row for a file it can no longer find so the tags survive a move,
     // and reading those back would point a card at a path that is not there.
+    //
+    // `COVER_IMAGE_FILTER` rather than `VISIBLE_IMAGE_FILTER`: a cover is
+    // allowed a `hidden` name, which is how a crop made only for the card stays
+    // out of the job's own gallery. See `is_hidden_name`.
     let sql = format!(
         "
         SELECT a.relativePath, i.name
@@ -226,7 +230,7 @@ fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
         WHERE t.name = '{THUMB_TAG}' COLLATE NOCASE
           AND i.status = 1
           AND (a.relativePath = '/work' OR a.relativePath LIKE '/work/%')
-          AND {VISIBLE_IMAGE_FILTER}
+          AND {COVER_IMAGE_FILTER}
         ORDER BY a.relativePath, i.name COLLATE NOCASE ASC
         "
     );
@@ -244,6 +248,57 @@ fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
         // First wins: the query is ordered, so which one that is does not move
         // between requests.
         out.entry(job).or_insert_with(|| combine_rel(&album, &file));
+    }
+    Ok(out)
+}
+
+/// Star rating of every photograph in one job, as path relative to the photos
+/// root → stars, for ordering the job's tabs the way the portfolio is ordered.
+///
+/// Like the cover, a garnish read from the tag database on top of a filesystem
+/// feature: the caller treats a missing or unreadable database as "no ratings"
+/// and the page falls back to filename order. Ratings go through
+/// [`crate::portfolio::STAR_RANK`], so unrated and zero-star photographs both
+/// rank 0.
+pub async fn list_ratings(db_path: PathBuf, job: String) -> Result<HashMap<String, i64>> {
+    tokio::task::spawn_blocking(move || list_ratings_blocking(&db_path, &job))
+        .await
+        .context("work rating listing task panicked")?
+}
+
+fn list_ratings_blocking(db_path: &Path, job: &str) -> Result<HashMap<String, i64>> {
+    use crate::people::{combine_rel, open_readonly};
+    use crate::portfolio::STAR_RANK;
+
+    let conn = open_readonly(db_path)?;
+    let album = format!("/work/{job}");
+    // A job name may contain `_`, which LIKE would read as a wildcard and let
+    // `big_job` pick up `/work/bigXjob/...`.
+    let escaped = album.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    // `i.status = 1` for the same reason as the covers: a row digiKam keeps for
+    // a moved file would otherwise rate a path under its old name.
+    let sql = format!(
+        "
+        SELECT a.relativePath, i.name, {STAR_RANK}
+        FROM Images i
+        JOIN Albums a ON a.id = i.album
+        LEFT JOIN ImageInformation ii ON ii.imageid = i.id
+        WHERE i.status = 1
+          AND (a.relativePath = ?1 OR a.relativePath LIKE ?2 ESCAPE '\\')
+        "
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params![album, format!("{escaped}/%")], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (album, file, stars) = row?;
+        out.insert(combine_rel(&album, &file), stars);
     }
     Ok(out)
 }
@@ -305,9 +360,10 @@ fn list_work_blocking(photos_root: &Path) -> Result<Vec<WorkSummary>> {
     Ok(out)
 }
 
-/// Recursively count JPEG and RAW files anywhere under `dir`. Hidden files
-/// (dotfiles) are skipped; other dir names are walked unconditionally — the
-/// `hidden`/`negative` conventions used elsewhere do not apply to work.
+/// Recursively count JPEG and RAW files anywhere under `dir`. Dotfiles and
+/// `hidden` names are skipped, as in every walk of a job — see
+/// [`is_hidden_name`]; directory names are walked unconditionally, so the
+/// `negative` convention used elsewhere does not apply to work.
 fn count_files_recursive(dir: &Path) -> (u32, u32) {
     let mut jpeg = 0u32;
     let mut raw = 0u32;
@@ -322,7 +378,7 @@ fn count_files_recursive(dir: &Path) -> (u32, u32) {
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if name.starts_with('.') {
+            if name.starts_with('.') || is_hidden_name(&name) {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -377,7 +433,7 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if fname.starts_with('.') {
+            if fname.starts_with('.') || is_hidden_name(&fname) {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -591,6 +647,15 @@ pub fn is_raw_name(name: &str) -> bool {
     has_ext(name, RAW_EXTS)
 }
 
+/// A file with `hidden` in its name is not part of a job's delivery: not in its
+/// gallery, its counts, its archives or its per-file downloads. It exists for
+/// the job's cover — a frame cropped to suit the `/work` card, which the client
+/// should not then find among their photographs. Same rule as the rest of the
+/// site, see `handlers::is_hidden`.
+pub fn is_hidden_name(name: &str) -> bool {
+    crate::handlers::is_hidden(name)
+}
+
 fn has_ext(name: &str, exts: &[&str]) -> bool {
     let ext = match Path::new(name).extension().and_then(|e| e.to_str()) {
         Some(e) => e,
@@ -687,7 +752,7 @@ fn collect_sources(
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if name.starts_with('.') {
+            if name.starts_with('.') || is_hidden_name(&name) {
                 continue;
             }
             let ft = entry.file_type()?;
@@ -789,6 +854,8 @@ mod tests {
         assert!(is_raw_name("a.dng"));
         assert!(is_raw_name("a.psd")); // edit master ships as the "raw"
         assert!(is_raw_name("a.PSB"));
+        assert!(is_raw_name("a.tif")); // scan/edit master, same as a PSD
+        assert!(is_raw_name("a.TIFF"));
         assert!(!is_raw_name("a.xmp")); // sidecar, not a deliverable
         assert!(!is_raw_name("a.txt"));
         assert!(!is_raw_name("a.jpg"));

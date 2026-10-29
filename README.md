@@ -69,10 +69,15 @@ negative" rather than colliding with its sibling. To change what is dropped, edi
 
 JPEGs at the job root are browsable too, under a tab named after the job.
 
+Within a tab, photographs are ordered by their digiKam star rating, highest
+first — the same ranking the portfolio uses — then by filename. Unrated counts
+as zero stars. Ratings come from the database, so they need `./update_db.sh`
+before the page reflects them; with no database the order is plain filename.
+
 **What counts as a file.** JPEGs are `.jpg`/`.jpeg`. RAWs are `cr2 cr3 nef nrw
-arw raf dng orf rw2 pef srw x3f raw rwl iiq 3fr`, plus `psd`/`psb` — a layered
-master is the source-of-truth file a client wants next to a retouched export, so
-it ships in the RAW archive. Anything else (sidecars, `.DS_Store`) is ignored
+arw raf dng orf rw2 pef srw x3f raw rwl iiq 3fr`, plus `psd`/`psb` and
+`tif`/`tiff` — a layered or scan master is the source-of-truth file a client
+wants next to a retouched export, so it ships in the RAW archive. Anything else (sidecars, `.DS_Store`) is ignored
 everywhere. Dotfiles are skipped, which is why `.password` never lands in an
 archive.
 
@@ -117,10 +122,14 @@ Constraints worth knowing:
 - Only photographs inside `photos/work/<job>/…` are considered. The tag does
   nothing anywhere else; a person's tile on /people is chosen by digiKam's own
   tag thumbnail instead — see "Faces on the People tab" below.
-- Only `.jpg`/`.jpeg`. A filename containing `hidden`, or anything under a
-  `negative/` folder, is excluded — the same visibility filter the portfolio and
-  People pages use. So a negative scan cannot be a cover even though it can be in
-  the job.
+- Only `.jpg`/`.jpeg`, and nothing under a `negative/` folder — so a negative
+  scan cannot be a cover even though it can be in the job.
+- **A cover cropped just for the card: put `hidden` in its filename**, e.g.
+  `hidden-album-cover.jpg`, and tag it `thumbnail`. It renders on the `/work`
+  card and nowhere in the job — a `hidden` file is left out of the job's
+  gallery, its counts, its archives and its per-file downloads. Only the card's
+  preview of a tagged cover is served; an untagged `hidden` file stays
+  unreachable.
 - Photographs digiKam has lost track of (status 3 — the row it keeps so tags
   survive a move) are ignored, so a card never points at a path that is gone.
 - Tagging several in one job picks the first by album then filename. Tag one.

@@ -1686,6 +1686,28 @@ pub async fn wide(
     render_thumb_response(&state, &rel, &headers, ThumbKind::Wide).await
 }
 
+/// The one exception to hidden files being unreachable: a work job's cover,
+/// at the preview size the `/work` card asks for. A frame cropped for the card
+/// is named `hidden` to keep it out of the job's gallery, and it still has to
+/// render on the card. Only the database's `thumbnail` picks qualify, so naming
+/// a file `hidden` alone never publishes it. Checked only once the name is
+/// already hidden, so ordinary renditions never touch the database.
+async fn is_hidden_work_cover(state: &AppState, rel: &str, kind: ThumbKind) -> bool {
+    if !matches!(kind, ThumbKind::Preview) {
+        return false;
+    }
+    let Some(db) = state.db_path() else {
+        return false;
+    };
+    match work::list_thumbnails(db.clone()).await {
+        Ok(covers) => covers.values().any(|c| c == rel),
+        Err(e) => {
+            warn!(error = ?e, "listing work thumbnails failed");
+            false
+        }
+    }
+}
+
 async fn render_thumb_response(
     state: &AppState,
     rel: &str,
@@ -1696,7 +1718,8 @@ async fn render_thumb_response(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    if !is_jpeg(rel) || rel_filename_is_hidden(rel) {
+    let hidden = rel_filename_is_hidden(rel) && !is_hidden_work_cover(state, rel, kind).await;
+    if !is_jpeg(rel) || hidden {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -1762,18 +1785,12 @@ pub(crate) fn is_jpeg(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Extensions offered as the "RAW" download beside a gallery photo. This is
-/// work's raw/edit-master set (camera raws + PSD/PSB) plus TIFF, which film
-/// scans and edit masters ship as alongside the JPEG here (the `positive`
-/// folders pair `*.jpg` with `*.tif`). Kept distinct from `work::is_raw_name`
-/// so the work-item zip logic is unaffected.
+/// Extensions offered as the "RAW" download beside a gallery photo: work's
+/// raw/edit-master set (camera raws, PSD/PSB, and TIFF — film scans and edit
+/// masters ship as TIFF alongside the JPEG, e.g. the `positive` folders pair
+/// `*.jpg` with `*.tif`).
 fn is_raw_download_name(name: &str) -> bool {
     work::is_raw_name(name)
-        || Path::new(name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"))
-            .unwrap_or(false)
 }
 
 /// Lowercased file stem (basename without its final extension), used to pair a
@@ -2113,6 +2130,23 @@ async fn render_work_page(
             photos: s.photos,
         });
     }
+    // Within each tab, stars highest first, as the portfolio is ordered. The
+    // sort is stable, so `read_work`'s filename order is the tie-break — and the
+    // whole order whenever the database is missing or has no ratings.
+    let ratings = match state.db_path() {
+        Some(db) => match work::list_ratings(db.clone(), name.to_string()).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = ?e, "listing work ratings failed");
+                std::collections::HashMap::new()
+            }
+        },
+        None => std::collections::HashMap::new(),
+    };
+    for s in &mut sets {
+        s.photos
+            .sort_by_key(|p| std::cmp::Reverse(ratings.get(&p.rel).copied().unwrap_or(0)));
+    }
     assign_set_slugs(&mut sets);
     // The requested tab, or the first — which `read_work` has already sorted to
     // be the job-root section if there is one, then `edited` ahead of its
@@ -2373,9 +2407,12 @@ pub async fn work_file_download(
     if !is_valid_work_subpath(&subpath) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    // Only allow the extensions a job page actually links to.
+    // Only allow the extensions a job page actually links to, and nothing the
+    // job keeps out of its delivery (a cover crop named `hidden`).
     let basename = subpath.rsplit('/').next().unwrap_or("");
-    if !(work::is_jpeg_name(basename) || work::is_raw_name(basename)) {
+    if !(work::is_jpeg_name(basename) || work::is_raw_name(basename))
+        || work::is_hidden_name(basename)
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
 
