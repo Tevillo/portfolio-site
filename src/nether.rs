@@ -410,35 +410,27 @@ struct GraphNode {
 impl GraphData {
     /// Serialize to a compact JSON object: `{nodes:[{id,label,url,deg}], edges:[[i,j]]}`.
     /// Edges reference nodes by array index to keep the payload small.
+    ///
+    /// `<` is escaped so the payload is safe to embed inside a `<script>` tag;
+    /// in serialized JSON it can only occur inside a string, where `<`
+    /// means the same thing.
     fn to_json(&self) -> String {
         let mut degree = vec![0u32; self.nodes.len()];
         for &(a, b) in &self.edges {
             degree[a] += 1;
             degree[b] += 1;
         }
-        let mut out = String::from("{\"nodes\":[");
-        for (i, n) in self.nodes.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            let _ = write!(
-                out,
-                "{{\"id\":{},\"label\":{},\"url\":{},\"deg\":{}}}",
-                json_str(&n.id),
-                json_str(&n.label),
-                json_str(&n.url),
-                degree[i],
-            );
-        }
-        out.push_str("],\"edges\":[");
-        for (i, &(a, b)) in self.edges.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            let _ = write!(out, "[{a},{b}]");
-        }
-        out.push_str("]}");
-        out
+        let nodes: Vec<_> = self
+            .nodes
+            .iter()
+            .zip(degree)
+            .map(|(n, deg)| {
+                serde_json::json!({ "id": n.id, "label": n.label, "url": n.url, "deg": deg })
+            })
+            .collect();
+        serde_json::json!({ "nodes": nodes, "edges": self.edges })
+            .to_string()
+            .replace('<', "\\u003c")
     }
 }
 
@@ -504,28 +496,6 @@ fn resolve_links(src: &str, index: &HashMap<String, String>) -> Vec<String> {
     out
 }
 
-/// Escape a string as a JSON string literal, including the surrounding quotes.
-/// `<` is escaped so the payload is safe to embed inside a `<script>` tag.
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '<' => out.push_str("\\u003c"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
 
 /// Escape characters that would break markdown link text.
 fn escape_link_text(s: &str) -> String {
@@ -720,6 +690,26 @@ mod tests {
             resolve_media(RECIPE_DIR, "../../../../nether/Home/card.png"),
             None
         );
+    }
+
+    #[test]
+    fn graph_json_is_script_safe_and_counts_degree() {
+        let node = |id: &str| GraphNode {
+            id: id.to_string(),
+            label: format!("{id} \"</script>"),
+            url: format!("/nether/{id}"),
+        };
+        let data = GraphData {
+            nodes: vec![node("a"), node("b"), node("c")],
+            edges: vec![(0, 1), (0, 2)],
+        };
+        let json = data.to_json();
+        assert!(!json.contains('<'), "{json}");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["nodes"][0]["label"], "a \"</script>");
+        assert_eq!(v["nodes"][0]["deg"], 2);
+        assert_eq!(v["nodes"][2]["deg"], 1);
+        assert_eq!(v["edges"], serde_json::json!([[0, 1], [0, 2]]));
     }
 
     #[test]
