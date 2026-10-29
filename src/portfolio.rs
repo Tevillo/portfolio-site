@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 // (2025/homage/, work/…/edited/, …). Hence the same tag database the People
 // pages read, rather than a walk of `photos/portfolio/` — that folder still
 // exists but has been emptied, so the tags are now the only source of truth.
-use crate::people::{VISIBLE_IMAGE_FILTER, combine_rel, open_readonly};
+use crate::paths::join_rel;
+use crate::people::{VISIBLE_IMAGE_FILTER, open_readonly};
 
 /// One direct child of the root `portfolio` tag (e.g. `portfolio/pastel`) and
 /// the photos carrying it. Renders as one page of the portfolio.
@@ -101,7 +102,7 @@ fn list_sections_blocking(db_path: &Path) -> Result<Vec<Section>> {
             });
             seen.clear();
         }
-        let rel = combine_rel(&album_rel, &name);
+        let rel = join_rel(&album_rel, &name);
         if !seen.insert(rel.clone()) {
             continue;
         }

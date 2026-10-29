@@ -67,6 +67,55 @@ pub fn leading_year(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// True when `name`'s extension is one of `exts`, ignoring case.
+pub fn has_ext(name: &str, exts: &[&str]) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| exts.iter().any(|w| ext.eq_ignore_ascii_case(w)))
+}
+
+pub fn is_jpeg(name: &str) -> bool {
+    has_ext(name, &["jpg", "jpeg"])
+}
+
+/// A file is "hidden" if its basename contains the substring "hidden"
+/// (case-insensitive). Applied on top of the .jpg/.jpeg filter everywhere —
+/// browse, `/all`, people, and a work job's gallery, counts, archives and
+/// per-file downloads. In work it is how a cover cropped for the `/work` card
+/// stays out of the job; see `handlers::is_hidden_work_cover`.
+pub fn is_hidden(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("hidden")
+}
+
+/// Directories the lister and subtree scanners should pretend don't exist.
+pub fn is_skipped_dir(name: &str) -> bool {
+    name.eq_ignore_ascii_case("negative")
+}
+
+/// A JPEG the site will show: the filter every photo listing and walk applies.
+pub fn is_visible_photo(name: &str) -> bool {
+    is_jpeg(name) && !is_hidden(name)
+}
+
+/// Forward-slash parent of a relative path, or "" for a file at the top.
+/// "digital/file.jpg" -> "digital"; "flat.jpg" -> "".
+pub fn parent_rel(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+/// `parent/child`, or just `child` when `parent` is empty. Slashes around
+/// `parent` are trimmed, so digiKam's `/2024/roll` album paths join the same
+/// way as the site's own `2024/roll` relative paths.
+pub fn join_rel(parent: &str, child: &str) -> String {
+    let parent = parent.trim_matches('/');
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}/{child}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +158,30 @@ mod tests {
         assert_eq!(leading_year(""), None);
         // Long enough to overflow a u32, so it is not a year.
         assert_eq!(leading_year("99999999999999999999"), None);
+    }
+
+    #[test]
+    fn jpeg_detection() {
+        assert!(is_jpeg("IMG_0001.JPG"));
+        assert!(is_jpeg("foo.jpeg"));
+        assert!(!is_jpeg("foo.cr3"));
+        assert!(!is_jpeg("foo"));
+        assert!(!is_visible_photo("hidden-album-cover.jpg"));
+    }
+
+    #[test]
+    fn parent_and_join_are_inverse() {
+        assert_eq!(parent_rel("digital/file.jpg"), "digital");
+        assert_eq!(
+            parent_rel("film/medium-format/positive/x.jpg"),
+            "film/medium-format/positive"
+        );
+        assert_eq!(parent_rel("flat.jpg"), "");
+        assert_eq!(join_rel("", "flat.jpg"), "flat.jpg");
+        assert_eq!(join_rel("/2024/roll/", "a.jpg"), "2024/roll/a.jpg");
+        assert_eq!(
+            join_rel(parent_rel("2024/roll/a.jpg"), "a.cr3"),
+            "2024/roll/a.cr3"
+        );
     }
 }

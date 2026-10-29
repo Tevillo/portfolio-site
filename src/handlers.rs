@@ -12,7 +12,10 @@ use tracing::warn;
 
 use crate::audit;
 use crate::work::{self, DownloadKind, Scope};
-use crate::paths::{PathError, leading_year, safe_resolve};
+use crate::paths::{
+    PathError, is_hidden, is_jpeg, is_skipped_dir, is_visible_photo, join_rel, leading_year,
+    parent_rel, safe_resolve,
+};
 use crate::people;
 use crate::portfolio;
 use crate::notify;
@@ -524,9 +527,9 @@ async fn render_dir(
                 continue;
             }
             candidate_subdirs.push((name, rel_child, entry.path()));
-        } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+        } else if ftype.is_file() && is_visible_photo(&name) {
             jpegs.push((name, rel_child));
-        } else if ftype.is_file() && is_raw_download_name(&name) {
+        } else if ftype.is_file() && work::is_raw_name(&name) {
             raw_by_stem.insert(file_stem_lower(&name), name);
         }
     }
@@ -628,9 +631,9 @@ async fn read_dir_images(root: &Path, rel: &str) -> Vec<ImageEntry> {
             Ok(t) => t,
             Err(_) => continue,
         };
-        if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+        if ftype.is_file() && is_visible_photo(&name) {
             jpegs.push((name.clone(), join_rel(rel, &name)));
-        } else if ftype.is_file() && is_raw_download_name(&name) {
+        } else if ftype.is_file() && work::is_raw_name(&name) {
             raw_by_stem.insert(file_stem_lower(&name), name);
         }
     }
@@ -686,7 +689,7 @@ pub(crate) async fn subtree_has_jpeg(root: &Path) -> bool {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+            if ftype.is_file() && is_visible_photo(&name) {
                 return true;
             }
             if ftype.is_dir() && !is_skipped_dir(&name) {
@@ -1370,9 +1373,9 @@ async fn walk_groups(
                     continue;
                 }
                 child_dirs.push((entry.path(), rel_child));
-            } else if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+            } else if ftype.is_file() && is_visible_photo(&name) {
                 jpegs.push((name, rel_child));
-            } else if ftype.is_file() && is_raw_download_name(&name) {
+            } else if ftype.is_file() && work::is_raw_name(&name) {
                 raw_by_stem.insert(file_stem_lower(&name), name);
             }
         }
@@ -1497,7 +1500,7 @@ async fn newest_subtree_mtime(dir: &Path) -> Option<u64> {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            if ftype.is_file() && is_jpeg(&name) && !is_hidden(&name) {
+            if ftype.is_file() && is_visible_photo(&name) {
                 files.push(entry.path());
             } else if ftype.is_dir() && !is_skipped_dir(&name) {
                 stack.push(entry.path());
@@ -1632,7 +1635,7 @@ pub async fn download(
         None => return StatusCode::NOT_FOUND.into_response(),
     };
     let is_jpeg_file = is_jpeg(basename);
-    if (!is_jpeg_file && !is_raw_download_name(basename)) || is_hidden(basename) {
+    if (!is_jpeg_file && !work::is_raw_name(basename)) || is_hidden(basename) {
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::metadata(&path).await {
@@ -1777,22 +1780,6 @@ fn map_path_err(e: PathError) -> StatusCode {
     }
 }
 
-pub(crate) fn is_jpeg(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
-        .unwrap_or(false)
-}
-
-/// Extensions offered as the "RAW" download beside a gallery photo: work's
-/// raw/edit-master set (camera raws, PSD/PSB, and TIFF — film scans and edit
-/// masters ship as TIFF alongside the JPEG, e.g. the `positive` folders pair
-/// `*.jpg` with `*.tif`).
-fn is_raw_download_name(name: &str) -> bool {
-    work::is_raw_name(name)
-}
-
 /// Lowercased file stem (basename without its final extension), used to pair a
 /// JPEG with a same-named raw sibling regardless of case, e.g. `Homer.JPG`
 /// matches `Homer.psd`.
@@ -1802,14 +1789,6 @@ fn file_stem_lower(name: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase()
-}
-
-/// Forward-slash parent of a root-relative path, or "" for a file at the root.
-fn parent_rel(rel: &str) -> &str {
-    match rel.rfind('/') {
-        Some(i) => &rel[..i],
-        None => "",
-    }
 }
 
 /// Read `dir_rel` (relative to the photos root) and return a map from each raw
@@ -1834,24 +1813,13 @@ async fn scan_raw_siblings(root: &Path, dir_rel: &str) -> HashMap<String, String
             continue;
         }
         match entry.file_type().await {
-            Ok(ft) if ft.is_file() && is_raw_download_name(&name) => {
+            Ok(ft) if ft.is_file() && work::is_raw_name(&name) => {
                 map.insert(file_stem_lower(&name), name);
             }
             _ => {}
         }
     }
     map
-}
-
-/// A file is "hidden" if its basename contains the substring "hidden"
-/// (case-insensitive). Applied on top of the .jpg/.jpeg filter.
-pub(crate) fn is_hidden(name: &str) -> bool {
-    name.to_ascii_lowercase().contains("hidden")
-}
-
-/// Directories the lister and subtree scanners should pretend don't exist.
-pub(crate) fn is_skipped_dir(name: &str) -> bool {
-    name.eq_ignore_ascii_case("negative")
 }
 
 /// The "work" directory at the photos root is reserved for the client-delivery
@@ -1867,15 +1835,6 @@ fn rel_filename_is_hidden(rel: &str) -> bool {
         .and_then(|s| s.to_str())
         .map(is_hidden)
         .unwrap_or(false)
-}
-
-fn join_rel(parent: &str, child: &str) -> String {
-    let p = parent.trim_end_matches('/');
-    if p.is_empty() {
-        child.to_string()
-    } else {
-        format!("{p}/{child}")
-    }
 }
 
 pub(crate) fn encode_path(s: &str) -> String {
@@ -2410,8 +2369,8 @@ pub async fn work_file_download(
     // Only allow the extensions a job page actually links to, and nothing the
     // job keeps out of its delivery (a cover crop named `hidden`).
     let basename = subpath.rsplit('/').next().unwrap_or("");
-    if !(work::is_jpeg_name(basename) || work::is_raw_name(basename))
-        || work::is_hidden_name(basename)
+    if !(is_jpeg(basename) || work::is_raw_name(basename))
+        || is_hidden(basename)
     {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -2425,7 +2384,7 @@ pub async fn work_file_download(
         Ok(p) => p,
         Err(e) => return map_path_err(e).into_response(),
     };
-    let mime = if work::is_jpeg_name(basename) {
+    let mime = if is_jpeg(basename) {
         "image/jpeg"
     } else {
         "application/octet-stream"

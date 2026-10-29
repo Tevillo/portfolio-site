@@ -618,10 +618,10 @@ pub(crate) async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
                 Err(_) => continue,
             };
             if ftype.is_dir() {
-                if !handlers::is_skipped_dir(&name) {
+                if !paths::is_skipped_dir(&name) {
                     stack.push(entry.path());
                 }
-            } else if ftype.is_file() && handlers::is_jpeg(&name) && !handlers::is_hidden(&name) {
+            } else if ftype.is_file() && paths::is_visible_photo(&name) {
                 out.push(entry.path());
             }
         }

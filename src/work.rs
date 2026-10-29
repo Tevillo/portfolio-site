@@ -1,5 +1,7 @@
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
+
+use crate::paths::{has_ext, is_hidden, is_jpeg, join_rel, parent_rel};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -52,9 +54,9 @@ impl DownloadKind {
 
     fn matches(self, name: &str) -> bool {
         match self {
-            DownloadKind::Jpeg => is_jpeg_name(name),
+            DownloadKind::Jpeg => is_jpeg(name),
             DownloadKind::Raw => is_raw_name(name),
-            DownloadKind::Both => is_jpeg_name(name) || is_raw_name(name),
+            DownloadKind::Both => is_jpeg(name) || is_raw_name(name),
         }
     }
 }
@@ -209,7 +211,7 @@ pub async fn list_thumbnails(db_path: PathBuf) -> Result<HashMap<String, String>
 }
 
 fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
-    use crate::people::{COVER_IMAGE_FILTER, combine_rel, open_readonly};
+    use crate::people::{COVER_IMAGE_FILTER, open_readonly};
 
     let conn = open_readonly(db_path)?;
     // `i.status = 1` for the same reason the portfolio query needs it: digiKam
@@ -218,7 +220,7 @@ fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
     //
     // `COVER_IMAGE_FILTER` rather than `VISIBLE_IMAGE_FILTER`: a cover is
     // allowed a `hidden` name, which is how a crop made only for the card stays
-    // out of the job's own gallery. See `is_hidden_name`.
+    // out of the job's own gallery. See `paths::is_hidden`.
     let sql = format!(
         "
         SELECT a.relativePath, i.name
@@ -246,7 +248,7 @@ fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
         };
         // First wins: the query is ordered, so which one that is does not move
         // between requests.
-        out.entry(job).or_insert_with(|| combine_rel(&album, &file));
+        out.entry(job).or_insert_with(|| join_rel(&album, &file));
     }
     Ok(out)
 }
@@ -266,7 +268,7 @@ pub async fn list_ratings(db_path: PathBuf, job: String) -> Result<HashMap<Strin
 }
 
 fn list_ratings_blocking(db_path: &Path, job: &str) -> Result<HashMap<String, i64>> {
-    use crate::people::{combine_rel, open_readonly};
+    use crate::people::open_readonly;
     use crate::portfolio::STAR_RANK;
 
     let conn = open_readonly(db_path)?;
@@ -297,7 +299,7 @@ fn list_ratings_blocking(db_path: &Path, job: &str) -> Result<HashMap<String, i6
     let mut out = HashMap::new();
     for row in rows {
         let (album, file, stars) = row?;
-        out.insert(combine_rel(&album, &file), stars);
+        out.insert(join_rel(&album, &file), stars);
     }
     Ok(out)
 }
@@ -361,7 +363,7 @@ fn list_work_blocking(photos_root: &Path) -> Result<Vec<WorkSummary>> {
 
 /// Recursively count JPEG and RAW files anywhere under `dir`. Dotfiles and
 /// `hidden` names are skipped, as in every walk of a job — see
-/// [`is_hidden_name`]; directory names are walked unconditionally, so the
+/// [`is_hidden`]; directory names are walked unconditionally, so the
 /// `negative` convention used elsewhere does not apply to work.
 fn count_files_recursive(dir: &Path) -> (u32, u32) {
     let mut jpeg = 0u32;
@@ -377,7 +379,7 @@ fn count_files_recursive(dir: &Path) -> (u32, u32) {
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if name.starts_with('.') || is_hidden_name(&name) {
+            if name.starts_with('.') || is_hidden(&name) {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -387,7 +389,7 @@ fn count_files_recursive(dir: &Path) -> (u32, u32) {
             if ft.is_dir() {
                 stack.push(entry.path());
             } else if ft.is_file() {
-                if is_jpeg_name(&name) {
+                if is_jpeg(&name) {
                     jpeg += 1;
                 } else if is_raw_name(&name) {
                     raw += 1;
@@ -432,7 +434,7 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if fname.starts_with('.') || is_hidden_name(&fname) {
+            if fname.starts_with('.') || is_hidden(&fname) {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -451,7 +453,7 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
                 Some(s) => s,
                 None => continue,
             };
-            let is_jpeg = is_jpeg_name(&fname);
+            let is_jpeg = is_jpeg(&fname);
             let is_raw = is_raw_name(&fname);
             if !is_jpeg && !is_raw {
                 continue;
@@ -466,7 +468,7 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
                 if in_edited {
                     counts.edited_jpeg += 1;
                 }
-                let bucket = parent_path(&subpath).to_string();
+                let bucket = parent_rel(&subpath).to_string();
                 let preview_dims =
                     crate::thumbs::rendition_dimensions(&path, crate::thumbs::ThumbKind::Preview)
                         .ok();
@@ -531,17 +533,6 @@ fn relative_subpath(base: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// Forward-slash parent of `subpath`, or "" if the file sits at the job root.
-/// "digital/file.jpg" -> "digital";
-/// "film/medium-format/positive/x.jpg" -> "film/medium-format/positive";
-/// "flat.jpg" -> "".
-fn parent_path(subpath: &str) -> &str {
-    match subpath.rfind('/') {
-        Some(i) => &subpath[..i],
-        None => "",
-    }
-}
-
 /// True when any forward-slash segment of `label` equals "edited"
 /// (case-insensitive). Empty labels (job root) are not "edited" but get
 /// promoted ahead of edited sections by tier in `read_work_blocking`.
@@ -566,9 +557,6 @@ fn section_sort_key(label: &str) -> (u8, String, u8, String) {
     (1, parent.to_lowercase(), leaf_priority, leaf.to_lowercase())
 }
 
-/// Returns the stored password (trimmed) for a job, or None if no `.password`
-/// file exists. The caller is responsible for the verify; this is kept as a
-/// separate step so callers can refuse to authorize when no file is set.
 /// The file a job's display title is read from, at the job root.
 ///
 /// Not a dotfile, unlike `.password`: this one is meant to be seen and edited,
@@ -603,6 +591,9 @@ fn read_title_blocking(work_dir: &Path) -> Option<String> {
     }
 }
 
+/// Returns the stored password (trimmed) for a job, or None if no `.password`
+/// file exists. The caller is responsible for the verify; this is kept as a
+/// separate step so callers can refuse to authorize when no file is set.
 pub async fn read_password(photos_root: PathBuf, name: String) -> Result<Option<String>> {
     tokio::task::spawn_blocking(move || {
         let dir = work_root(&photos_root).join(&name);
@@ -638,30 +629,10 @@ pub fn verify(expected: &str, submitted: &str) -> bool {
     diff == 0
 }
 
-pub fn is_jpeg_name(name: &str) -> bool {
-    has_ext(name, &["jpg", "jpeg"])
-}
-
 pub fn is_raw_name(name: &str) -> bool {
     has_ext(name, RAW_EXTS)
 }
 
-/// A file with `hidden` in its name is not part of a job's delivery: not in its
-/// gallery, its counts, its archives or its per-file downloads. It exists for
-/// the job's cover — a frame cropped to suit the `/work` card, which the client
-/// should not then find among their photographs. Same rule as the rest of the
-/// site, see `handlers::is_hidden`.
-pub fn is_hidden_name(name: &str) -> bool {
-    crate::handlers::is_hidden(name)
-}
-
-fn has_ext(name: &str, exts: &[&str]) -> bool {
-    let ext = match Path::new(name).extension().and_then(|e| e.to_str()) {
-        Some(e) => e,
-        None => return false,
-    };
-    exts.iter().any(|w| ext.eq_ignore_ascii_case(w))
-}
 
 /// Build (or reuse) the cached zip archive for one job. The zip lives at
 /// `cache_root/work/<name>-<scope>-<kind>.zip` and is rebuilt when any
@@ -756,7 +727,7 @@ fn collect_sources(
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if name.starts_with('.') || is_hidden_name(&name) {
+            if name.starts_with('.') || is_hidden(&name) {
                 continue;
             }
             let ft = entry.file_type()?;
@@ -836,14 +807,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jpeg_detection() {
-        assert!(is_jpeg_name("IMG_0001.JPG"));
-        assert!(is_jpeg_name("foo.jpeg"));
-        assert!(!is_jpeg_name("foo.cr3"));
-        assert!(!is_jpeg_name("foo"));
-    }
-
-    #[test]
     fn raw_detection_is_allowlist() {
         assert!(is_raw_name("a.cr3"));
         assert!(is_raw_name("a.NEF"));
@@ -908,16 +871,6 @@ mod tests {
         assert!(DownloadKind::Both.matches("a.jpg"));
         assert!(DownloadKind::Both.matches("a.cr3"));
         assert!(!DownloadKind::Both.matches("a.xmp"));
-    }
-
-    #[test]
-    fn parent_path_works() {
-        assert_eq!(parent_path("digital/file.jpg"), "digital");
-        assert_eq!(
-            parent_path("film/medium-format/positive/x.jpg"),
-            "film/medium-format/positive"
-        );
-        assert_eq!(parent_path("flat.jpg"), "");
     }
 
     #[test]

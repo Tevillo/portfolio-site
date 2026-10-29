@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, params};
 
+use crate::paths::join_rel;
+
 pub struct Person {
     pub name: String,
     pub photo_count: u32,
@@ -177,7 +179,7 @@ pub(crate) const VISIBLE_IMAGE_FILTER: &str =
     concat!(jpeg_name_filter!(), " AND ", published_place_filter!());
 /// A work job's cover: a JPEG outside any `negative/` folder, `hidden` name or
 /// not. A frame cropped for the card is named `hidden` precisely so it stays out
-/// of the job's gallery — see `work::is_hidden_name`.
+/// of the job's gallery — see `paths::is_hidden`.
 pub(crate) const COVER_IMAGE_FILTER: &str =
     concat!(jpeg_name_filter!(), " AND ", outside_negatives_filter!());
 
@@ -299,7 +301,7 @@ fn list_tag_thumbnail_faces_blocking(conn: &Connection) -> Result<HashMap<String
         out.insert(
             person,
             Face {
-                rel: combine_rel(&album_rel, &file),
+                rel: join_rel(&album_rel, &file),
                 rect,
             },
         );
@@ -350,7 +352,7 @@ fn list_faces_blocking(conn: &Connection) -> Result<HashMap<String, Vec<Face>>> 
             continue;
         };
         out.entry(person).or_default().push(Face {
-            rel: combine_rel(&album_rel, &file),
+            rel: join_rel(&album_rel, &file),
             rect,
         });
     }
@@ -394,7 +396,7 @@ fn list_person_photos_blocking(db_path: &Path, person_name: &str) -> Result<Vec<
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for r in rows {
         let (album_rel, name) = r?;
-        let rel = combine_rel(&album_rel, &name);
+        let rel = join_rel(&album_rel, &name);
         if seen.insert(rel.clone()) {
             out.push(PersonPhoto { rel, name });
         }
@@ -430,16 +432,7 @@ fn list_all_tagged_photos_blocking(db_path: &Path) -> Result<Vec<(String, String
     let mut out = Vec::new();
     for r in rows {
         let (person, album_rel, name) = r?;
-        out.push((person, combine_rel(&album_rel, &name)));
+        out.push((person, join_rel(&album_rel, &name)));
     }
     Ok(out)
-}
-
-pub(crate) fn combine_rel(album_rel: &str, name: &str) -> String {
-    let trimmed = album_rel.trim_start_matches('/').trim_end_matches('/');
-    if trimmed.is_empty() {
-        name.to_string()
-    } else {
-        format!("{trimmed}/{name}")
-    }
 }
