@@ -14,7 +14,7 @@ use crate::audit;
 use crate::work::{self, DownloadKind, Scope};
 use crate::paths::{
     PathError, is_hidden, is_jpeg, is_skipped_dir, is_visible_photo, join_rel, leading_year,
-    parent_rel, safe_resolve,
+    mtime_secs, parent_rel, safe_resolve,
 };
 use crate::people;
 use crate::portfolio;
@@ -564,13 +564,13 @@ async fn render_dir(
         }
     }
 
-    subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    subdirs.sort_by_key(|a| a.name.to_lowercase());
+    images.sort_by_key(|a| a.name.to_lowercase());
 
     // Prepend any "favs" subfolder's photos so favorites lead this folder's grid.
     if let Some(favs_rel) = favs_rel {
         let mut fav_images = read_dir_images(state.photos_root(), &favs_rel).await;
-        fav_images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        fav_images.sort_by_key(|a| a.name.to_lowercase());
         if !fav_images.is_empty() {
             fav_images.append(&mut images);
             images = fav_images;
@@ -1402,7 +1402,7 @@ async fn walk_groups(
             .collect();
 
         if !images.is_empty() {
-            images.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            images.sort_by_key(|a| a.name.to_lowercase());
             let (label, browse_url) = if rel.is_empty() {
                 ("Photos (root)".to_string(), "/browse".to_string())
             } else {
@@ -1424,7 +1424,7 @@ async fn walk_groups(
         // Push children in reverse alphabetical order so the stack pops them in
         // alphabetical order, producing a pre-order DFS where each folder is
         // immediately followed by its descendants.
-        child_dirs.sort_by(|a, b| b.1.to_lowercase().cmp(&a.1.to_lowercase()));
+        child_dirs.sort_by_key(|c| std::cmp::Reverse(c.1.to_lowercase()));
         for child in child_dirs {
             stack.push(child);
         }
@@ -1460,17 +1460,9 @@ async fn newest_mtime_secs(files: Vec<PathBuf>) -> Option<u64> {
     if files.is_empty() {
         return None;
     }
-    tokio::task::spawn_blocking(move || {
-        files
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .filter_map(|m| m.modified().ok())
-            .filter_map(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .max()
-    })
-    .await
-    .unwrap_or(None)
+    tokio::task::spawn_blocking(move || files.iter().filter_map(|p| mtime_secs(p)).max())
+        .await
+        .unwrap_or(None)
 }
 
 /// Newest photograph mtime anywhere under `dir`, by the same rules the tree walk
@@ -1657,36 +1649,14 @@ pub async fn download(
     .await
 }
 
-pub async fn thumb(
+/// `/<kind.route()>/*path`, one route per [`ThumbKind`] — see `build_router`.
+pub async fn rendition(
+    kind: ThumbKind,
     State(state): State<AppState>,
     AxumPath(rel): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    render_thumb_response(&state, &rel, &headers, ThumbKind::Grid).await
-}
-
-pub async fn medium(
-    State(state): State<AppState>,
-    AxumPath(rel): AxumPath<String>,
-    headers: HeaderMap,
-) -> Response {
-    render_thumb_response(&state, &rel, &headers, ThumbKind::Medium).await
-}
-
-pub async fn preview(
-    State(state): State<AppState>,
-    AxumPath(rel): AxumPath<String>,
-    headers: HeaderMap,
-) -> Response {
-    render_thumb_response(&state, &rel, &headers, ThumbKind::Preview).await
-}
-
-pub async fn wide(
-    State(state): State<AppState>,
-    AxumPath(rel): AxumPath<String>,
-    headers: HeaderMap,
-) -> Response {
-    render_thumb_response(&state, &rel, &headers, ThumbKind::Wide).await
+    render_thumb_response(&state, &rel, &headers, kind).await
 }
 
 /// The one exception to hidden files being unreachable: a work job's cover,
@@ -1774,9 +1744,10 @@ fn image_response(bytes: Vec<u8>, etag: &str) -> Response {
 }
 
 fn map_path_err(e: PathError) -> StatusCode {
+    // Every failure is a 404, an escape attempt included: a 403 would confirm
+    // that something exists outside the root.
     match e {
-        PathError::NotFound => StatusCode::NOT_FOUND,
-        PathError::Invalid | PathError::Escape => StatusCode::NOT_FOUND,
+        PathError::NotFound | PathError::Invalid | PathError::Escape => StatusCode::NOT_FOUND,
     }
 }
 
@@ -1985,19 +1956,9 @@ struct WorkSet {
 /// `set` fallback; it then collides with any other such label and gets numbered
 /// the same way.
 fn assign_set_slugs(sets: &mut [WorkSet]) {
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut used = std::collections::HashSet::new();
     for s in sets.iter_mut() {
-        let base = match portfolio::slug(&s.label) {
-            b if b.is_empty() => "set".to_string(),
-            b => b,
-        };
-        let mut candidate = base.clone();
-        let mut n = 2;
-        while !used.insert(candidate.clone()) {
-            candidate = format!("{base}-{n}");
-            n += 1;
-        }
-        s.slug = candidate;
+        s.slug = portfolio::unique_slug(&s.label, "set", &mut used);
     }
 }
 
@@ -2478,10 +2439,10 @@ fn read_work_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let want = cookie_name(name);
     for pair in header_val.split(';') {
         let pair = pair.trim();
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == want {
-                return Some(v.to_string());
-            }
+        if let Some((k, v)) = pair.split_once('=')
+            && k == want
+        {
+            return Some(v.to_string());
         }
     }
     None

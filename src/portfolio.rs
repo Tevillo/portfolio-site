@@ -181,18 +181,25 @@ pub fn slug(label: &str) -> String {
 fn assign_slugs(sections: &mut [Section]) {
     let mut taken: HashSet<String> = HashSet::new();
     for s in sections.iter_mut() {
-        let base = match slug(&s.label) {
-            b if b.is_empty() => "section".to_string(),
-            b => b,
-        };
-        let mut candidate = base.clone();
-        let mut n = 2;
-        while !taken.insert(candidate.clone()) {
-            candidate = format!("{base}-{n}");
-            n += 1;
-        }
-        s.slug = candidate;
+        s.slug = unique_slug(&s.label, "section", &mut taken);
     }
+}
+
+/// [`slug`] of `label`, or `fallback` when that is empty, made unique against
+/// `taken` with a `-2`, `-3` suffix, and recorded there. Callers feed labels in
+/// a stable order so a suffixed slug stays put while the label set does.
+pub fn unique_slug(label: &str, fallback: &str, taken: &mut HashSet<String>) -> String {
+    let base = match slug(label) {
+        b if b.is_empty() => fallback.to_string(),
+        b => b,
+    };
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while !taken.insert(candidate.clone()) {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    candidate
 }
 
 /// Reorder sections to match `order`, a list of slugs — in practice

@@ -1,11 +1,10 @@
 use std::fmt::Write as _;
-use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
-use crate::paths::leading_year;
+use crate::paths::{leading_year, mtime_secs};
 use crate::work::WorkCounts;
 
 pub struct DirEntry {
@@ -608,16 +607,6 @@ fn person_jsonld() -> String {
 /// Optional portrait for the About page: drop a JPEG at `<photos>/about.jpg`
 /// and it appears beside the prose. Absent, the page renders text-only.
 pub const ABOUT_PORTRAIT_REL: &str = "about.jpg";
-
-fn mtime_secs(path: &Path) -> Option<u64> {
-    std::fs::metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
-}
 
 /// Newest mtime among the files in `static/`, so a CSS/JS-only deploy still
 /// mints a fresh build id even though the binary did not relink.

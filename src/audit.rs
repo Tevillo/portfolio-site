@@ -535,7 +535,7 @@ fn heading(title: &str) {
 
 /// The `n` largest counts, ties broken by key so two runs over an unchanged log
 /// print the same thing.
-fn top_n<'a>(counts: HashMap<&'a str, usize>, n: usize) -> Vec<(&'a str, usize)> {
+fn top_n(counts: HashMap<&str, usize>, n: usize) -> Vec<(&str, usize)> {
     let mut rows: Vec<(&str, usize)> = counts.into_iter().collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     rows.truncate(n);

@@ -67,6 +67,16 @@ pub fn leading_year(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// A file's modification time in Unix seconds, or `None` if it cannot be
+/// stat'd (or predates the epoch).
+pub fn mtime_secs(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
 /// True when `name`'s extension is one of `exts`, ignoring case.
 pub fn has_ext(name: &str, exts: &[&str]) -> bool {
     Path::new(name)

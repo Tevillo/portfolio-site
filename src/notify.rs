@@ -351,8 +351,7 @@ pub async fn confirm(data_root: &Path, token: &str) -> Result<Confirmation> {
     if !token.is_empty() && existing.iter().any(|s| s.token == token) {
         let sub = existing
             .into_iter()
-            .filter(|s| s.token == token)
-            .next_back()
+            .rfind(|s| s.token == token)
             .expect("just matched");
         return Ok(Confirmation::AlreadyConfirmed(sub));
     }
@@ -361,11 +360,7 @@ pub async fn confirm(data_root: &Path, token: &str) -> Result<Confirmation> {
     // Last match wins, so re-submitting the form supersedes an older pending
     // row for the same token (which cannot collide in practice, but the rule
     // should be stated rather than assumed).
-    let row = pending
-        .iter()
-        .filter(|p| p.token == token)
-        .next_back()
-        .cloned();
+    let row = pending.iter().rfind(|p| p.token == token).cloned();
     let Some(row) = row else {
         return Ok(Confirmation::Unknown);
     };

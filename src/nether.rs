@@ -626,7 +626,7 @@ impl Dir {
             });
         }
         let mut notes = self.notes;
-        notes.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        notes.sort_by_key(|a| a.0.to_lowercase());
         for (name, rel) in notes {
             nodes.push(NavNode::Note {
                 url: format!("/nether/{}", encode_path(&rel)),

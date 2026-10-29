@@ -235,7 +235,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
             HeaderValue::from_static("no-cache, private"),
         ));
 
-    let assets = Router::new()
+    let mut assets = Router::new()
         // Crawler-facing, and neither is HTML: they set their own hour-long
         // Cache-Control, so they sit with the assets to keep the pages layer's
         // `no-cache` off them.
@@ -253,13 +253,9 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/nether-media/*path", get(nether::media))
         .route("/download/*path", get(handlers::download))
         // Keyed by person, not by path: a face is a crop the database chooses,
-        // so it cannot ride the `/<rendition>/<photo path>` shape the four
-        // below share. See `handlers::face`.
+        // so it cannot ride the `/<rendition>/<photo path>` shape the
+        // renditions below share. See `handlers::face`.
         .route("/face/:name", get(handlers::face))
-        .route("/thumb/*path", get(handlers::thumb))
-        .route("/medium/*path", get(handlers::medium))
-        .route("/preview/*path", get(handlers::preview))
-        .route("/wide/*path", get(handlers::wide))
         .nest_service(
             "/static",
             // Asset URLs carry a `?v=<build id>` stamp (see views::asset), so a
@@ -273,6 +269,14 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
                 ))
                 .service(ServeDir::new(static_dir)),
         );
+    // Derived from `ThumbKind::ALL`, so a new rendition gets its route with
+    // nothing to add here.
+    for kind in ThumbKind::ALL {
+        assets = assets.route(
+            &format!("/{}/*path", kind.route()),
+            get(move |state, path, headers| handlers::rendition(kind, state, path, headers)),
+        );
+    }
 
     pages.merge(assets).with_state(state)
 }
@@ -368,7 +372,7 @@ async fn warm_cmd(args: &[String]) -> Result<()> {
                     }
                 }
                 let done = idx + 1;
-                if done % 25 == 0 || done == jpegs.len() {
+                if done.is_multiple_of(25) || done == jpegs.len() {
                     println!("  [{done}/{}] photos processed", jpegs.len());
                 }
             }

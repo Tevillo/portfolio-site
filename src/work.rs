@@ -357,7 +357,7 @@ fn list_work_blocking(photos_root: &Path) -> Result<Vec<WorkSummary>> {
             raw_count,
         });
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     Ok(out)
 }
 
@@ -493,7 +493,7 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
     let mut sections: Vec<WorkSection> = grouped
         .into_iter()
         .map(|(label, mut photos)| {
-            photos.sort_by(|a, b| a.subpath.to_lowercase().cmp(&b.subpath.to_lowercase()));
+            photos.sort_by_key(|a| a.subpath.to_lowercase());
             let is_edited = label_is_edited(&label);
             WorkSection {
                 label,
@@ -506,7 +506,7 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
     // siblings stay adjacent (digital/edited next to digital/original, etc).
     // Within a sibling group, the leaf folder "edited" sorts ahead of any
     // other leaf so the prioritized deliverable appears above its source.
-    sections.sort_by(|a, b| section_sort_key(&a.label).cmp(&section_sort_key(&b.label)));
+    sections.sort_by_key(|a| section_sort_key(&a.label));
 
     let has_password = read_password_blocking(&dir).is_some();
     let title = read_title_blocking(&dir);
@@ -752,7 +752,7 @@ fn collect_sources(
             out.push((subpath, path));
         }
     }
-    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    out.sort_by_key(|a| a.0.to_lowercase());
     Ok(out)
 }
 
@@ -896,7 +896,7 @@ mod tests {
             "large-format/positive/edited",
             "",
         ];
-        labels.sort_by(|a, b| section_sort_key(a).cmp(&section_sort_key(b)));
+        labels.sort_by_key(|a| section_sort_key(a));
         assert_eq!(
             labels,
             vec![
