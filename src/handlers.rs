@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +15,7 @@ use crate::audit;
 use crate::work::{self, DownloadKind, Scope};
 use crate::paths::{
     PathError, is_hidden, is_jpeg, is_skipped_dir, is_visible_photo, join_rel, leading_year,
-    mtime_secs, parent_rel, safe_resolve,
+    mtime_secs, parent_rel, safe_resolve, walk_visible_photos,
 };
 use crate::people;
 use crate::portfolio;
@@ -659,45 +660,27 @@ async fn read_dir_images(root: &Path, rel: &str) -> Vec<ImageEntry> {
         .collect()
 }
 
+/// Whether any visible photo sits anywhere under `root`; stops at the first.
 pub(crate) async fn subtree_has_jpeg(root: &Path) -> bool {
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let mut read = match tokio::fs::read_dir(&dir).await {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(path = %dir.display(), error = %e, "read_dir failed in subtree scan");
-                continue;
-            }
-        };
-        loop {
-            let entry = match read.next_entry().await {
-                Ok(Some(e)) => e,
-                Ok(None) => break,
-                Err(e) => {
-                    warn!(path = %dir.display(), error = %e, "next_entry failed in subtree scan");
-                    break;
-                }
-            };
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            let ftype = match entry.file_type().await {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if ftype.is_file() && is_visible_photo(&name) {
-                return true;
-            }
-            if ftype.is_dir() && !is_skipped_dir(&name) {
-                stack.push(entry.path());
-            }
-        }
-    }
-    false
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut found = false;
+        walk_visible_photos(
+            &root,
+            |_| {
+                found = true;
+                ControlFlow::Break(())
+            },
+            warn_unreadable,
+        );
+        found
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn warn_unreadable(dir: &Path, e: &std::io::Error) {
+    warn!(path = %dir.display(), error = %e, "read_dir failed in subtree scan");
 }
 
 pub async fn people_index(State(state): State<AppState>) -> Response {
@@ -1469,38 +1452,21 @@ async fn newest_mtime_secs(files: Vec<PathBuf>) -> Option<u64> {
 /// uses — only visible JPEGs count, and skipped directories are not descended
 /// into — so a roll gets the same recency here as it does on `/all`.
 async fn newest_subtree_mtime(dir: &Path) -> Option<u64> {
-    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
-    let mut newest: Option<u64> = None;
-    while let Some(dir) = stack.pop() {
-        let mut read = match tokio::fs::read_dir(&dir).await {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(path = %dir.display(), error = %e, "read_dir failed in mtime scan");
-                continue;
-            }
-        };
-        let mut files: Vec<PathBuf> = Vec::new();
-        while let Ok(Some(entry)) = read.next_entry().await {
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            let ftype = match entry.file_type().await {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if ftype.is_file() && is_visible_photo(&name) {
-                files.push(entry.path());
-            } else if ftype.is_dir() && !is_skipped_dir(&name) {
-                stack.push(entry.path());
-            }
-        }
-        newest = newest.max(newest_mtime_secs(files).await);
-    }
-    newest
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut newest: Option<u64> = None;
+        walk_visible_photos(
+            &dir,
+            |photo| {
+                newest = newest.max(mtime_secs(&photo));
+                ControlFlow::Continue(())
+            },
+            warn_unreadable,
+        );
+        newest
+    })
+    .await
+    .unwrap_or(None)
 }
 
 /// Populate `ImageEntry::dims` — and, when `srcset_kind` is set, the second

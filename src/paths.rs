@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +109,49 @@ pub fn is_visible_photo(name: &str) -> bool {
     is_jpeg(name) && !is_hidden(name)
 }
 
+/// Visit every visible photo under `root`: dotfiles are skipped, skipped
+/// directories are not descended into, and files must pass
+/// [`is_visible_photo`]. One definition of "the photos in this tree", for the
+/// cache warmer, the subtree checks and the recency scan alike.
+///
+/// Synchronous, so call it from `spawn_blocking`. `visit` can end the walk
+/// early by returning `Break`. A directory that cannot be listed is reported to
+/// `on_unreadable` and skipped rather than failing the walk.
+pub fn walk_visible_photos(
+    root: &Path,
+    mut visit: impl FnMut(PathBuf) -> ControlFlow<()>,
+    mut on_unreadable: impl FnMut(&Path, &std::io::Error),
+) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(e) => {
+                on_unreadable(&dir, &e);
+                continue;
+            }
+        };
+        for entry in read.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(ftype) = entry.file_type() else {
+                continue;
+            };
+            if ftype.is_dir() {
+                if !is_skipped_dir(&name) {
+                    stack.push(entry.path());
+                }
+            } else if ftype.is_file() && is_visible_photo(&name) && visit(entry.path()).is_break() {
+                return;
+            }
+        }
+    }
+}
+
 /// Forward-slash parent of a relative path, or "" for a file at the top.
 /// "digital/file.jpg" -> "digital"; "flat.jpg" -> "".
 pub fn parent_rel(rel: &str) -> &str {
@@ -177,6 +221,53 @@ mod tests {
         assert!(!is_jpeg("foo.cr3"));
         assert!(!is_jpeg("foo"));
         assert!(!is_visible_photo("hidden-album-cover.jpg"));
+    }
+
+    #[test]
+    fn the_walk_sees_only_visible_photos_and_can_stop_early() {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in [
+            "2024/roll/a.jpg",
+            "2024/roll/b.JPEG",
+            "2024/roll/hidden-cover.jpg",
+            "2024/roll/a.cr3",
+            "2024/roll/.c.jpg",
+            "2024/roll/negative/n.jpg",
+            "2024/.trash/t.jpg",
+        ] {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        }
+
+        let mut seen = Vec::new();
+        walk_visible_photos(
+            dir.path(),
+            |p| {
+                seen.push(p.strip_prefix(dir.path()).unwrap().to_path_buf());
+                ControlFlow::Continue(())
+            },
+            |d, e| panic!("{} unreadable: {e}", d.display()),
+        );
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                PathBuf::from("2024/roll/a.jpg"),
+                PathBuf::from("2024/roll/b.JPEG")
+            ]
+        );
+
+        let mut visits = 0;
+        walk_visible_photos(
+            dir.path(),
+            |_| {
+                visits += 1;
+                ControlFlow::Break(())
+            },
+            |_, _| {},
+        );
+        assert_eq!(visits, 1);
     }
 
     #[test]

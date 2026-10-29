@@ -14,6 +14,7 @@ mod work;
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -595,42 +596,25 @@ async fn prune_orphans(cache_root: &Path, servable: &HashSet<PathBuf>) {
     );
 }
 
-/// Depth-first walk of `root` collecting every servable JPEG, applying the
-/// same visibility rules the request handlers use: skip dotfiles, skip files
-/// whose name marks them hidden, and skip `negative` directories.
+/// Every servable JPEG under `root`, by the same visibility rules the request
+/// handlers use — see [`paths::walk_visible_photos`]. Unreadable directories
+/// go to stderr, since the CLI commands that call this run without tracing.
 pub(crate) async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let mut read = match tokio::fs::read_dir(&dir).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("  read_dir {} failed: {e}", dir.display());
-                continue;
-            }
-        };
-        while let Ok(Some(entry)) = read.next_entry().await {
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            let ftype = match entry.file_type().await {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if ftype.is_dir() {
-                if !paths::is_skipped_dir(&name) {
-                    stack.push(entry.path());
-                }
-            } else if ftype.is_file() && paths::is_visible_photo(&name) {
-                out.push(entry.path());
-            }
-        }
-    }
-    out
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        paths::walk_visible_photos(
+            &root,
+            |photo| {
+                out.push(photo);
+                ControlFlow::Continue(())
+            },
+            |dir, e| eprintln!("  read_dir {} failed: {e}", dir.display()),
+        );
+        out
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// `portfolio-site notify [--dry-run]`
