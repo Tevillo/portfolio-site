@@ -40,12 +40,41 @@
     return favPaths.some((p) => path === '' || p.startsWith(path + '/'));
   }
 
+  // The top level of the tree is always the year (or the root itself).
+  function isTopLevel(path) {
+    return !path.includes('/');
+  }
+
+  // Folder names that say what stage a scan is at rather than which roll it
+  // is, so they never make a useful heading. Same idea as WORK_LABEL_DROP.
+  const LABEL_SKIP = ['favs', 'positive', 'positives'];
+
+  // The folder a favs grid belongs to, named by its last segment that isn't in
+  // LABEL_SKIP: `2025/belize-summer/positive/favs` reads as "belize-summer".
+  function rollName(path) {
+    const segs = path.split('/').filter((seg) => !LABEL_SKIP.includes(seg.toLowerCase()));
+    return segs.length ? segs[segs.length - 1] : path;
+  }
+
   function apply(on) {
+    // Filtered, the page is grouped by year alone: a year stays as long as a
+    // favs folder sits somewhere beneath it, and below that only the favs
+    // grids remain, each headed by its roll's name rather than its full path.
     document.querySelectorAll('section.gallery[data-path]').forEach((sec) => {
-      sec.classList.toggle('favs-hidden', on && !isFav(sec.dataset.path));
+      const path = sec.dataset.path;
+      const top = isTopLevel(path);
+      const keep = top ? hasFavBelow(path) : isFav(path);
+      sec.classList.toggle('favs-hidden', on && !keep);
+      const label = sec.querySelector(':scope > h2 .section-label');
+      if (label && !top) {
+        if (label.dataset.fullLabel === undefined) label.dataset.fullLabel = label.textContent;
+        label.textContent = on && keep ? rollName(path) : label.dataset.fullLabel;
+      }
     });
     treeNodes.forEach((node) => {
-      node.classList.toggle('favs-hidden', on && !hasFavBelow(node.dataset.path));
+      const path = node.dataset.path;
+      const keep = isTopLevel(path) && hasFavBelow(path);
+      node.classList.toggle('favs-hidden', on && !keep);
     });
     document.querySelectorAll('li.tile').forEach((tile) => {
       tile.classList.toggle('favs-hidden', on && !isFav(tilePath(tile)));
