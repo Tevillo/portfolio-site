@@ -2553,19 +2553,13 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
-        return None;
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let mut i = 0;
-    while i < bytes.len() {
-        let hi = hex_nibble(bytes[i])?;
-        let lo = hex_nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Some(out)
+    s.as_bytes()
+        .chunks(2)
+        .map(|pair| match pair {
+            [hi, lo] => Some((hex_nibble(*hi)? << 4) | hex_nibble(*lo)?),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn stream_file_response(path: &Path, mime: &str, attach_name: &str) -> Response {
@@ -2626,10 +2620,9 @@ fn is_valid_work_name(name: &str) -> bool {
         && name != ".."
 }
 
-/// Minimal `application/x-www-form-urlencoded` parser — keeps the dep tree
-/// lean (no serde just for two fields). Last value wins on duplicates.
-/// Single-valued view of a form body: the last occurrence of a repeated key
-/// wins. Fine for every form that has one field per name.
+/// Single-valued view of an `application/x-www-form-urlencoded` body: the last
+/// occurrence of a repeated key wins. Fine for every form that has one field
+/// per name.
 fn parse_urlencoded(body: &[u8]) -> HashMap<String, String> {
     parse_urlencoded_multi(body)
         .into_iter()
@@ -2659,49 +2652,36 @@ fn parse_urlencoded_multi(body: &[u8]) -> HashMap<String, Vec<String>> {
             Some(t) => t,
             None => (pair, ""),
         };
-        out.entry(url_decode(k)).or_default().push(url_decode(v));
+        out.entry(percent_decode(k, true))
+            .or_default()
+            .push(percent_decode(v, true));
     }
     out
 }
 
-fn url_decode(s: &str) -> String {
+/// Decode `%XX` escapes, leaving a malformed one as written. `plus_is_space`
+/// is for form bodies, where `+` encodes a space; in a path it is a literal `+`.
+pub(crate) fn percent_decode(s: &str, plus_is_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
-                    (Some(a), Some(b)) => {
-                        out.push((a << 4) | b);
-                        i += 3;
-                    }
-                    _ => {
-                        out.push(b'%');
-                        i += 1;
-                    }
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
         }
+        out.push(if plus_is_space && bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
 
 fn hex_nibble(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
+    (c as char).to_digit(16).map(|d| d as u8)
 }
 
 #[cfg(test)]
@@ -2803,6 +2783,24 @@ mod tests {
             multi.get("person").unwrap(),
             &vec!["Parker Brown".to_string(), "Al Green".to_string()]
         );
+    }
+
+    /// A path keeps its `+`; a form turns it into a space. Either way a
+    /// malformed escape is left as written rather than dropped.
+    #[test]
+    fn percent_decoding_only_reads_plus_as_space_in_forms() {
+        assert_eq!(percent_decode("a+b%20c", false), "a+b c");
+        assert_eq!(percent_decode("a+b%20c", true), "a b c");
+        assert_eq!(percent_decode("100%", true), "100%");
+        assert_eq!(percent_decode("%zz%4", false), "%zz%4");
+    }
+
+    #[test]
+    fn hex_round_trips_and_rejects_odd_or_bad_input() {
+        assert_eq!(decode_hex(&encode_hex(b"hunter2")).as_deref(), Some(&b"hunter2"[..]));
+        assert_eq!(decode_hex("abc"), None);
+        assert_eq!(decode_hex("zz"), None);
+        assert_eq!(decode_hex(""), Some(Vec::new()));
     }
 
     /// Behind the proxy the client is only named in the header; its first entry

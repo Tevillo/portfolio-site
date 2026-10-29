@@ -18,7 +18,9 @@ use axum::response::{IntoResponse, Response};
 use maud::PreEscaped;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html as md_html};
 
-use crate::handlers::{build_etag, encode_path, matches_etag, not_found_response, not_modified};
+use crate::handlers::{
+    build_etag, encode_path, matches_etag, not_found_response, not_modified, percent_decode,
+};
 use crate::paths::safe_resolve;
 use crate::state::AppState;
 use crate::views::{self, Crumb, NavNode};
@@ -153,7 +155,9 @@ fn resolve_media(note_dir: &str, dest: &str) -> Option<String> {
     if dest.is_empty() || dest.starts_with('/') || dest.contains("://") {
         return None;
     }
-    let dest = percent_decode(dest);
+    // Note authors write spaces literally, but Obsidian percent-encodes them
+    // when it rewrites a link after a rename.
+    let dest = percent_decode(dest, false);
     let base = if dest.contains('/') {
         note_dir
     } else {
@@ -182,36 +186,6 @@ fn resolve_media(note_dir: &str, dest: &str) -> Option<String> {
         return None;
     }
     Some(rel)
-}
-
-/// Decode `%XX` escapes; malformed escapes are left as written. Note authors
-/// write spaces literally, but Obsidian percent-encodes them when it rewrites
-/// a link after a rename.
-fn percent_decode(s: &str) -> String {
-    fn hex(b: u8) -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
-        {
-            out.push((h << 4) | l);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
