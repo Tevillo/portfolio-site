@@ -2384,7 +2384,7 @@ pub async fn work_download(
     };
     let attach = format!(
         "{}-{}-{}.zip",
-        sanitize_attachment(&name),
+        work::sanitize_filename(&name),
         scope.slug(),
         kind.slug()
     );
@@ -2499,7 +2499,7 @@ async fn require_cookie_auth(
 const COOKIE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 fn cookie_name(job: &str) -> String {
-    format!("work_token_{}", sanitize_attachment(job))
+    format!("work_token_{}", work::sanitize_filename(job))
 }
 
 fn build_work_cookie(name: &str, password: &str) -> String {
@@ -2624,15 +2624,6 @@ fn is_valid_work_name(name: &str) -> bool {
         && !name.contains('\\')
         && name != "."
         && name != ".."
-}
-
-fn sanitize_attachment(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => c,
-            _ => '_',
-        })
-        .collect()
 }
 
 /// Minimal `application/x-www-form-urlencoded` parser — keeps the dep tree

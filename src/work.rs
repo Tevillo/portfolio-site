@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -695,12 +694,7 @@ fn build_or_get_zip_blocking(
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("creating {}", cache_dir.display()))?;
 
-    let safe_name = sanitize_filename(name);
-    let zip_path = cache_dir.join(format!(
-        "{safe_name}-{}-{}.zip",
-        scope.slug(),
-        kind.slug()
-    ));
+    let zip_path = cache_dir.join(zip_file_name(name, scope, kind));
 
     let sources = collect_sources(&work_dir, scope, kind)?;
     if sources.is_empty() {
@@ -728,6 +722,16 @@ fn build_or_get_zip_blocking(
 
     write_zip(&zip_path, &sources)?;
     Ok(zip_path)
+}
+
+/// Filename of one job's cached archive inside `cache_root/work`.
+pub(crate) fn zip_file_name(name: &str, scope: Scope, kind: DownloadKind) -> String {
+    format!(
+        "{}-{}-{}.zip",
+        sanitize_filename(name),
+        scope.slug(),
+        kind.slug()
+    )
 }
 
 /// Walks the whole job tree and returns `(zip_entry_name, abs_path)` pairs,
@@ -806,18 +810,8 @@ fn write_zip(zip_path: &Path, sources: &[(String, PathBuf)]) -> Result<()> {
             .start_file(name.as_str(), opts)
             .with_context(|| format!("zip start_file {name}"))?;
         let mut src = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = src
-                .read(&mut buf)
-                .with_context(|| format!("reading {}", path.display()))?;
-            if n == 0 {
-                break;
-            }
-            writer
-                .write_all(&buf[..n])
-                .with_context(|| format!("writing zip entry {name}"))?;
-        }
+        std::io::copy(&mut src, &mut writer)
+            .with_context(|| format!("writing zip entry {name} from {}", path.display()))?;
     }
 
     writer.finish().context("finalizing zip")?;
@@ -826,7 +820,9 @@ fn write_zip(zip_path: &Path, sources: &[(String, PathBuf)]) -> Result<()> {
     Ok(())
 }
 
-fn sanitize_filename(s: &str) -> String {
+/// Map anything outside `[A-Za-z0-9._-]` to `_`, for names that end up in a
+/// cache filename, a cookie name or a `Content-Disposition` header.
+pub(crate) fn sanitize_filename(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => c,

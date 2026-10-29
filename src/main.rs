@@ -851,40 +851,21 @@ async fn prebuild_cmd(args: &[String]) -> Result<()> {
                 }
             }
         }
-        if let Some(zip_dir) = cache_root.join("work").to_str() {
-            // Show total disk used by this work item's prebuilt archives.
-            if let Ok(total) = du_prefix(Path::new(zip_dir), name) {
-                println!("  total cached for {name}: {}", human_bytes(total));
-            }
-        }
+        // Show total disk used by this work item's prebuilt archives. Summed
+        // by exact filename rather than by prefix, which would also count
+        // `smith-jones`'s archives towards `smith`.
+        let zip_dir = cache_root.join("work");
+        let total: u64 = scopes
+            .iter()
+            .flat_map(|&scope| kinds.iter().map(move |&kind| (scope, kind)))
+            .filter_map(|(scope, kind)| {
+                std::fs::metadata(zip_dir.join(work::zip_file_name(name, scope, kind))).ok()
+            })
+            .map(|m| m.len())
+            .sum();
+        println!("  total cached for {name}: {}", human_bytes(total));
     }
     Ok(())
-}
-
-fn du_prefix(dir: &Path, name_prefix: &str) -> Result<u64> {
-    let safe = sanitize(name_prefix);
-    let mut total = 0u64;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let s = match file_name.to_str() {
-            Some(s) => s,
-            None => continue,
-        };
-        if s.starts_with(&safe) && s.ends_with(".zip") {
-            total += entry.metadata()?.len();
-        }
-    }
-    Ok(total)
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => c,
-            _ => '_',
-        })
-        .collect()
 }
 
 fn human_bytes(n: u64) -> String {
