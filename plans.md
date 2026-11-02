@@ -44,11 +44,18 @@ code:
   which is useless to a crawler and unhelpful to a screen reader. It is also,
   besides `HOME_INTRO`, the only text in a photo page's body.
 
-**Words for the About page.** Its structure is settled too — one column of
-paragraphs, an optional portrait beside them from `about.jpg`, a links list at
-the bottom — so nothing about the page is waiting on a decision any more. It
-still opens "Self hosting enjoyer", which no longer matches the home page
-tagline, and there is no `about.jpg` yet.
+**Words for the About page.** Its structure is settled too — a photo, name,
+facts and links column beside the prose, a /notify callout, and extra sections
+(`ABOUT_SECTIONS`: Photography Work, with a button to /work and the contact
+email, and Programming Projects) — so nothing about the page is waiting on a
+decision any more.
+Phrases in the prose that name a tab or section are linked through
+`ABOUT_INLINE_LINKS`. The photo beside it is a random portfolio photograph, picked fresh on
+every visit.
+
+**Elsewhere links on About.** The About page has an "Elsewhere" block under the
+name (`ABOUT_LINKS`) that is empty and hidden for now. Instagram, and any other
+accounts I want people to find, go there when I decide to add them.
 
 ## Notifications
 

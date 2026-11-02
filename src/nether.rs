@@ -37,8 +37,8 @@ const MEDIA_DIR: &str = "Home/Cooking/Recipes/Engineer";
 const MEDIA_URL: &str = "/nether-media";
 
 /// Vault folders that are never exposed: personal records. The walk skips them,
-/// so they stay out of the sidebar tree, the graph, the wikilink index and the
-/// sitemap, and [`render`] refuses a hand-typed URL into one.
+/// so they stay out of the sidebar tree, the graph and the wikilink index, and
+/// [`render`] refuses a hand-typed URL into one.
 const PRIVATE_DIRS: &[&str] = &["Home/Medical"];
 
 /// Whether a `/`-separated vault-relative path names a [`PRIVATE_DIRS`] folder
@@ -230,18 +230,6 @@ async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
 /// Walk the vault and return every note's path relative to the root, including
 /// the `.md` suffix, using `/` separators. Dotfiles/dirs (`.obsidian`,
 /// `.trash`, `.git`) and [`PRIVATE_DIRS`] are skipped.
-/// Canonical `/nether/...` paths for every note in the vault, for the sitemap.
-/// Lives here rather than in `handlers` so the vault's layout rules — which
-/// files count as notes, how a path becomes a URL — stay in one module.
-pub(crate) async fn sitemap_paths(root: &Path) -> Vec<String> {
-    let mut out = vec!["/nether".to_string(), "/nether/graph".to_string()];
-    for rel in collect_notes(root).await {
-        let no_ext = rel.strip_suffix(".md").unwrap_or(&rel);
-        out.push(format!("/nether/{}", encode_path(no_ext)));
-    }
-    out
-}
-
 async fn collect_notes(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![(root.to_path_buf(), String::new())];

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -304,24 +304,65 @@ async fn fill_portfolio_dims(sources: &[PathBuf], groups: &mut [FolderGroup]) {
 }
 
 /// About page. The prose is a compile-time constant in `views`; the only
-/// dynamic part is the optional portrait at `<photos>/about.jpg`, which is
-/// served through the normal preview rendition pipeline so it gets the same
-/// downscaling, EXIF orientation and caching as any other photo.
+/// dynamic part is the photograph beside it, one picked at random from every
+/// portfolio section on each request. It is served through the normal preview
+/// rendition pipeline, so it gets the same downscaling, EXIF orientation and
+/// caching as any other photo.
 pub async fn about(State(state): State<AppState>) -> Response {
-    let rel = views::ABOUT_PORTRAIT_REL;
-    let portrait = match safe_resolve(state.photos_root(), rel).await {
-        Ok(path) if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) => {
-            let url = format!("/preview/{}", encode_path(rel));
-            let dims = tokio::task::spawn_blocking(move || {
-                thumbs::rendition_dimensions(&path, ThumbKind::Preview).ok()
-            })
-            .await
-            .unwrap_or(None);
-            dims.map(|d| (url, d))
+    let photo = random_portfolio_photo(&state).await;
+    views::about_page(
+        photo
+            .as_ref()
+            .map(|(url, name, d)| (url.as_str(), name.as_str(), *d)),
+    )
+    .into_response()
+}
+
+/// A random portfolio photograph as `(preview url, file name, dimensions)`,
+/// never one from a section in [`views::ABOUT_PHOTO_SKIP_SECTIONS`].
+///
+/// Starts at a random index and walks forward, so a tag that outlived its file
+/// (see [`portfolio_group`]) costs a retry rather than a missing photo; gives
+/// up after a handful so a badly stale tag set can't turn one page view into a
+/// scan of the whole portfolio. `None` with no database or no tagged photos,
+/// and the page then renders without one.
+async fn random_portfolio_photo(state: &AppState) -> Option<(String, String, (u32, u32))> {
+    let (skipped, kept): (Vec<_>, Vec<_>) = portfolio_sections(state)
+        .await
+        .into_iter()
+        .partition(|s| views::ABOUT_PHOTO_SKIP_SECTIONS.contains(&s.slug.as_str()));
+    let skip: HashSet<String> = skipped.into_iter().flat_map(|s| s.photos).map(|p| p.rel).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let photos: Vec<portfolio::SectionPhoto> = kept
+        .into_iter()
+        .flat_map(|s| s.photos)
+        .filter(|p| !skip.contains(&p.rel) && seen.insert(p.rel.clone()))
+        .collect();
+    if photos.is_empty() {
+        return None;
+    }
+    // `RandomState` is seeded from the OS per instance: enough randomness to
+    // pick a photo, without pulling in a crate for it.
+    let start = (std::hash::BuildHasher::hash_one(
+        &std::collections::hash_map::RandomState::new(),
+        0u8,
+    ) % photos.len() as u64) as usize;
+    for i in 0..photos.len().min(5) {
+        let p = &photos[(start + i) % photos.len()];
+        let Ok(path) = safe_resolve(state.photos_root(), &p.rel).await else {
+            continue;
+        };
+        let dims = tokio::task::spawn_blocking(move || {
+            thumbs::rendition_dimensions(&path, ThumbKind::Preview).ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(d) = dims {
+            return Some((format!("/preview/{}", encode_path(&p.rel)), p.name.clone(), d));
         }
-        _ => None,
-    };
-    views::about_page(portrait.as_ref().map(|(url, d)| (url.as_str(), *d))).into_response()
+    }
+    None
 }
 
 /// Current build identifier, polled by `static/version.js` when a tab regains
@@ -375,6 +416,10 @@ pub async fn robots_txt() -> Response {
 /// visitor: the `/work/<job>` deliveries are `noindex` (see
 /// [`views::work_page`]) and are left out, as are the asset routes.
 ///
+/// `/nether` is left out too, by choice rather than necessity: the notes are
+/// personal, public if someone has the URL but not something the site points
+/// visitors or crawlers at. Nothing on the site links to them either.
+///
 /// `walk_groups` is the same tree walk `/all` runs per request, and it only
 /// reads directory entries — no image decoding — so reusing it here costs a
 /// crawler-frequency directory scan rather than justifying a second walker.
@@ -421,8 +466,6 @@ pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
             Err(e) => warn!(error = ?e, "listing people for sitemap failed"),
         }
     }
-
-    paths.extend(crate::nether::sitemap_paths(state.nether_root()).await);
 
     let mut xml = String::with_capacity(paths.len() * 80 + 200);
     xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);

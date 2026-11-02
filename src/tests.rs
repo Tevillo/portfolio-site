@@ -2076,6 +2076,15 @@ async fn client_galleries_are_excluded_from_search() {
     assert!(sitemap.contains(&format!("<loc>{}</loc>", views::abs_url("/work"))));
 }
 
+/// The notes under `/nether` are personal: reachable by URL, but not
+/// advertised to crawlers.
+#[tokio::test]
+async fn notes_are_left_out_of_the_sitemap() {
+    let f = fixture();
+    let sitemap = body_of(&f.router, "/sitemap.xml").await;
+    assert!(!sitemap.contains("/nether"), "a notes URL leaked into the sitemap");
+}
+
 /// One `<h1>` per page, naming what the page holds.
 #[tokio::test]
 async fn listing_pages_have_exactly_one_heading() {

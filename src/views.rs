@@ -314,6 +314,11 @@ shooting, developing, and scanning. My film photos, sorted by year and roll.";
 /// developing, scanning.
 const KNOWS_ABOUT: &[&str] = &["Film photography", "Film developing", "Film scanning"];
 
+/// Heading over [`ABOUT_PARAGRAPHS`] on the About page. Empty renders the
+/// paragraphs with no heading. The owner's name for that block ("the about me
+/// paragraph"), set at his request — his to reword.
+pub const ABOUT_INTRO_HEADING: &str = "About Me";
+
 /// About page body. Each entry is one paragraph, rendered in order. Empty
 /// means the About page shows just the name, portrait and links — add your own
 /// paragraphs here, e.g.
@@ -325,13 +330,86 @@ const KNOWS_ABOUT: &[&str] = &["Film photography", "Film developing", "Film scan
 /// ];
 /// ```
 pub const ABOUT_PARAGRAPHS: &[&str] = &[
-    "Self hosting enjoyer and lover of film photography. 
-    This website contains all of my photos that I have taken and scanned.",
-    "If you want to find yourself or a friend check out the \"People\" tab, 
-    and you can sign up there to get a message when new photos of you go up.
-    Any professional work I have done is under the \"Work\" Tab.
-    And if you just want to look around \"Recent\" is the latest rolls I have
-    scanned and \"All\" is all of my folders that can scroll",
+    "This website acts as an archive for all of the photos I have taken and scanned.",
+    "For all of my favorite photos, just click on my name at the top left to view my portfolio",
+    "For friends I recommend checking out the \"People\" tab If you want to find yourself or a friend. If you just are perusing the \"recent\" tab will show my last few rolls and the \"All\" tab is a more folder like system to see different photos throughout the years",
+    "Any professional photography work I have done is under the \"Work\" Tab. For more information checkout the \"Photography Work\" section of this page",
+    "And if you would like to view any programming projects checkout the \"Programming Projects\" section",
+];
+
+/// Phrases in the About page prose that become links, as `(phrase, href)`.
+///
+/// Matched exactly, case-sensitively and on whole words, in
+/// [`ABOUT_PARAGRAPHS`] and every [`ABOUT_SECTIONS`] paragraph; every
+/// occurrence is linked. A phrase wrapped in double quotes is rendered as the
+/// link alone, quotes dropped: the link's highlight already sets it apart. The text itself is never changed — reword the prose and
+/// a phrase that no longer appears simply links nothing, so update it here too.
+///
+/// `#…` targets are the About page's own sections: each section's `id` is its
+/// heading lower-cased with spaces as hyphens ("Photography Work" ->
+/// `#photography-work`).
+///
+/// Bare `http(s)://` URLs and [`OWNER_EMAIL`] are linked automatically and need
+/// no entry here.
+pub const ABOUT_INLINE_LINKS: &[(&str, &str)] = &[
+    ("my name", "/"),
+    ("\"People\"", "/people"),
+    ("\"recent\"", "/recent"),
+    ("\"All\"", "/all"),
+    ("\"Work\"", "/work"),
+    ("\"Photography Work\"", "#photography-work"),
+    ("\"Programming Projects\"", "#programming-projects"),
+    (
+        "Portfolio Site",
+        "https://github.com/Tevillo/portfolio-site",
+    ),
+    ("Batch", "https://github.com/Tevillo/batch-go"),
+    ("Guess-Up", "https://github.com/Tevillo/Guess-Up"),
+];
+
+/// Portfolio sections, by slug, that the About page's random photograph is
+/// never drawn from. A photo tagged into one of these is skipped even when it
+/// is also in another section.
+pub const ABOUT_PHOTO_SKIP_SECTIONS: &[&str] = &["portraits", "wedding"];
+
+/// Quick facts beside the photo on the About page, as `(label, value)`
+/// rows rendered as a short definition list. Empty hides the block.
+pub const ABOUT_FACTS: &[(&str, &str)] = &[
+    ("Education", "BS Computer Science Trinity University"),
+    ("Employer", "Unemployed"),
+    ("Currently Learning Skill", "Soccer Shooting"),
+    (
+        "Currently Working Towards Project",
+        "E2E encoded file transfer API accessible through this site ",
+    ),
+];
+
+/// Extra About page sections after [`ABOUT_PARAGRAPHS`], each a heading, its
+/// paragraphs, and an optional `(label, href)` button under them. Empty hides
+/// them; a section with no paragraphs is skipped. Each section's `id` is
+/// derived from its heading, which is what the `#…` entries in
+/// [`ABOUT_INLINE_LINKS`] point at.
+pub const ABOUT_SECTIONS: &[(&str, &[&str], Option<(&str, &str)>)] = &[
+    (
+        "Photography Work",
+        &[
+            "Event and Portrait photographer. Studied photography at Trinity University with a focus on film. Able to shoot, process, and digitize film for your events upon request for a more authentic and unique feel. Also proficient in digital and more than willing to do so.",
+            "If you have worked with me and are looking for your photos, go to the \"Work\" tab. To download, use the password I gave you and you can download the final images or just all images in general. If you choose to download all of the images and in their RAW format be prepared to wait for a while as it is usually a lot of data to process.",
+            "Based in San Antonio, TX",
+            "\nFor questions, bookings, or anything else, email me at borregopaulj@gmail.com.",
+        ],
+        Some(("View Previous Work Here", "/work")),
+    ),
+    (
+        "Programming Projects",
+        &[
+            "I have created this site and self host it with most of my other projects being quite small. I like to make small efficient programs that fix small and specific problems in my life. Most projects can be found here https://github.com/Tevillo",
+            "Portfolio Site My only long running and updated project. This site was initially created to show my friends my film photos and has evolved to become a more personal site and a place to show and deliver my photography work.",
+            "Batch This is a simple batch renamer cli tool that I primarily use to rename photos after scanning. Built it pretty quickly and as practice for learning go.",
+            "Guess-Up This is a terminal version of the app heads-up. Can either play with one device or play over internet via a host. Made because me and my friends love playing custom heads-up lists over different series like ASOIAF(Game of Thrones), The Expanse, DBZ, etc.",
+        ],
+        None,
+    ),
 ];
 
 // Status and error messages on `/notify`.
@@ -435,15 +513,21 @@ server with Photo-Bot so it can message you.";
 /// to make an unexpected message look legitimate rather than like spam.
 pub const NOTIFY_CONFIRM_INTRO: &str = "";
 
-/// Links rendered as a list at the bottom of the About page. Add or remove
-/// rows freely; an empty list simply hides the section.
-pub const ABOUT_LINKS: &[(&str, &str)] = &[
-    ("Email", "mailto:borregopaulj@gmail.com"),
-    // Shares its label with the People pages' link, so rewording
-    // `NOTIFY_LINK_LABEL` moves all three at once.
-    (NOTIFY_LINK_LABEL, "/notify"),
-    ("Notes", "/nether"),
-];
+/// Links rendered as an "Elsewhere" list under the name on the About page —
+/// other places to find the owner, e.g. social accounts. Empty hides the block.
+///
+/// Email is in the Photography Work section's prose and /notify has its own
+/// callout ([`ABOUT_NOTIFY_TEXT`]). `/nether` is deliberately not linked
+/// from here: it is personal notes, reachable by URL but not advertised.
+pub const ABOUT_LINKS: &[(&str, &str)] = &[];
+
+/// The /notify callout on the About page: [`NOTIFY_LINK_LABEL`] as its heading
+/// and button, this line under it. Empty hides the line but keeps the button.
+///
+/// Written by the assistant at the owner's request (2026-11-02) — his to reword.
+pub const ABOUT_NOTIFY_TEXT: &str = "Pick the people you want to follow and get an \
+    email or Discord message when new photos of them go up, or whenever a new \
+    roll is posted.";
 
 /// The 404 page's heading and the line under it.
 ///
@@ -603,10 +687,6 @@ fn person_jsonld() -> String {
         knows = knows,
     )
 }
-
-/// Optional portrait for the About page: drop a JPEG at `<photos>/about.jpg`
-/// and it appears beside the prose. Absent, the page renders text-only.
-pub const ABOUT_PORTRAIT_REL: &str = "about.jpg";
 
 /// Newest mtime among the files in `static/`, so a CSS/JS-only deploy still
 /// mints a fresh build id even though the binary did not relink.
@@ -2640,12 +2720,116 @@ pub fn work_page(
     }
 }
 
+/// `id` for an About section from its heading: lower-cased ASCII alphanumerics
+/// with runs of anything else collapsed to one hyphen ("Photography Work" ->
+/// "photography-work"). `None` for a heading with nothing to make one from.
+fn section_anchor(heading: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in heading.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    (!out.is_empty()).then_some(out)
+}
 
-/// About page: the prose from `ABOUT_PARAGRAPHS` in a single readable column,
-/// with an optional portrait alongside. `portrait` is the preview URL for
-/// `ABOUT_PORTRAIT_REL` plus its rendered dimensions, or `None` when that file
-/// does not exist under the photos root.
-pub fn about_page(portrait: Option<(&str, (u32, u32))>) -> Markup {
+/// One About paragraph with its links filled in: the [`ABOUT_INLINE_LINKS`]
+/// phrases, bare `http(s)://` URLs and [`OWNER_EMAIL`]. The words are rendered
+/// exactly as written — this only wraps spans of them in `<a>`.
+fn linkify_about(text: &str) -> Markup {
+    linkify(text, ABOUT_INLINE_LINKS)
+}
+
+fn linkify(text: &str, phrases: &[(&str, &str)]) -> Markup {
+    // (start, end, href, quoted): byte range of the matched text in `text`.
+    let mut spans: Vec<(usize, usize, String, bool)> = Vec::new();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+    for &(phrase, href) in phrases {
+        if phrase.is_empty() {
+            continue;
+        }
+        let quoted = phrase.len() > 2 && phrase.starts_with('"') && phrase.ends_with('"');
+        for (i, _) in text.match_indices(phrase) {
+            let end = i + phrase.len();
+            let before_ok = text[..i].chars().next_back().is_none_or(|c| !is_word(c));
+            let after_ok = text[end..].chars().next().is_none_or(|c| !is_word(c));
+            if before_ok && after_ok {
+                spans.push((i, end, href.to_string(), quoted));
+            }
+        }
+    }
+
+    for scheme in ["https://", "http://"] {
+        for (i, _) in text.match_indices(scheme) {
+            let rest = &text[i..];
+            let mut end = i + rest.find(char::is_whitespace).unwrap_or(rest.len());
+            // Sentence punctuation after a URL is not part of it.
+            while end > i + scheme.len()
+                && text[..end].ends_with(['.', ',', ':', ';', ')', '!', '?', '"', '\''])
+            {
+                end -= 1;
+            }
+            if end > i + scheme.len() {
+                spans.push((i, end, text[i..end].to_string(), false));
+            }
+        }
+    }
+
+    for (i, _) in text.match_indices(OWNER_EMAIL) {
+        spans.push((
+            i,
+            i + OWNER_EMAIL.len(),
+            format!("mailto:{OWNER_EMAIL}"),
+            false,
+        ));
+    }
+
+    // Earliest first, longest first on a tie; anything overlapping an
+    // already-kept span is dropped.
+    spans.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut kept: Vec<(usize, usize, String, bool)> = Vec::new();
+    for sp in spans {
+        if kept.last().is_none_or(|k| sp.0 >= k.1) {
+            kept.push(sp);
+        }
+    }
+
+    // (plain text before the link, link text, href) per link, then whatever
+    // follows the last one.
+    let mut pieces: Vec<(&str, &str, &str)> = Vec::with_capacity(kept.len());
+    let mut pos = 0;
+    for (start, end, href, quoted) in &kept {
+        let label = if *quoted {
+            &text[start + 1..end - 1]
+        } else {
+            &text[*start..*end]
+        };
+        pieces.push((&text[pos..*start], label, href.as_str()));
+        pos = *end;
+    }
+    let tail = &text[pos..];
+
+    html! {
+        @for (before, label, href) in &pieces {
+            (before)
+            // The quotes were matched as part of the phrase and are dropped
+            // with it; `label` is the text between them.
+            a href=(href) { (label) }
+        }
+        (tail)
+    }
+}
+
+/// About page: an identity column (portrait, name, tagline, facts, links) beside
+/// the prose from `ABOUT_PARAGRAPHS` and `ABOUT_SECTIONS`; one column on phones.
+/// `photo` is one portfolio photograph picked per request — its preview URL,
+/// file name (used as `alt`, as everywhere else on the site) and rendered
+/// dimensions — or `None` when the portfolio has nothing to offer.
+pub fn about_page(photo: Option<(&str, &str, (u32, u32))>) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -2661,27 +2845,73 @@ pub fn about_page(portrait: Option<(&str, (u32, u32))>) -> Markup {
                 (site_header(Nav::About))
                 main.about {
                     div.about-layout {
-                        @if let Some((src, (w, h))) = portrait {
-                            img.about-portrait
-                                src=(src)
-                                alt=(format!("Portrait of {OWNER_NAME}"))
-                                width=(w) height=(h)
-                                decoding="async"
-                                fetchpriority="high";
-                        }
-                        div.about-body {
+                        // Side column: who, at a glance, and the /notify card
+                        // under it, so the column beside the prose is not
+                        // empty space on a desktop. Sticky when it fits.
+                        div.about-side {
+                        aside.about-card.about-aside {
+                            @if let Some((src, name, (w, h))) = photo {
+                                img.about-photo
+                                    src=(src)
+                                    alt=(name)
+                                    width=(w) height=(h)
+                                    decoding="async"
+                                    fetchpriority="high";
+                            }
                             h1.about-name { (OWNER_NAME) }
                             @if !OWNER_TAGLINE.is_empty() {
                                 p.about-tagline { (OWNER_TAGLINE) }
                             }
-                            @for para in ABOUT_PARAGRAPHS {
-                                p { (para) }
+                            @if !ABOUT_FACTS.is_empty() {
+                                dl.about-facts {
+                                    @for (label, value) in ABOUT_FACTS {
+                                        div {
+                                            dt { (label) }
+                                            dd { (value) }
+                                        }
+                                    }
+                                }
                             }
                             @if !ABOUT_LINKS.is_empty() {
                                 h2.about-links-heading { "Elsewhere" }
                                 ul.about-links {
                                     @for (label, href) in ABOUT_LINKS {
                                         li { a href=(href) { (label) } }
+                                    }
+                                }
+                            }
+                        }
+                        aside.about-card.about-notify {
+                            h2 { (NOTIFY_LINK_LABEL) }
+                            @if !ABOUT_NOTIFY_TEXT.is_empty() {
+                                p { (ABOUT_NOTIFY_TEXT) }
+                            }
+                            a.about-button href="/notify" { (NOTIFY_LINK_LABEL) }
+                        }
+                        }
+                        div.about-body {
+                            @if !ABOUT_PARAGRAPHS.is_empty() {
+                                section.about-card.about-section.about-intro id=[section_anchor(ABOUT_INTRO_HEADING)] {
+                                    @if !ABOUT_INTRO_HEADING.is_empty() {
+                                        h2 { (ABOUT_INTRO_HEADING) }
+                                    }
+                                    @for para in ABOUT_PARAGRAPHS {
+                                        p { (linkify_about(para)) }
+                                    }
+                                }
+                            }
+                            @for (heading, paras, link) in ABOUT_SECTIONS {
+                                @if !paras.is_empty() {
+                                    section.about-card.about-section id=[section_anchor(heading)] {
+                                        @if !heading.is_empty() {
+                                            h2 { (heading) }
+                                        }
+                                        @for para in *paras {
+                                            p { (linkify_about(para)) }
+                                        }
+                                        @if let Some((label, href)) = link {
+                                            a.about-button.secondary href=(href) { (label) }
+                                        }
                                     }
                                 }
                             }
@@ -2734,5 +2964,66 @@ pub fn not_found_page() -> Markup {
                 (site_footer())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod linkify_tests {
+    use super::{OWNER_EMAIL, linkify, section_anchor};
+
+    #[test]
+    fn links_phrases_urls_and_email_without_changing_the_words() {
+        let text = format!(
+            "See the \"Work\" tab, the \"Photography Work\" section, \
+             https://example.com/x: and {OWNER_EMAIL}."
+        );
+        let html = linkify(
+            &text,
+            &[
+                ("\"Work\"", "/work"),
+                ("\"Photography Work\"", "#photography-work"),
+            ],
+        )
+        .into_string();
+        // Quoted phrases lose their quotes; the link stands in for them.
+        assert!(
+            html.contains(r#"the <a href="/work">Work</a> tab"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r##"the <a href="#photography-work">Photography Work</a> section"##),
+            "{html}"
+        );
+        assert!(!html.contains("&quot;"), "{html}");
+        // Trailing colon stays outside the URL link.
+        assert!(
+            html.contains(r#"<a href="https://example.com/x">https://example.com/x</a>:"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r#"<a href="mailto:{OWNER_EMAIL}">{OWNER_EMAIL}</a>."#
+            )),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn phrases_match_whole_words_only() {
+        let html = linkify("All of it, but not Allowed", &[("All", "/all")]).into_string();
+        assert_eq!(html.matches("<a ").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn section_anchors_come_from_headings() {
+        assert_eq!(
+            section_anchor("Photography Work").as_deref(),
+            Some("photography-work")
+        );
+        assert_eq!(
+            section_anchor("  Programming  Projects! ").as_deref(),
+            Some("programming-projects")
+        );
+        assert_eq!(section_anchor(""), None);
     }
 }

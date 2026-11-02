@@ -2181,8 +2181,11 @@ main.work p.empty {
 
 /* ---- About ---- */
 main.about {
-  max-width: 900px;
-  margin: 2.5rem auto;
+  width: 100%;
+  max-width: 1320px;
+  margin: 3rem auto;
+  padding: 0 1.5rem;
+  box-sizing: border-box;
 }
 
 /* The 404 page has no photograph and, until the copy slots are filled, no prose
@@ -2216,57 +2219,206 @@ main.notfound {
   color: var(--muted);
 }
 
+/* Desktop: a side column (identity card, then the /notify card) beside a
+   column of prose cards, wide enough that the page uses the screen rather than
+   floating a narrow strip in the middle of it. */
 .about-layout {
-  display: flex;
-  align-items: flex-start;
-  gap: 2.5rem;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
 }
 
-.about-portrait {
-  flex: 0 0 260px;
-  width: 260px;
+.about-side {
+  display: grid;
+  gap: 1.5rem;
+}
+
+/* Sticky only where the whole side column fits on screen; on a short viewport
+   a sticky column taller than the window would hide its own bottom. */
+@media (min-height: 1100px) and (min-width: 801px) {
+  .about-side {
+    position: sticky;
+    top: 1.5rem;
+  }
+}
+
+.about-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.about-aside {
+  padding: 1.25rem;
+}
+
+.about-photo {
+  display: block;
+  width: 100%;
   height: auto;
   border-radius: 6px;
-  border: 1px solid var(--border);
-  /* The element is 260px wide at 1x; hint the decoder so it doesn't hand
-     back a needlessly large bitmap on standard-density screens. */
-  object-fit: cover;
-}
-
-.about-body {
-  flex: 1 1 0;
-  min-width: 0;
-  /* A measure this side of ~70 characters is what keeps long prose readable. */
-  max-width: 62ch;
+  margin-bottom: 1.25rem;
 }
 
 .about-name {
   margin: 0;
-  font-size: clamp(1.6rem, 4vw, 2.1rem);
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  line-height: 1.15;
+  font-size: clamp(2.2rem, 4.5vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1;
   color: var(--text);
 }
 
 .about-tagline {
-  margin: 0.35rem 0 1.5rem;
-  color: var(--muted);
-  font-size: 1.05rem;
+  margin: 0.7rem 0 0;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.about-facts {
+  margin: 1.25rem 0 0;
+  padding: 1rem 0 0;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0.7rem;
+}
+
+.about-facts div {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  gap: 0.75rem;
+}
+
+.about-facts dt {
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-top: 0.15rem;
+}
+
+.about-facts dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.about-body {
+  min-width: 0;
+  display: grid;
+  gap: 1.5rem;
+}
+
+.about-section {
+  padding: 1.75rem 2rem;
+}
+
+.about-section h2 {
+  margin: 0 0 1.1rem;
+  padding-left: 0.9rem;
+  border-left: 5px solid var(--accent);
+  font-size: clamp(1.6rem, 2.5vw, 2rem);
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+  color: var(--text);
 }
 
 .about-body p {
   margin: 0 0 1rem;
-  line-height: 1.65;
+  font-size: 1.08rem;
+  line-height: 1.7;
+  /* Kept to a readable measure even though the card itself runs wider. */
+  max-width: 78ch;
+}
+
+.about-section p:last-of-type {
+  margin-bottom: 0;
+}
+
+.about-body .about-intro p {
+  font-size: 1.25rem;
+  line-height: 1.6;
+}
+
+.about-body p a {
+  font-weight: 600;
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 0.05em 0.35em;
+  overflow-wrap: anywhere;
+}
+
+.about-body p a:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  text-decoration: none;
+}
+
+.about-section .about-button {
+  margin-top: 1.4rem;
+}
+
+/* /notify gets an accented card rather than a link in a list: it is the one
+   thing on the page a visitor can sign up for. */
+.about-notify {
+  padding: 1.4rem 1.5rem;
+  border-left: 5px solid var(--accent);
+}
+
+.about-notify h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.about-notify p {
+  margin: 0 0 1.1rem;
+  color: var(--muted);
+}
+
+.about-button {
+  display: inline-block;
+  padding: 0.55rem 1.1rem;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.about-button:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: var(--on-accent);
+  text-decoration: none;
+}
+
+.about-button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.about-button.secondary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
 }
 
 .about-links-heading {
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-weight: 600;
-  color: var(--muted);
-  margin: 2rem 0 0.75rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin: 1.5rem 0 0.75rem;
 }
 
 ul.about-links {
@@ -2281,7 +2433,7 @@ ul.about-links {
 ul.about-links a {
   display: inline-block;
   padding: 0.4rem 0.8rem;
-  background: var(--surface);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text);
@@ -2294,15 +2446,50 @@ ul.about-links a:hover {
   text-decoration: none;
 }
 
-@media (max-width: 700px) {
-  .about-layout {
-    flex-direction: column;
-    gap: 1.5rem;
+/* Wide screens: let the page grow and set the sections two-up under the
+   full-width intro, rather than leaving a band of background on each side. */
+@media (min-width: 1600px) {
+  main.about {
+    max-width: 1720px;
   }
 
-  .about-portrait {
-    flex-basis: auto;
-    width: min(100%, 260px);
+  .about-body {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .about-intro {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 800px) {
+  main.about {
+    margin: 1rem auto 2rem;
+    padding: 0 1rem;
+  }
+
+  .about-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.25rem;
+  }
+
+  .about-side,
+  .about-body {
+    gap: 1.25rem;
+  }
+
+  .about-photo {
+    max-height: 70vh;
+    object-fit: cover;
+  }
+
+  .about-section {
+    padding: 1.25rem 1.1rem;
+  }
+
+  .about-body .about-intro p {
+    font-size: 1.12rem;
   }
 }
 
