@@ -65,6 +65,45 @@ memory, and getting one name wrong silently drops the rest. This sat under
 "People tab" while the tab was still being built; it is a /notify job and
 nothing on /people is waiting on it.
 
+## Archive
+
+**A private archive for a few friends.** A page of photographs that are not
+on the public site, open only to a handful of people I hand a key to myself.
+There is no sign-up and no login page. I make a key for each person and send
+them a link with it. Opening the link once unlocks the archive in that browser
+for a year, and every visit renews it.
+Anyone without a valid key gets the site's ordinary 404, so the page cannot be
+told apart from one that does not exist.
+
+**Hiding moves to tags.** Today a photograph is hidden by putting `hidden` in
+its filename. That convention goes away entirely; hiding becomes two digiKam
+tags:
+
+- `hidden`: the photo is never shown anywhere on the site, archive included.
+- `archive`: the photo is off every public page but shows in the archive.
+  Sub-tags under `archive` become the archive's sections, the way
+  `portfolio/<x>` does for the portfolio. A photo tagged with plain `archive`
+  and no sub-tag goes in an unsorted section. If a photo somehow carries both
+  `archive` and a `portfolio` tag, the archive wins.
+
+Before the filename rule is removed, every file currently named `hidden` (13
+of them, one a work job's card cover) has to be tagged, or it goes public on
+deploy.
+
+**Per-person keys I control.** Every key has a name attached, so I can revoke
+one person without touching anyone else's, and the change takes effect on
+their next request. The site records whose key opened the archive and when,
+so I can tell if a link has been passed around. Key holders can download
+originals.
+
+**Invisible to search.** The archive is never in the sitemap and never linked
+for anyone without a key, and every page and image in it tells crawlers not to
+index it. Once someone has unlocked it, an Archive tab appears in their top nav
+and in no one else's.
+
+Words this needs from me: the tab's label, the display names of the sections,
+and any heading on the page.
+
 ## Programming projects page
 
 **A programming projects page.** Undecided, and the content source decides the
