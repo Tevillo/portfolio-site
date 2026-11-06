@@ -23,7 +23,7 @@ use crate::handlers::{
 };
 use crate::paths::safe_resolve;
 use crate::state::AppState;
-use crate::views::{self, Crumb, NavNode};
+use crate::views::{self, NavNode};
 
 /// The note rendered at `/nether` (the vault's home note).
 const HOME_NOTE: &str = "Vault";
@@ -66,18 +66,8 @@ pub async fn graph(State(state): State<AppState>) -> Response {
     let index = build_index(&notes);
     let data = build_graph(root, &notes, &index).await;
 
-    let crumbs = vec![
-        Crumb {
-            label: "Nether".into(),
-            url: Some("/nether".into()),
-        },
-        Crumb {
-            label: "Graph".into(),
-            url: None,
-        },
-    ];
     let nav = build_nav(&notes, "");
-    views::nether_graph_page(&crumbs, &nav, &data.to_json()).into_response()
+    views::nether_graph_page(&nav, &data.to_json()).into_response()
 }
 
 /// GET /nether-media/*path — an image embedded in a note, resolved against
@@ -214,7 +204,6 @@ async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
     let expanded = expand_wikilinks(&expand_embeds(&source), &index);
     let body = render_markdown(&expanded, note_dir);
     let nav = build_nav(&notes, rel_no_ext);
-    let crumbs = build_crumbs(rel_no_ext, is_home);
     let title = rel_no_ext.rsplit('/').next().unwrap_or(rel_no_ext);
 
     // The vault home is reachable as both /nether and /nether/<home note>;
@@ -224,7 +213,7 @@ async fn render(state: &AppState, rel_no_ext: &str, is_home: bool) -> Response {
     } else {
         format!("/nether/{}", encode_path(rel_no_ext))
     };
-    views::nether_page(title, &canonical, &crumbs, &nav, PreEscaped(body)).into_response()
+    views::nether_page(title, &canonical, &nav, PreEscaped(body)).into_response()
 }
 
 /// Walk the vault and return every note's path relative to the root, including
@@ -594,29 +583,6 @@ impl Dir {
         }
         nodes
     }
-}
-
-fn build_crumbs(rel_no_ext: &str, is_home: bool) -> Vec<Crumb> {
-    let mut crumbs = vec![Crumb {
-        label: "Nether".into(),
-        url: if is_home {
-            None
-        } else {
-            Some("/nether".into())
-        },
-    }];
-    if is_home {
-        return crumbs;
-    }
-    // Intermediate folders are not notes, so they appear as plain labels.
-    let parts: Vec<&str> = rel_no_ext.split('/').filter(|s| !s.is_empty()).collect();
-    for part in parts {
-        crumbs.push(Crumb {
-            label: part.to_string(),
-            url: None,
-        });
-    }
-    crumbs
 }
 
 #[cfg(test)]

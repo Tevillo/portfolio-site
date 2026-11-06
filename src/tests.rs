@@ -38,11 +38,6 @@ fn fixture() -> Fixture {
     std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
 
     // Real JPEGs, so the thumbnail pipeline actually runs.
-    //
-    // Two top-level folders rather than one on purpose: `render_dir`
-    // collapses a folder holding no images and exactly one subfolder by
-    // redirecting into it, so a single-folder tree makes `/browse` a 303 and
-    // every assertion about the listing it renders untestable.
     std::fs::create_dir_all(photos.join("2024/favs")).unwrap();
     for rel in ["portfolio/test.jpg", "2024/roll.jpg"] {
         image::RgbImage::from_pixel(16, 16, image::Rgb([120, 140, 100]))
@@ -1532,7 +1527,7 @@ async fn an_empty_portfolio_still_renders_the_front_page() {
 #[tokio::test]
 async fn html_pages_are_revalidated() {
     let f = fixture();
-    for uri in ["/", "/about", "/browse", "/recent", "/all", "/work"] {
+    for uri in ["/", "/about", "/recent", "/all", "/roll/2024", "/work"] {
         let cc = cache_control(&get(&f.router, uri).await);
         assert!(cc.contains("no-cache"), "{uri} cache-control was {cc:?}");
         assert!(cc.contains("private"), "{uri} cache-control was {cc:?}");
@@ -1541,13 +1536,13 @@ async fn html_pages_are_revalidated() {
 
 /// A miss on any page route renders the site rather than a blank page, and
 /// keeps saying 404 while it does. Both halves matter: an HTML body with a
-/// 200 on it would tell a crawler the rotted `/browse` URL is still a page.
+/// 200 on it would tell a crawler a rotted URL is still a page.
 #[tokio::test]
 async fn misses_render_the_404_page() {
     let f = fixture();
     for uri in [
         "/no-such-page",
-        "/browse/2024/no-such-roll",
+        "/roll/2024/no-such-roll",
         // Not `/people/:name`: with no digiKam database the route reports
         // that state in plain text rather than reporting a missing person,
         // and this fixture has none. The miss branch itself goes through
@@ -1711,9 +1706,10 @@ async fn recent_renders_only_the_declared_folders() {
     let resp = get(&f.router, "/recent").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let html = body_string(resp).await;
-    assert!(html.contains("/browse/2024"), "declared folder is missing");
+    assert!(html.contains(r#"data-path="2024""#), "declared folder is missing");
+    assert!(html.contains(r#"href="/roll/2024""#), "the section does not link its roll");
     assert!(
-        !html.contains("/browse/portfolio"),
+        !html.contains(r#"data-path="portfolio""#),
         "undeclared folder leaked onto /recent"
     );
 }
@@ -1805,7 +1801,7 @@ async fn recent_tiles_offer_a_larger_srcset_candidate() {
 async fn share_cards_use_the_preview_rendition() {
     let f = fixture();
     let mut checked = 0;
-    for path in ["/", "/recent", "/browse/2024"] {
+    for path in ["/", "/recent", "/all"] {
         let html = body_string(get(&f.router, path).await).await;
         let Some(rest) = html.split("property=\"og:image\" content=\"").nth(1) else {
             continue;
@@ -1870,17 +1866,22 @@ async fn recent_ignores_entries_outside_the_photos_root() {
     assert!(!html.contains("escape"), "escaping entry reached the page");
 }
 
-/// The Browse tab is gone from the nav, but its URLs are indexed, linked
-/// from the `/all` crumbs, and named in every notification message. Dropping
-/// the routes with the tab would 404 all of them.
+/// Browse is gone, but its URLs are indexed and sit in notification emails
+/// already sent. They must land on `/all` rather than 404.
 #[tokio::test]
-async fn browse_still_serves_after_losing_its_tab() {
+async fn old_browse_urls_redirect_to_all() {
     let f = fixture();
-    assert_eq!(get(&f.router, "/browse").await.status(), StatusCode::OK);
-    assert_eq!(
-        get(&f.router, "/browse/2024").await.status(),
-        StatusCode::OK
-    );
+    for uri in ["/browse", "/browse/", "/browse/2024", "/browse/2024/no-such-roll"] {
+        let resp = get(&f.router, uri).await;
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT, "{uri} status");
+        let loc = resp
+            .headers()
+            .get(header::LOCATION)
+            .expect("redirect had no Location")
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/all", "{uri} redirected to the wrong place");
+    }
     let nav = body_string(get(&f.router, "/").await).await;
     assert!(
         !nav.contains(">Browse<"),
@@ -1980,8 +1981,10 @@ async fn pages_declare_themselves_canonical() {
     for (uri, path) in [
         ("/", "/"),
         ("/about", "/about"),
-        ("/browse", "/browse"),
         ("/all", "/all"),
+        ("/roll/2024", "/roll/2024"),
+        // Extra slashes name the same roll, so they declare the same URL.
+        ("/roll/2024/", "/roll/2024"),
         ("/work", "/work"),
         // Query strings are not part of the identity of any page here, so
         // the canonical must ignore them rather than mint a URL per link
@@ -2007,7 +2010,6 @@ async fn trailing_slash_redirects_to_the_canonical_path() {
     let f = fixture();
     for (from, to) in [
         ("/about/", "/about"),
-        ("/browse/", "/browse"),
         ("/people/", "/people"),
         ("/work/", "/work"),
         ("/nether/", "/nether"),
@@ -2089,7 +2091,7 @@ async fn notes_are_left_out_of_the_sitemap() {
 #[tokio::test]
 async fn listing_pages_have_exactly_one_heading() {
     let f = fixture();
-    for uri in ["/", "/about", "/browse", "/recent", "/all", "/work"] {
+    for uri in ["/", "/about", "/recent", "/all", "/roll/2024", "/work"] {
         let html = body_of(&f.router, uri).await;
         let n = html.matches("<h1").count();
         assert_eq!(n, 1, "{uri} had {n} <h1> elements, expected 1");
@@ -3131,4 +3133,59 @@ async fn share_upload_without_key_is_unavailable() {
     let resp = share_put(&f.router, "/share/upload?name=a.txt", b"x").await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body_string(resp).await, views::SHARE_ERR_UNAVAILABLE);
+}
+
+/// A roll page shows one folder's photos, favorites first, and offers no way
+/// into the folders around it.
+#[tokio::test]
+async fn a_roll_shows_its_folder_and_leads_with_its_favorites() {
+    let f = fixture();
+    let resp = get(&f.router, "/roll/2024").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_string(resp).await;
+    let pick = html.find("pick.jpg").expect("the favorite is missing");
+    let roll = html.find("roll.jpg").expect("the roll's own photo is missing");
+    assert!(pick < roll, "favorites do not lead the roll");
+    assert!(!html.contains("test.jpg"), "another folder's photo leaked in");
+    assert!(!html.contains("/roll/2024/favs"), "the page links into a subfolder");
+}
+
+/// `/roll` is not a directory browser: a folder holding only other folders has
+/// no page, and the bare path is `/all`'s job.
+#[tokio::test]
+async fn rolls_cannot_be_used_to_walk_the_tree() {
+    let f = fixture();
+    std::fs::create_dir_all(f.photos.join("2023/trip")).unwrap();
+    std::fs::copy(f.photos.join("2024/roll.jpg"), f.photos.join("2023/trip/a.jpg")).unwrap();
+
+    assert_eq!(get(&f.router, "/roll/2023/trip").await.status(), StatusCode::OK);
+    for uri in ["/roll/2023", "/roll/work", "/roll/..", "/roll/2024/../2023"] {
+        assert_eq!(get(&f.router, uri).await.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+    for (from, to) in [("/roll", "/all"), ("/roll/", "/all"), ("/roll/2024/favs", "/roll/2024")] {
+        let resp = get(&f.router, from).await;
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT, "{from} status");
+        let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+        assert_eq!(loc, to, "{from} redirected to the wrong place");
+    }
+}
+
+/// `/all` links each folder heading to its roll, and a `favs/` heading to the
+/// roll it leads rather than to a URL that only redirects.
+#[tokio::test]
+async fn all_links_each_folder_to_its_roll() {
+    let f = fixture();
+    let html = body_string(get(&f.router, "/all").await).await;
+    assert!(html.contains(r#"href="/roll/2024""#));
+    assert!(html.contains(r#"href="/roll/portfolio""#));
+    assert!(!html.contains(r#"href="/roll/2024/favs""#));
+}
+
+/// Every roll is in the sitemap; a `favs/` folder that only redirects is not.
+#[tokio::test]
+async fn rolls_are_in_the_sitemap() {
+    let f = fixture();
+    let sitemap = body_string(get(&f.router, "/sitemap.xml").await).await;
+    assert!(sitemap.contains(&views::abs_url("/roll/2024")));
+    assert!(!sitemap.contains("/roll/2024/favs"));
 }

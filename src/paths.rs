@@ -37,7 +37,7 @@ pub fn precheck(user_path: &str) -> Result<PathBuf, PathError> {
 }
 
 /// Join `user_path` under `root`, canonicalize it, and verify it stays inside `root`.
-/// Used for both directories (browse) and files (image, thumb source).
+/// Used for both directories (`/roll`) and files (image, thumb source).
 pub async fn safe_resolve(root: &Path, user_path: &str) -> Result<PathBuf, PathError> {
     let safe = precheck(user_path)?;
     let candidate = root.join(safe);
@@ -92,7 +92,7 @@ pub fn is_jpeg(name: &str) -> bool {
 
 /// A file is "hidden" if its basename contains the substring "hidden"
 /// (case-insensitive). Applied on top of the .jpg/.jpeg filter everywhere —
-/// browse, `/all`, people, and a work job's gallery, counts, archives and
+/// `/roll`, `/all`, people, and a work job's gallery, counts, archives and
 /// per-file downloads. In work it is how a cover cropped for the `/work` card
 /// stays out of the job; see `handlers::is_hidden_work_cover`.
 pub fn is_hidden(name: &str) -> bool {

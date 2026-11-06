@@ -24,15 +24,9 @@ use crate::recent;
 use crate::state::AppState;
 use crate::thumbs::{self, ThumbKind};
 use crate::views::{
-    self, Crumb, DirEntry, FolderGroup, ImageEntry, SectionTab, WorkIndexEntry,
+    self, FolderGroup, ImageEntry, SectionTab, WorkIndexEntry,
     PersonEntry,
 };
-
-#[derive(Clone, Copy)]
-enum PageKind {
-    BrowseRoot,
-    BrowseSub,
-}
 
 /// The router's `.fallback()` — every URL that matches no route.
 ///
@@ -48,17 +42,6 @@ pub async fn not_found() -> Response {
 /// asking for a JPEG has no use for a page of markup.
 pub fn not_found_response() -> Response {
     (StatusCode::NOT_FOUND, views::not_found_page()).into_response()
-}
-
-/// A page route's status turned into a response: a miss renders the 404 page,
-/// anything else stays a bare status. Used where a page helper reports failure
-/// as a `StatusCode` rather than returning a rendered body.
-fn page_status_response(status: StatusCode) -> Response {
-    if status == StatusCode::NOT_FOUND {
-        not_found_response()
-    } else {
-        status.into_response()
-    }
 }
 
 /// The portfolio front door: whichever section leads [`views::SECTION_ORDER`],
@@ -228,9 +211,6 @@ async fn portfolio_group(state: &AppState, section: &portfolio::Section) -> Opti
         // sections — but still the section's identity in the group shape the
         // other pages share.
         path: format!("portfolio/{}", section.slug),
-        // A tag's photos span many folders, so there is no single folder to
-        // browse to.
-        browse_url: String::new(),
         images,
         // Tag-driven sections have no folder, so no favs/ folder to fold in.
         favs_count: 0,
@@ -410,8 +390,7 @@ pub async fn robots_txt() -> Response {
 }
 
 /// `GET /sitemap.xml`. Every indexable page, so a crawler does not have to
-/// discover the archive by following links through the folder tree — which is
-/// how deep galleries end up uncrawled.
+/// discover pages by following links.
 ///
 /// Lists only canonical URLs, and only pages that render for an anonymous
 /// visitor: the `/work/<job>` deliveries are `noindex` (see
@@ -420,16 +399,11 @@ pub async fn robots_txt() -> Response {
 /// `/nether` is left out too, by choice rather than necessity: the notes are
 /// personal, public if someone has the URL but not something the site points
 /// visitors or crawlers at. Nothing on the site links to them either.
-///
-/// `walk_groups` is the same tree walk `/all` runs per request, and it only
-/// reads directory entries — no image decoding — so reusing it here costs a
-/// crawler-frequency directory scan rather than justifying a second walker.
 pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
     let mut paths: Vec<String> = vec![
         "/".to_string(),
         "/about".to_string(),
         "/all".to_string(),
-        "/browse".to_string(),
         "/recent".to_string(),
         "/people".to_string(),
         "/work".to_string(),
@@ -444,16 +418,14 @@ pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
         );
     }
 
-    // Every folder that directly holds photos, i.e. every /browse page with
-    // something on it. Intermediate folders come along as each group's parents
-    // are themselves groups only when they hold photos too; listing the leaves
-    // is what matters, since the crawler reaches the rest from /browse.
+    // Every roll. Folded first so a `favs/` folder is not listed as a URL that
+    // only redirects to its parent; the root's own photos have no roll.
     if let Ok(groups) = walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None).await {
         paths.extend(
-            groups
+            fold_favs_into_rolls(groups)
                 .iter()
-                .map(|g| g.browse_url.clone())
-                .filter(|u| u != "/browse"),
+                .filter(|g| !g.path.is_empty())
+                .map(|g| views::roll_url(&g.path)),
         );
     }
 
@@ -514,194 +486,6 @@ pub async fn version() -> Response {
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(views::build_id()))
         .unwrap()
-}
-
-pub async fn browse_root(State(state): State<AppState>) -> Response {
-    match render_dir(&state, "", PageKind::BrowseRoot).await {
-        Ok(resp) => resp,
-        Err(status) => page_status_response(status),
-    }
-}
-
-pub async fn browse(
-    State(state): State<AppState>,
-    AxumPath(rel): AxumPath<String>,
-) -> Response {
-    match render_dir(&state, &rel, PageKind::BrowseSub).await {
-        Ok(resp) => resp,
-        Err(status) => page_status_response(status),
-    }
-}
-
-async fn render_dir(
-    state: &AppState,
-    rel: &str,
-    kind: PageKind,
-) -> Result<Response, StatusCode> {
-    let dir = safe_resolve(state.photos_root(), rel).await.map_err(map_path_err)?;
-
-    let mut read = tokio::fs::read_dir(&dir)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    let mut candidate_subdirs: Vec<(String, String, PathBuf)> = Vec::new();
-    let mut jpegs: Vec<(String, String)> = Vec::new();
-    let mut raw_by_stem: HashMap<String, String> = HashMap::new();
-    // A "favs" subfolder is not listed as a browsable folder; its photos are
-    // inlined ahead of this folder's own so favorites lead the grid.
-    let mut favs_rel: Option<String> = None;
-    while let Some(entry) = read.next_entry().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
-        let name = match entry.file_name().into_string() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        if name.starts_with('.') {
-            continue;
-        }
-        let ftype = match entry.file_type().await {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let rel_child = join_rel(rel, &name);
-        if ftype.is_dir() {
-            if is_skipped_dir(&name) || is_work_root(rel, &name) {
-                continue;
-            }
-            if name.eq_ignore_ascii_case("favs") {
-                favs_rel = Some(rel_child);
-                continue;
-            }
-            candidate_subdirs.push((name, rel_child, entry.path()));
-        } else if ftype.is_file() && is_visible_photo(&name) {
-            jpegs.push((name, rel_child));
-        } else if ftype.is_file() && work::is_raw_name(&name) {
-            raw_by_stem.insert(file_stem_lower(&name), name);
-        }
-    }
-    let mut images: Vec<ImageEntry> = jpegs
-        .into_iter()
-        .map(|(name, rel_child)| {
-            let raw_download_url = raw_by_stem
-                .get(&file_stem_lower(&name))
-                .map(|raw| format!("/download/{}", encode_path(&join_rel(rel, raw))));
-            ImageEntry {
-                thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
-                image_url: format!("/image/{}", encode_path(&rel_child)),
-                jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
-                raw_download_url,
-                // The archive galleries download over GET; the POST route
-                // belongs to the work delivery pages alone.
-                download_action: None,
-                dims: None,
-                srcset: None,
-                name,
-            }
-        })
-        .collect();
-
-    let mut subdirs = Vec::new();
-    for (name, rel_child, path) in candidate_subdirs {
-        if subtree_has_jpeg(&path).await {
-            subdirs.push(DirEntry {
-                name,
-                url: format!("/browse/{}", encode_path(&rel_child)),
-            });
-        }
-    }
-
-    subdirs.sort_by_key(|a| a.name.to_lowercase());
-    images.sort_by_key(|a| a.name.to_lowercase());
-
-    // Prepend any "favs" subfolder's photos so favorites lead this folder's grid.
-    if let Some(favs_rel) = favs_rel {
-        let mut fav_images = read_dir_images(state.photos_root(), &favs_rel).await;
-        fav_images.sort_by_key(|a| a.name.to_lowercase());
-        if !fav_images.is_empty() {
-            fav_images.append(&mut images);
-            images = fav_images;
-        }
-    }
-
-    if images.is_empty() && subdirs.len() == 1 {
-        let target = subdirs.into_iter().next().unwrap().url;
-        return Ok(Redirect::to(&target).into_response());
-    }
-
-    let crumbs = breadcrumbs(rel, kind);
-    let title = match kind {
-        PageKind::BrowseRoot => "Browse".to_string(),
-        PageKind::BrowseSub => rel
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_string(),
-    };
-    // Matches the URL the crawler followed to get here: same encoding as the
-    // subdirectory links, and no trailing slash, which is the spelling the
-    // trailing-slash redirects in main.rs funnel everything toward.
-    let canonical = match kind {
-        PageKind::BrowseRoot => "/browse".to_string(),
-        PageKind::BrowseSub => format!("/browse/{}", encode_path(rel.trim_end_matches('/'))),
-    };
-    Ok(
-        views::page(&title, &canonical, &crumbs, &subdirs, &images, false, views::Nav::Browse)
-            .into_response(),
-    )
-}
-
-/// Read the JPEGs directly inside `root`/`rel` (non-recursive) as gallery
-/// entries, pairing each with its sibling raw download when present. Used to
-/// inline a `favs` subfolder's photos into its parent's browse view.
-async fn read_dir_images(root: &Path, rel: &str) -> Vec<ImageEntry> {
-    let dir = match safe_resolve(root, rel).await {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
-    let mut read = match tokio::fs::read_dir(&dir).await {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let mut jpegs: Vec<(String, String)> = Vec::new();
-    let mut raw_by_stem: HashMap<String, String> = HashMap::new();
-    while let Ok(Some(entry)) = read.next_entry().await {
-        let name = match entry.file_name().into_string() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        if name.starts_with('.') {
-            continue;
-        }
-        let ftype = match entry.file_type().await {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if ftype.is_file() && is_visible_photo(&name) {
-            jpegs.push((name.clone(), join_rel(rel, &name)));
-        } else if ftype.is_file() && work::is_raw_name(&name) {
-            raw_by_stem.insert(file_stem_lower(&name), name);
-        }
-    }
-    jpegs
-        .into_iter()
-        .map(|(name, rel_child)| {
-            let raw_download_url = raw_by_stem
-                .get(&file_stem_lower(&name))
-                .map(|raw| format!("/download/{}", encode_path(&join_rel(rel, raw))));
-            ImageEntry {
-                thumb_url: format!("/thumb/{}", encode_path(&rel_child)),
-                image_url: format!("/image/{}", encode_path(&rel_child)),
-                jpg_download_url: format!("/download/{}", encode_path(&rel_child)),
-                raw_download_url,
-                // The archive galleries download over GET; the POST route
-                // belongs to the work delivery pages alone.
-                download_action: None,
-                dims: None,
-                srcset: None,
-                name,
-            }
-        })
-        .collect()
 }
 
 /// Whether any visible photo sits anywhere under `root`; stops at the first.
@@ -793,22 +577,8 @@ pub async fn person_photos(
             name: p.name,
         });
     }
-    let crumbs = vec![
-        Crumb {
-            label: "Home".into(),
-            url: Some("/".into()),
-        },
-        Crumb {
-            label: "People".into(),
-            url: Some("/people".into()),
-        },
-        Crumb {
-            label: name.clone(),
-            url: None,
-        },
-    ];
     let canonical = format!("/people/{}", encode_path(&name));
-    views::page(&name, &canonical, &crumbs, &[], &images, true, views::Nav::People).into_response()
+    views::page(&name, &canonical, &images, 0, true, views::Nav::People).into_response()
 }
 
 /// The roll a photograph belongs to — a year's own child (`2026/utopia`), or the
@@ -990,21 +760,88 @@ fn people_unavailable_response() -> Response {
 
 pub async fn all_photos(State(state): State<AppState>) -> Response {
     match walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None).await {
-        Ok(groups) => {
-            let crumbs = vec![
-                Crumb {
-                    label: "Home".into(),
-                    url: Some("/".into()),
-                },
-                Crumb {
-                    label: "All".into(),
-                    url: None,
-                },
-            ];
-            views::all_photos_page(&crumbs, &groups).into_response()
-        }
+        Ok(groups) => views::all_photos_page(&groups).into_response(),
         Err(status) => status.into_response(),
     }
+}
+
+/// `/roll/<folder>` — one folder's photographs, and nothing else.
+///
+/// The middle ground left after Browse: a roll has an address you can send
+/// someone, but the page lists no subfolders and offers no way up, so the
+/// directory tree is not something a visitor can walk. A folder that holds only
+/// other folders (`/roll/2026`) is a 404 rather than a listing for the same
+/// reason.
+///
+/// A `favs/` subfolder is folded into the front of its roll, as on `/recent`,
+/// and `/roll/<folder>/favs` redirects to the roll it leads. A `favs/` folder
+/// whose parent holds no photos has nothing to lead and is a roll by itself.
+///
+/// Bare `/roll` is routed to `/all` in `main.rs`; this handler sees an empty
+/// path only as `/roll/` spelled with extra slashes, and does the same.
+pub async fn roll(State(state): State<AppState>, AxumPath(path): AxumPath<String>) -> Response {
+    let root = state.photos_root();
+    // Normalised through `precheck` so `2026//utopia` and `2026/utopia/` name
+    // the same roll, and anything with `..` in it never reaches the disk.
+    let Ok(clean) = crate::paths::precheck(&path) else {
+        return not_found_response();
+    };
+    let segments: Vec<&str> = clean.iter().filter_map(|c| c.to_str()).collect();
+    if segments.is_empty() {
+        return Redirect::permanent("/all").into_response();
+    }
+    // The same folders the `/all` walk refuses to enter: dot folders, skipped
+    // ones, and the client work area, which has its own password-gated pages.
+    if segments.iter().any(|s| s.starts_with('.') || is_skipped_dir(s))
+        || is_work_root("", segments[0])
+    {
+        return not_found_response();
+    }
+    let rel = segments.join("/");
+    if safe_resolve(root, &rel).await.is_err() {
+        return not_found_response();
+    }
+    if let Some(parent) = favs_parent(&rel)
+        && dir_has_visible_photo(root, parent).await
+    {
+        return Redirect::permanent(&views::roll_url(parent)).into_response();
+    }
+
+    let groups = match walk_groups(root, &rel, ThumbKind::Grid, false, None).await {
+        Ok(g) => g,
+        Err(status) => return status.into_response(),
+    };
+    let Some(group) = fold_favs_into_rolls(groups)
+        .into_iter()
+        .find(|g| g.path == rel)
+    else {
+        return not_found_response();
+    };
+    let title = segments.last().copied().unwrap_or_default();
+    views::page(
+        title,
+        &views::roll_url(&rel),
+        &group.images,
+        group.favs_count,
+        false,
+        views::Nav::All,
+    )
+    .into_response()
+}
+
+/// Whether `root`/`rel` directly holds a photo the site would show. One
+/// directory, not a subtree: this is "does this folder have a roll of its own".
+async fn dir_has_visible_photo(root: &Path, rel: &str) -> bool {
+    let Ok(mut read) = tokio::fs::read_dir(root.join(rel)).await else {
+        return false;
+    };
+    while let Ok(Some(entry)) = read.next_entry().await {
+        let is_file = entry.file_type().await.is_ok_and(|t| t.is_file());
+        if is_file && entry.file_name().to_str().is_some_and(is_visible_photo) {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,9 +1083,9 @@ pub async fn notify_confirm(
 
 /// The parent folder of a `favs/` directory, or `None` for anything else.
 ///
-/// Case-insensitive on the last segment, matching how `render_dir` and
-/// `walk_groups` already recognise the folder.
-fn favs_parent(path: &str) -> Option<&str> {
+/// Case-insensitive on the last segment, matching how `walk_groups` already
+/// recognises the folder.
+pub(crate) fn favs_parent(path: &str) -> Option<&str> {
     let (parent, last) = path.rsplit_once('/')?;
     last.eq_ignore_ascii_case("favs").then_some(parent)
 }
@@ -1430,10 +1267,10 @@ async fn walk_groups(
 
         if !images.is_empty() {
             images.sort_by_key(|a| a.name.to_lowercase());
-            let (label, browse_url) = if rel.is_empty() {
-                ("Photos (root)".to_string(), "/browse".to_string())
+            let label = if rel.is_empty() {
+                "Photos (root)".to_string()
             } else {
-                (rel.clone(), format!("/browse/{}", encode_path(&rel)))
+                rel.clone()
             };
             let files: Vec<PathBuf> = images.iter().map(|img| abs.join(&img.name)).collect();
             let newest_mtime = newest_mtime_secs(files.clone()).await;
@@ -1441,7 +1278,6 @@ async fn walk_groups(
             groups.push(FolderGroup {
                 label,
                 path: rel.clone(),
-                browse_url,
                 images,
                 favs_count: 0,
                 newest_mtime,
@@ -1804,7 +1640,7 @@ async fn scan_raw_siblings(root: &Path, dir_rel: &str) -> HashMap<String, String
 }
 
 /// The "work" directory at the photos root is reserved for the client-delivery
-/// area (`/work/...`) and must not appear in the regular browse/all listings.
+/// area (`/work/...`) and must not appear in the regular `/all` and `/roll` pages.
 /// Nested folders named "work" lower in the tree are unaffected.
 pub(crate) fn is_work_root(parent_rel: &str, name: &str) -> bool {
     parent_rel.is_empty() && name == "work"
@@ -1850,54 +1686,6 @@ pub(crate) fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.split(',').any(|t| t.trim() == etag))
         .unwrap_or(false)
-}
-
-fn breadcrumbs(rel: &str, kind: PageKind) -> Vec<Crumb> {
-    let mut out = Vec::new();
-    match kind {
-        PageKind::BrowseRoot => {
-            out.push(Crumb {
-                label: "Home".into(),
-                url: Some("/".into()),
-            });
-            out.push(Crumb {
-                label: "Browse".into(),
-                url: None,
-            });
-            return out;
-        }
-        PageKind::BrowseSub => {
-            out.push(Crumb {
-                label: "Home".into(),
-                url: Some("/".into()),
-            });
-            out.push(Crumb {
-                label: "Browse".into(),
-                url: Some("/browse".into()),
-            });
-        }
-    }
-    let mut acc = String::new();
-    let parts: Vec<_> = rel.split('/').filter(|s| !s.is_empty()).collect();
-    for (i, part) in parts.iter().enumerate() {
-        if !acc.is_empty() {
-            acc.push('/');
-        }
-        acc.push_str(part);
-        let is_last = i == parts.len() - 1;
-        if is_last {
-            out.push(Crumb {
-                label: (*part).to_string(),
-                url: None,
-            });
-        } else {
-            out.push(Crumb {
-                label: (*part).to_string(),
-                url: Some(format!("/browse/{}", encode_path(&acc))),
-            });
-        }
-    }
-    out
 }
 
 pub async fn work_index(State(state): State<AppState>) -> Response {
@@ -2622,7 +2410,6 @@ mod tests {
         FolderGroup {
             label: path.to_string(),
             path: path.to_string(),
-            browse_url: format!("/browse/{path}"),
             images: names
                 .iter()
                 .map(|n| ImageEntry {

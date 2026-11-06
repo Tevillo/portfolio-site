@@ -200,9 +200,18 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/recent", get(handlers::recent_photos))
         .route("/notify", get(handlers::notify_form).post(handlers::notify_subscribe))
         .route("/notify/confirm", get(handlers::notify_confirm))
-        .route("/browse", get(handlers::browse_root))
-        .route("/browse/*path", get(handlers::browse))
+        // Browse is gone, but its URLs are indexed and sit in notification
+        // emails already sent, so they land on the whole library instead of
+        // a 404.
+        .route("/browse", get(|| permanent("/all")))
+        .route("/browse/", get(|| permanent("/all")))
+        .route("/browse/*path", get(|| permanent("/all")))
         .route("/all", get(handlers::all_photos))
+        // One folder's photos at a time. Bare `/roll` is not an index of
+        // rolls — `/all` is that — so it sends you there.
+        .route("/roll", get(|| permanent("/all")))
+        .route("/roll/", get(|| permanent("/all")))
+        .route("/roll/*path", get(handlers::roll))
         .route("/people", get(handlers::people_index))
         .route("/people/:name", get(handlers::person_photos))
         .route("/work", get(handlers::work_index))
@@ -229,7 +238,6 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/recent/", get(|| permanent("/recent")))
         .route("/notify/", get(|| permanent("/notify")))
         .route("/portfolio/", get(|| permanent("/")))
-        .route("/browse/", get(|| permanent("/browse")))
         .route("/people/", get(|| permanent("/people")))
         .route("/work/", get(|| permanent("/work")))
         .route("/nether/", get(|| permanent("/nether")))

@@ -474,7 +474,7 @@ pub fn compose(digest: &Digest) -> (String, String) {
     }
     for folder in &digest.folders {
         body.push_str("  ");
-        body.push_str(&abs_url(&format!("/browse/{}", encode_path(folder))));
+        body.push_str(&abs_url(&crate::views::roll_url(folder)));
         body.push('\n');
     }
     (subject, body)
@@ -1255,7 +1255,7 @@ mod tests {
             !body.contains(crate::views::NOTIFY_DIGEST_WHOLE_ROLL),
             "the roll links stand alone, with nothing introducing them"
         );
-        assert!(body.contains("/browse/2026/utopia"));
+        assert!(body.contains("/roll/2026/utopia"));
     }
 
     #[tokio::test]
@@ -1380,7 +1380,7 @@ mod tests {
         assert!(body.contains("/people/Bob"));
         assert!(body.contains(crate::views::NOTIFY_DIGEST_LOOK_AT));
         assert!(body.contains(crate::views::NOTIFY_DIGEST_WHOLE_ROLL));
-        assert!(body.contains("/browse/2026/caldwell-35"));
-        assert!(body.contains("/browse/2026/utopia"));
+        assert!(body.contains("/roll/2026/caldwell-35"));
+        assert!(body.contains("/roll/2026/utopia"));
     }
 }

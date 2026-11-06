@@ -215,7 +215,7 @@ on demand and cached under `cache/`:
 
 | kind | max dimension | used by |
 |---|---|---|
-| `thumbs` | 400px | `/browse`, `/people`, `/all` grids |
+| `thumbs` | 400px | `/roll`, `/people`, `/all` grids |
 | `medium` | 800px | second `srcset` candidate on natural-ratio grids |
 | `preview` | 1600px | delivery-page tiles, `/work` card covers, link previews |
 | `faces` | 320px square | `/people` tiles — a crop, not a downscale; keyed by person |

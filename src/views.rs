@@ -7,11 +7,6 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 use crate::paths::{leading_year, mtime_secs};
 use crate::work::WorkCounts;
 
-pub struct DirEntry {
-    pub name: String,
-    pub url: String,
-}
-
 pub struct ImageEntry {
     pub name: String,
     pub thumb_url: String,
@@ -53,15 +48,9 @@ pub struct ImageEntry {
     pub srcset: Option<(String, u32)>,
 }
 
-pub struct Crumb {
-    pub label: String,
-    pub url: Option<String>,
-}
-
 pub struct FolderGroup {
     pub label: String,
     pub path: String,
-    pub browse_url: String,
     pub images: Vec<ImageEntry>,
     /// How many of the *leading* images in `images` came from a `favs/`
     /// subfolder. `/recent` folds favorites into the front of the roll they
@@ -202,7 +191,6 @@ pub enum NavNode {
 pub enum Nav {
     Home,
     Recent,
-    Browse,
     All,
     People,
     Work,
@@ -434,7 +422,7 @@ pub const NOTIFY_ALL_ROLLS_LABEL: &str = "Any new set of photos";
 //       https://paulborrego.com/people/Guin
 //       https://paulborrego.com/people/Eliana
 //     or check out the whole roll at
-//       https://paulborrego.com/browse/2026/utopia
+//       https://paulborrego.com/roll/2026/utopia
 //
 // The URLs are generated; these three lines are the words around them.
 
@@ -664,6 +652,13 @@ fn section_description(slug: &str) -> &'static str {
 /// ambiguous in a sitemap and useless in an Open Graph card.
 pub fn abs_url(path: &str) -> String {
     format!("{SITE_ORIGIN}{path}")
+}
+
+/// The `/roll/...` page for a folder, given its path relative to the photos
+/// root. One spelling, used by every link, the sitemap, the notification
+/// messages and the page's own canonical, so they can never disagree.
+pub fn roll_url(path: &str) -> String {
+    format!("/roll/{}", crate::handlers::encode_path(path))
 }
 
 /// Absolute `og:image` URL for a photo, given the `/image/...` URL of the same
@@ -1013,30 +1008,16 @@ fn theme_head() -> Markup {
 
 /// The single `<h1>` naming what a listing page contains.
 ///
-/// These pages opened straight into a breadcrumb and a grid, with no heading at
-/// all: a crawler (and a screen reader tabbing through landmarks) got no
-/// statement of what the page was. Rendered visually hidden because the grids
-/// were laid out without a heading and adding a visible one would move
-/// everything down — the text is the same one a sighted visitor infers from the
-/// breadcrumb, so it is describing the page, not hiding keywords in it.
+/// These pages opened straight into a grid, with no heading at all: a crawler
+/// (and a screen reader tabbing through landmarks) got no statement of what the
+/// page was. Rendered visually hidden because the grids were laid out without a
+/// heading and adding a visible one would move everything down — the text is
+/// the same one a sighted visitor infers from the header nav, so it is
+/// describing the page, not hiding keywords in it.
 ///
 /// Not for the vault notes: their markdown already supplies its own headings.
 fn page_heading(text: &str) -> Markup {
     html! { h1.page-heading { (text) } }
-}
-
-fn crumbs_nav(crumbs: &[Crumb]) -> Markup {
-    html! {
-        nav.crumbs aria-label="breadcrumb" {
-            @for (i, c) in crumbs.iter().enumerate() {
-                @if i > 0 { span.sep { "/" } }
-                @match &c.url {
-                    Some(u) => a href=(u) { (c.label) },
-                    None => span.current { (c.label) },
-                }
-            }
-        }
-    }
 }
 
 /// How many leading tiles load eagerly at high priority. These are the ones
@@ -1132,19 +1113,19 @@ fn grid_img(img: &ImageEntry, eager: bool, sizes: &str) -> Markup {
     }
 }
 
-/// Shared flat gallery page used by the per-folder browse views and per-person
-/// photo lists: a folder list plus a single square-cropped photo grid. When
+/// Shared flat gallery page used by the `/roll` pages and per-person photo
+/// lists: a single square-cropped photo grid, its first `favs_count` tiles set
+/// off as favorites. When
 /// `show_favs` is set, a "Favorites only" toggle is shown that filters the grid
 /// down to photos living inside a `favs` folder (used by the per-person view).
-/// `canonical` is the request path this listing lives at — `/browse/2024/rolls`
+/// `canonical` is the request path this listing lives at — `/roll/2024/rolls`
 /// or `/people/sarah`. It cannot be derived from `title` (two folders in
 /// different years share a name) so the handler passes it in.
 pub fn page(
     title: &str,
     canonical: &str,
-    crumbs: &[Crumb],
-    subdirs: &[DirEntry],
     images: &[ImageEntry],
+    favs_count: usize,
     show_favs: bool,
     active: Nav,
 ) -> Markup {
@@ -1171,7 +1152,6 @@ pub fn page(
             body {
                 (site_header(active))
                 main {
-                    (crumbs_nav(crumbs))
                     (page_heading(&match active {
                         Nav::People => format!("Photographs of {title}"),
                         _ => format!("Photographs in {title}"),
@@ -1191,23 +1171,12 @@ pub fn page(
                             }
                         }
                     }
-                    @if !subdirs.is_empty() {
-                        section.dirs {
-                            h2 { "Folders" }
-                            ul.dirlist {
-                                @for d in subdirs {
-                                    li { a href=(d.url) { (d.name) "/" } }
-                                }
-                            }
-                        }
-                    }
                     @if !images.is_empty() {
                         section.gallery {
-                            @if !subdirs.is_empty() { h2 { "Photos" } }
-                            (image_grid(images, false, EAGER_TILES, 0))
+                            (image_grid(images, false, EAGER_TILES, favs_count))
                         }
                     }
-                    @if subdirs.is_empty() && images.is_empty() {
+                    @if images.is_empty() {
                         p.empty { "Nothing here yet." }
                     }
                 }
@@ -1229,12 +1198,6 @@ pub fn people_index_page(title: &str, people: &[PersonEntry]) -> Markup {
             body {
                 (site_header(Nav::People))
                 main {
-                    // No breadcrumb bar. Everywhere else one earns its place by
-                    // naming a path that is several folders deep; here it was
-                    // "Home / People" above a page called People, reached from
-                    // the top nav — a row of chrome saying nothing the header
-                    // does not. A person's own page keeps its crumbs, which do
-                    // name a real way back.
                     (page_heading("People in Paul Borrego's photographs"))
                     @if people.is_empty() {
                         p.empty { "No people tagged yet." }
@@ -1344,7 +1307,6 @@ fn nether_sidebar(nav: &[NavNode], view: NetherView) -> Markup {
 pub fn nether_page(
     title: &str,
     canonical: &str,
-    crumbs: &[Crumb],
     nav: &[NavNode],
     content: Markup,
 ) -> Markup {
@@ -1362,7 +1324,6 @@ pub fn nether_page(
                     div.nether-layout {
                         (nether_sidebar(nav, NetherView::Notes))
                         article.nether-content {
-                            (crumbs_nav(crumbs))
                             // Most notes open with a `# Heading`, which becomes
                             // this page's h1; plenty do not, and those went out
                             // with no heading at all. Supply the note's name only
@@ -1383,7 +1344,7 @@ pub fn nether_page(
 
 /// Render the Obsidian-style graph view. `graph_json` is a trusted JSON string
 /// describing nodes and edges, consumed by `graph.js` to lay out the canvas.
-pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) -> Markup {
+pub fn nether_graph_page(nav: &[NavNode], graph_json: &str) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -1400,7 +1361,6 @@ pub fn nether_graph_page(crumbs: &[Crumb], nav: &[NavNode], graph_json: &str) ->
                         (nether_sidebar(nav, NetherView::Graph))
                         article.nether-content.graph-content {
                             div.graph-stage {
-                                (crumbs_nav(crumbs))
                                 canvas #graph-canvas {}
                                 div.graph-empty hidden { "This vault has no notes to graph yet." }
                             }
@@ -1433,15 +1393,13 @@ fn gallery_sections(groups: &[FolderGroup]) -> Markup {
                         button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
                             (chevron())
                         }
-                        // A tag-driven section's photos are spread across the
-                        // tree, so it has no folder to link to and renders as
-                        // plain text — the shared `.section-label` styling is
-                        // element-agnostic, so the heading looks the same either
-                        // way.
-                        @if g.browse_url.is_empty() {
+                        // Every /recent section is a folder, so every one has
+                        // a roll to link to; the root's photos are the one
+                        // exception, having no folder name to put in a URL.
+                        @if g.path.is_empty() {
                             span.section-label { (g.label) }
                         } @else {
-                            a.section-label href=(g.browse_url) { (g.label) }
+                            a.section-label href=(roll_url(&g.path)) { (g.label) }
                         }
                         // No count here, unlike /all's heading. How many files
                         // sit in a folder is archive information: useful when
@@ -1881,8 +1839,7 @@ pub fn portfolio_page(
 
 /// `/recent` — the folders named in `photos/.recent`, newest drop first.
 ///
-/// A listing, so it opens on a breadcrumb like every other listing and keeps the
-/// collapsible sections of [`gallery_sections`]. The section order is the order
+/// A listing that keeps the collapsible sections of [`gallery_sections`]. The section order is the order
 /// of the lines in `.recent`, which is deliberate — that file is the owner's
 /// statement of what the current drop is, ordering included.
 pub fn recent_page(groups: &[FolderGroup]) -> Markup {
@@ -1898,16 +1855,6 @@ pub fn recent_page(groups: &[FolderGroup]) -> Markup {
     // borrows its title, so an inline `format!` temporary would be dropped while
     // the borrow is still live.
     let page_title = format!("Recent — Photographs by {OWNER_NAME}");
-    let crumbs = [
-        Crumb {
-            label: "Home".into(),
-            url: Some("/".into()),
-        },
-        Crumb {
-            label: "Recent".into(),
-            url: None,
-        },
-    ];
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -1923,10 +1870,9 @@ pub fn recent_page(groups: &[FolderGroup]) -> Markup {
             body {
                 (site_header(Nav::Recent))
                 // `recent` rather than `portfolio`: this page lays its photos
-                // out at Browse's density and full width, not the home page's
+                // out at the gallery grid's density and full width, not the home page's
                 // two wide columns with deep side margins.
                 main.recent {
-                    (crumbs_nav(&crumbs))
                     (page_heading("Recent photographs"))
                     (gallery_sections(groups))
                 }
@@ -1957,20 +1903,6 @@ pub fn notify_page(
     message: Option<(&str, bool)>,
 ) -> Markup {
     let page_title = format!("Notifications — Photographs by {OWNER_NAME}");
-    let crumbs = [
-        Crumb {
-            label: "Home".into(),
-            url: Some("/".into()),
-        },
-        Crumb {
-            label: "People".into(),
-            url: Some("/people".into()),
-        },
-        Crumb {
-            label: "Notifications".into(),
-            url: None,
-        },
-    ];
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -1984,7 +1916,6 @@ pub fn notify_page(
             body {
                 (site_header(Nav::People))
                 main {
-                    (crumbs_nav(&crumbs))
                     (page_heading("Photo notifications"))
                     @if let Some((text, is_error)) = message {
                         p.notify-message.is-error[is_error] { (text) }
@@ -2090,7 +2021,6 @@ struct TreeNode {
     path: String,
     /// DOM id of this folder's section, so a tree row can link to it.
     id: String,
-    browse_url: String,
     /// Images directly in this folder.
     direct: usize,
     /// Images in this folder and every descendant.
@@ -2107,16 +2037,10 @@ struct TreeNode {
 
 impl TreeNode {
     fn new(name: &str, path: &str) -> Self {
-        let browse_url = if path.is_empty() {
-            "/browse".to_string()
-        } else {
-            format!("/browse/{}", crate::handlers::encode_path(path))
-        };
         Self {
             name: name.to_string(),
             path: path.to_string(),
             id: String::new(),
-            browse_url,
             direct: 0,
             total: 0,
             depth: 0,
@@ -2315,7 +2239,14 @@ fn tree_row(node: &TreeNode) -> Markup {
 /// Heading for one `/all` section. Folders with no photos of their own still
 /// get one: on narrow screens, where the sidebar is hidden, it is the only
 /// handle for collapsing a whole year or trip.
-fn tree_section_heading(node: &TreeNode, group: Option<&FolderGroup>) -> Markup {
+///
+/// `roll` is the `/roll/...` page the label links to, or `None` for a heading
+/// with no roll behind it — a folder holding only other folders, or the root.
+fn tree_section_heading(
+    node: &TreeNode,
+    group: Option<&FolderGroup>,
+    roll: Option<&str>,
+) -> Markup {
     let label = if node.path.is_empty() {
         "Photos (root)"
     } else {
@@ -2330,7 +2261,10 @@ fn tree_section_heading(node: &TreeNode, group: Option<&FolderGroup>) -> Markup 
             button.collapse-toggle type="button" aria-label="Collapse folder" aria-expanded="true" {
                 (chevron())
             }
-            a.section-label href=(group.map_or(node.browse_url.as_str(), |g| g.browse_url.as_str())) { (label) }
+            @match roll {
+                Some(url) => a.section-label href=(url) { (label) },
+                None => span.section-label { (label) },
+            }
             span.section-count { "(" (count) ")" }
         }
     }
@@ -2342,17 +2276,27 @@ fn tree_section_heading(node: &TreeNode, group: Option<&FolderGroup>) -> Markup 
 /// photos consumes it, everything below stays lazy.
 fn tree_sections(node: &TreeNode, groups: &[FolderGroup], eager: &mut usize) -> Markup {
     let group = groups.iter().find(|g| g.path == node.path);
+    // A `favs/` folder is shown as its own section here, but its roll page is
+    // its parent's, which leads with the favorites. Only when the parent has
+    // photos of its own, though: otherwise there is no roll for it to lead and
+    // it is one by itself.
+    let roll = group.filter(|g| !g.path.is_empty()).map(|g| {
+        match crate::handlers::favs_parent(&g.path) {
+            Some(parent) if groups.iter().any(|p| p.path == parent) => roll_url(parent),
+            _ => roll_url(&g.path),
+        }
+    });
     html! {
         @match group {
             Some(g) => {
                 section.gallery data-path=(node.path) id=(node.id) style=(format!("--depth:{}", node.depth)) {
-                    (tree_section_heading(node, Some(g)))
+                    (tree_section_heading(node, Some(g), roll.as_deref()))
                     (image_grid(&g.images, false, std::mem::take(eager), g.favs_count))
                 }
             }
             None => {
                 section.gallery.folder-node data-path=(node.path) id=(node.id) style=(format!("--depth:{}", node.depth)) {
-                    (tree_section_heading(node, None))
+                    (tree_section_heading(node, None, None))
                 }
             }
         }
@@ -2365,7 +2309,7 @@ fn tree_sections(node: &TreeNode, groups: &[FolderGroup], eager: &mut usize) -> 
 /// `/all`: the whole library on one page, with a collapsible folder tree down
 /// the left on desktop and inline collapsible headers on narrow screens. Both
 /// drive the same per-path open/closed state in `collapse.js`.
-pub fn all_photos_page(crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup {
+pub fn all_photos_page(groups: &[FolderGroup]) -> Markup {
     let root = build_tree(groups);
     let mut eager = EAGER_TILES;
     html! {
@@ -2385,13 +2329,11 @@ pub fn all_photos_page(crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup {
                     (page_heading("Every photograph by Paul Borrego"))
                     @if groups.is_empty() {
                         div.all-column {
-                            (crumbs_nav(crumbs))
                             p.empty { "Nothing here yet." }
                         }
                     } @else {
                         (folder_tree_sidebar(&root))
                         div.all-column {
-                            (crumbs_nav(crumbs))
                             section.all-controls {
                                 button.favs-toggle type="button" aria-pressed="false" {
                                     span.favs-toggle-track { span.favs-toggle-thumb {} }
@@ -2417,10 +2359,6 @@ pub fn all_photos_page(crumbs: &[Crumb], groups: &[FolderGroup]) -> Markup {
 
 /// The `/work` index: one card per job.
 ///
-/// **No breadcrumb.** A two-level trail from a page the header's own nav already
-/// marks as current tells a visitor nothing they cannot see, and the delivery
-/// pages it links to dropped theirs for the same reason. The nav is the way
-/// around.
 pub fn work_index_page(title: &str, items: &[WorkIndexEntry]) -> Markup {
     html! {
         (DOCTYPE)
@@ -2646,13 +2584,7 @@ fn work_downloads_popover(
 /// name is the header's [`site_header_titled`] centre, the sets and the download
 /// control share the sticky bar, and everything else is photographs.
 ///
-/// **No breadcrumb.** Every other listing on the site opens on one, because
-/// every other listing sits inside the archive's folder tree and the trail is
-/// how you climb back out. A delivery does not: it is one job, reached from a
-/// link someone was sent, and "Home / Work / marisol sam wedding" spent a band
-/// of the page restating the name already centred in the header above it and
-/// offering a client two routes into an archive that is not theirs. The header's
-/// brand and nav are the way out, as they are on the portfolio.
+/// The header's brand and nav are the way out, as they are on the portfolio.
 ///
 /// Two states, gated by an HttpOnly cookie, and both live in the popover now:
 ///   - **Pre-auth**: the password form, and tiles carrying no file URL, so the
@@ -3006,20 +2938,6 @@ pub fn share_page(max_bytes: u64) -> Markup {
         .last()
         .map(|(v, _)| *v)
         .unwrap_or("24h");
-    let crumbs = [
-        Crumb {
-            label: "Home".into(),
-            url: Some("/".into()),
-        },
-        Crumb {
-            label: "About".into(),
-            url: Some("/about#programming-projects".into()),
-        },
-        Crumb {
-            label: SHARE_NAME.into(),
-            url: None,
-        },
-    ];
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -3031,7 +2949,6 @@ pub fn share_page(max_bytes: u64) -> Markup {
             body {
                 (site_header(Nav::About))
                 main.share {
-                    (crumbs_nav(&crumbs))
                     div.share-top {
                         // Visible, unlike the other pages' hidden heading: on
                         // a tool page the name is what tells you where you are.
@@ -3146,7 +3063,7 @@ pub fn share_page(max_bytes: u64) -> Markup {
 /// The page every unmatched URL gets, and every page route that can't find what
 /// was asked for.
 ///
-/// This site needs one more than most: `/browse` URLs are indexed and the
+/// This site needs one more than most: `/roll` URLs are indexed and the
 /// archive gets reorganised, so old links will rot, and until now a rotted one
 /// was a blank white page — no header, no nav, no way back. The words on it are
 /// the owner's and are empty by default (see [`NOT_FOUND_HEADING`]); what makes

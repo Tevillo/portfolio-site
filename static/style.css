@@ -1,6 +1,6 @@
 /* Light theme. The three foreground tokens below are pinned to WCAG AA (4.5:1)
    against *both* --bg and --surface, because every one of them lands on both:
-   --muted carries the tagline, top nav, breadcrumbs, counts and footer, and
+   --muted carries the tagline, top nav, counts and footer, and
    --accent is every link on the site. They were #6c7559 / #6b8e4e / #87a96b,
    measuring 4.18 / 3.23 / 2.29 on --bg — all three below AA, and the third
    meant hovering a link *lowered* its contrast. Same hue and saturation, walked
@@ -224,22 +224,6 @@ li.tile a:focus-visible {
 main {
   margin: 2rem 0;
   padding: 0 1.5rem;
-}
-
-nav.crumbs {
-  margin-bottom: 1.5rem;
-  font-size: 0.95rem;
-  color: var(--muted);
-}
-
-nav.crumbs .sep {
-  margin: 0 0.4rem;
-  color: var(--border);
-}
-
-nav.crumbs .current {
-  color: var(--text);
-  font-weight: 500;
 }
 
 section.dirs {
@@ -646,40 +630,6 @@ ul.tree-list ul.tree-list {
   display: none;
 }
 
-ul.dirlist {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-ul.dirlist li a {
-  display: inline-block;
-  padding: 0.4rem 0.8rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-}
-
-ul.dirlist li a:hover {
-  background: var(--accent);
-  color: var(--on-accent);
-  border-color: var(--accent);
-  text-decoration: none;
-}
-
-ul.dirlist li a .count {
-  color: var(--muted);
-  font-size: 0.85em;
-}
-
-ul.dirlist li a:hover .count {
-  color: var(--on-accent);
-}
-
 ul.grid {
   list-style: none;
   padding: 0;
@@ -876,8 +826,8 @@ main.nether {
 }
 
 /* ---- Nether graph view ---- */
-/* The graph fills the whole pane below the header, edge-to-edge, with the
-   breadcrumb floating over the canvas so the drawing area is maximised.
+/* The graph fills the whole pane below the header, edge-to-edge, so the
+   drawing area is maximised.
    The compound selector outranks the `.nether-content` defaults above. */
 .nether-content.graph-content {
   max-width: none;
@@ -891,17 +841,6 @@ main.nether {
   height: calc(100vh - 4rem);
   background: var(--surface);
   overflow: hidden;
-}
-
-.graph-stage .crumbs {
-  position: absolute;
-  top: 0.75rem;
-  left: 1rem;
-  z-index: 1;
-  padding: 0.3rem 0.7rem;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--bg) 80%, transparent);
-  backdrop-filter: blur(2px);
 }
 
 #graph-canvas {
@@ -1297,7 +1236,7 @@ li.work-card a {
     border-color 0.15s ease;
 }
 
-/* An accent rail plus a lift, rather than the accent flood `ul.dirlist` uses.
+/* An accent rail plus a lift, rather than an accent flood.
    Same idea at a different size: flooding a chip reads as emphasis, flooding a
    card this large repaints a third of the viewport to say "the pointer is
    here". */
@@ -2805,11 +2744,11 @@ body > main {
   color: var(--accent);
 }
 
-/* /recent lays out like Browse — the same tile width, the same gap, the same
-   full-page width — but through columns rather than a CSS grid, so the photos
-   keep their real proportions instead of being cropped to squares. Browse's
-   `minmax(220px, 1fr)` and `gap: 1rem` are mirrored here as the column width
-   and column gap. */
+/* /recent lays out like the `ul.grid` galleries — the same tile width, the
+   same gap, the same full-page width — but through columns rather than a CSS
+   grid, so the photos keep their real proportions instead of being cropped to
+   squares. The grid's `minmax(220px, 1fr)` and `gap: 1rem` are mirrored here
+   as the column width and column gap. */
 main.recent ul.work-grid {
   columns: 220px;
   column-gap: 1rem;
