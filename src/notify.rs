@@ -65,7 +65,7 @@ pub(crate) fn log_path(data_root: &Path, name: &str) -> PathBuf {
     data_root.join(LOGS_DIR).join(name)
 }
 
-fn token_path(data_root: &Path, name: &str) -> PathBuf {
+pub(crate) fn token_path(data_root: &Path, name: &str) -> PathBuf {
     data_root.join(TOKENS_DIR).join(name)
 }
 
@@ -712,7 +712,7 @@ pub struct Sender {
     email_endpoint: Option<String>,
 }
 
-async fn read_secret(path: PathBuf) -> Option<String> {
+pub(crate) async fn read_secret(path: PathBuf) -> Option<String> {
     match tokio::fs::read_to_string(&path).await {
         Ok(s) => {
             let t = s.trim().to_string();

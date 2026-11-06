@@ -365,6 +365,7 @@ pub const ABOUT_INLINE_LINKS: &[(&str, &str)] = &[
     ),
     ("Batch", "https://github.com/Tevillo/batch-go"),
     ("Guess-Up", "https://github.com/Tevillo/Guess-Up"),
+    ("Filedrop", "/share"),
 ];
 
 /// Portfolio sections, by slug, that the About page's random photograph is
@@ -408,7 +409,10 @@ pub const ABOUT_SECTIONS: &[(&str, &[&str], Option<(&str, &str)>)] = &[
             "Batch This is a simple batch renamer cli tool that I primarily use to rename photos after scanning. Built it pretty quickly and as practice for learning go.",
             "Guess-Up This is a terminal version of the app heads-up. Can either play with one device or play over internet via a host. Made because me and my friends love playing custom heads-up lists over different series like ASOIAF(Game of Thrones), The Expanse, DBZ, etc.",
         ],
-        None,
+        // The project's name as the label: a placeholder until the owner
+        // words it. A paragraph starting "Filedrop" also gets linked, via
+        // ABOUT_INLINE_LINKS.
+        Some((SHARE_NAME, "/share")),
     ),
 ];
 
@@ -455,6 +459,33 @@ pub const NOTIFY_DIGEST_ROLLS_ONLY: &str = "New photos have been uploaded!";
 
 /// Text of the link to `/notify` from the People pages.
 pub const NOTIFY_LINK_LABEL: &str = "Get notified about new photos";
+
+// `/share` — the filedrop upload page (see `share.rs`).
+//
+// Functional UI text in the same sense as the /notify status messages: a form
+// that cannot say why an upload failed is broken. Written by the assistant from
+// what the page does, not by the owner, so every string here is his to reword.
+// The field labels and button text are in `share_page` with the markup, the way
+// /notify's are.
+
+/// The project's own name, used as the page title and on its About page link.
+pub const SHARE_NAME: &str = "Filedrop";
+
+/// Paragraph above the form saying what this is. Empty renders nothing — the
+/// owner's to write.
+pub const SHARE_INTRO: &str = "";
+
+/// Hint under the download limit. Empty renders nothing. A natural thing to say
+/// here is that chat apps fetching a pasted link for a preview use up a
+/// download (filedrop's README); the owner's to write.
+pub const SHARE_DOWNLOADS_HINT: &str = "";
+
+pub const SHARE_ERR_TOO_LARGE: &str = "That is over the size limit.";
+pub const SHARE_ERR_FULL: &str = "Storage is full right now. Try again later.";
+pub const SHARE_ERR_UNAVAILABLE: &str = "Uploads are not available right now.";
+pub const SHARE_ERR_FAILED: &str = "The upload did not complete.";
+pub const SHARE_ERR_BAD_NAME: &str = "That file name cannot be used.";
+pub const SHARE_ERR_TOO_MANY_FILES: &str = "That folder has too many files.";
 // What someone reads once the confirmation link has been followed. Assembled
 // from these three pieces, because which of them applies depends on what they
 // ticked: the people half, the all-rolls half, or both.
@@ -2915,6 +2946,137 @@ pub fn about_page(photo: Option<(&str, &str, (u32, u32))>) -> Markup {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                (site_footer())
+            }
+        }
+    }
+}
+
+/// `2147483648` → `"2 GB"`. Binary units under the decimal names, as file
+/// managers on most desktops print them, so the limit reads the same as the
+/// size a visitor sees on their own file.
+fn size_label(bytes: u64) -> String {
+    const GB: u64 = 1024 * 1024 * 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes >= GB && bytes % GB == 0 {
+        format!("{} GB", bytes / GB)
+    } else {
+        format!("{} MB", bytes / MB)
+    }
+}
+
+/// `/share`: pick a file or a folder, set the link's expiry and download
+/// limit, upload, get a link.
+///
+/// Everything happens in `share.js` — choosing a folder, zipping it, the upload
+/// progress and the link at the end — so the form has no `action` and a
+/// `<noscript>` note stands in for it without JavaScript. Messages the script
+/// shows ride on `data-*` attributes so their words stay in this file with the
+/// rest of the copy.
+///
+/// `noindex`: it is a tool, not content, and an indexed open upload form is an
+/// invitation to everyone who would abuse one.
+pub fn share_page(max_bytes: u64) -> Markup {
+    let page_title = format!("{SHARE_NAME} — {OWNER_NAME}");
+    let max = size_label(max_bytes);
+    let crumbs = [
+        Crumb {
+            label: "Home".into(),
+            url: Some("/".into()),
+        },
+        Crumb {
+            label: "About".into(),
+            url: Some("/about#programming-projects".into()),
+        },
+        Crumb {
+            label: SHARE_NAME.into(),
+            url: None,
+        },
+    ];
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block(
+                Head::new(&page_title, site_description(), "/share")
+                    .scripts(&["/static/share.js"])
+                    .noindex(),
+            ))
+            body {
+                (site_header(Nav::About))
+                main {
+                    (crumbs_nav(&crumbs))
+                    (page_heading(SHARE_NAME))
+                    noscript {
+                        p.notify-message.is-error { "This page needs JavaScript to upload." }
+                    }
+                    form.notify-form.share-form #share-form
+                        data-max-bytes=(max_bytes)
+                        data-err-too-large=(SHARE_ERR_TOO_LARGE)
+                        data-err-failed=(SHARE_ERR_FAILED)
+                        data-err-too-many=(SHARE_ERR_TOO_MANY_FILES)
+                    {
+                        @if !SHARE_INTRO.is_empty() {
+                            p.notify-intro { (SHARE_INTRO) }
+                        }
+                        fieldset.notify-fieldset {
+                            legend { "File" }
+                            div.share-pick {
+                                label.share-pick-button {
+                                    input #share-file type="file";
+                                    span { "Choose file" }
+                                }
+                                label.share-pick-button {
+                                    input #share-folder type="file" webkitdirectory multiple;
+                                    span { "Choose folder" }
+                                }
+                            }
+                            p #share-chosen .share-chosen aria-live="polite" {}
+                            span.handle-hint {
+                                "Max size: " (max) ". A folder is uploaded as one .zip."
+                            }
+                        }
+                        fieldset.notify-fieldset {
+                            legend { "Link" }
+                            label.handle-field {
+                                span.handle-label { "Expires after" }
+                                select.handle-input.share-select name="expires" {
+                                    option value="1h" { "1 hour" }
+                                    option value="6h" { "6 hours" }
+                                    option value="12h" { "12 hours" }
+                                    option value="24h" selected { "24 hours" }
+                                }
+                            }
+                            label.handle-field {
+                                span.handle-label { "Download limit" }
+                                input.handle-input.share-number type="number" name="downloads"
+                                      min="1" max="1000" step="1" value="1" inputmode="numeric";
+                            }
+                            label.channel-option.share-unlimited {
+                                input type="checkbox" name="unlimited";
+                                span { "Unlimited downloads" }
+                            }
+                            @if !SHARE_DOWNLOADS_HINT.is_empty() {
+                                span.handle-hint { (SHARE_DOWNLOADS_HINT) }
+                            }
+                        }
+                        button.notify-submit type="submit" disabled { "Upload" }
+                        div #share-progress .share-progress hidden {
+                            progress max="1" value="0" {}
+                            span.share-status aria-live="polite" {}
+                        }
+                        p #share-error .notify-message.is-error.share-error role="alert" hidden {}
+                        div #share-result .share-result hidden {
+                            label.handle-field {
+                                span.handle-label { "Download link" }
+                                div.share-link-row {
+                                    input #share-link .handle-input type="text" readonly;
+                                    button #share-copy .share-copy type="button" { "Copy" }
+                                }
+                            }
+                            span #share-summary .handle-hint {}
                         }
                     }
                 }

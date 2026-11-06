@@ -6,6 +6,7 @@ mod paths;
 mod people;
 mod portfolio;
 mod recent;
+mod share;
 mod state;
 mod thumbs;
 mod views;
@@ -23,7 +24,8 @@ use anyhow::{Context, Result};
 use axum::Router;
 use axum::http::{HeaderValue, header};
 use axum::response::Redirect;
-use axum::routing::{get, post};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{get, post, put};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -206,6 +208,15 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/work", get(handlers::work_index))
         .route("/work/:name", get(handlers::work_detail))
         .route("/work/:name/auth", post(handlers::work_auth))
+        // The filedrop front end. The upload streams through to filedrop with
+        // the site's key attached, so it lifts axum's 2 MB body cap; the size
+        // limit that applies is filedrop's, checked in `share::upload` before
+        // any of the body is read.
+        .route("/share", get(share::page))
+        .route(
+            "/share/upload",
+            put(share::upload).layer(DefaultBodyLimit::disable()),
+        )
         .route("/nether", get(nether::root))
         .route("/nether/graph", get(nether::graph))
         .route("/nether/*path", get(nether::note))
@@ -222,6 +233,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/people/", get(|| permanent("/people")))
         .route("/work/", get(|| permanent("/work")))
         .route("/nether/", get(|| permanent("/nether")))
+        .route("/share/", get(|| permanent("/share")))
         // On the pages router, and before the layer below, so an unmatched URL
         // gets the same `no-cache` treatment as a real page — and so the assets
         // router, merged in below, contributes no fallback of its own.

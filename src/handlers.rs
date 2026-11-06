@@ -392,6 +392,7 @@ pub async fn robots_txt() -> Response {
          Disallow: /download/\n\
          Disallow: /work/*/download\n\
          Disallow: /work/*/file/\n\
+         Disallow: /share/upload\n\
          # Build-id probe behind the client-side reload check.\n\
          Disallow: /version\n\
          \n\

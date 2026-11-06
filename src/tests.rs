@@ -2952,3 +2952,181 @@ async fn a_download_that_404s_is_not_logged() {
     assert!(download_log(&f).is_empty(), "{:?}", download_log(&f));
 }
 
+
+// ---------------------------------------------------------------------------
+// /share — the filedrop front end
+// ---------------------------------------------------------------------------
+
+/// What the mock filedrop saw of one upload.
+#[derive(Default, Clone)]
+struct SeenUpload {
+    auth: Option<String>,
+    content_length: Option<String>,
+    path: String,
+    query: Option<String>,
+    body: Vec<u8>,
+}
+
+/// A stand-in filedrop on an ephemeral port that records the upload and answers
+/// the way the real one does. Points the fixture at it through
+/// `data/token/filedrop.endpoint`.
+async fn mock_filedrop(
+    f: &Fixture,
+    status: StatusCode,
+    reply: &'static str,
+) -> std::sync::Arc<std::sync::Mutex<Option<SeenUpload>>> {
+    use axum::extract::{OriginalUri, State as AxState};
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let app = Router::new()
+        .route(
+            "/filedrop/:name",
+            axum::routing::put(
+                move |AxState(seen): AxState<std::sync::Arc<std::sync::Mutex<Option<SeenUpload>>>>,
+                      OriginalUri(uri): OriginalUri,
+                      headers: axum::http::HeaderMap,
+                      body: axum::body::Bytes| async move {
+                    let h = |n: header::HeaderName| {
+                        headers.get(n).and_then(|v| v.to_str().ok()).map(str::to_string)
+                    };
+                    *seen.lock().unwrap() = Some(SeenUpload {
+                        auth: h(header::AUTHORIZATION),
+                        content_length: h(header::CONTENT_LENGTH),
+                        path: uri.path().to_string(),
+                        query: uri.query().map(str::to_string),
+                        body: body.to_vec(),
+                    });
+                    (status, reply)
+                },
+            ),
+        )
+        .with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tokens = f.data.join(notify::TOKENS_DIR);
+    std::fs::create_dir_all(&tokens).unwrap();
+    std::fs::write(tokens.join(share::KEY_FILE), "fd_testkey\n").unwrap();
+    std::fs::write(
+        tokens.join(share::ENDPOINT_FILE),
+        format!("http://{addr}/filedrop"),
+    )
+    .unwrap();
+    seen
+}
+
+async fn share_put(router: &Router, uri: &str, body: &'static [u8]) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header(header::CONTENT_LENGTH, body.len())
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn share_page_renders_and_is_noindex() {
+    let f = fixture();
+    let resp = get(&f.router, "/share").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_string(resp).await;
+    assert!(html.contains("noindex"), "the open upload form must stay out of search");
+    assert!(html.contains("/static/share.js"));
+    assert!(html.contains("webkitdirectory"), "no folder picker");
+    assert!(html.contains("Max size: 2 GB"), "size limit not shown");
+    assert!(html.contains(&format!("data-max-bytes=\"{}\"", share::MAX_UPLOAD_BYTES)));
+}
+
+#[tokio::test]
+async fn about_links_to_share() {
+    let f = fixture();
+    let html = body_of(&f.router, "/about").await;
+    assert!(html.contains("href=\"/share\""), "About page does not link to /share");
+}
+
+#[tokio::test]
+async fn share_upload_forwards_with_key_length_and_settings() {
+    let f = fixture();
+    let seen = mock_filedrop(&f, StatusCode::CREATED, "https://example.com/filedrop/abc123\n").await;
+    let resp = share_put(
+        &f.router,
+        "/share/upload?name=holiday%20photo.jpg&expires=6h&downloads=-1",
+        b"hello filedrop",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(body_string(resp).await, "https://example.com/filedrop/abc123");
+
+    let seen = seen.lock().unwrap().clone().expect("filedrop never saw the upload");
+    assert_eq!(seen.auth.as_deref(), Some("Bearer fd_testkey"));
+    assert_eq!(seen.content_length.as_deref(), Some("14"), "streamed upload lost its Content-Length");
+    assert_eq!(seen.path, "/filedrop/holiday%20photo.jpg");
+    assert_eq!(seen.query.as_deref(), Some("expires=6h&downloads=-1"));
+    assert_eq!(seen.body, b"hello filedrop");
+}
+
+#[tokio::test]
+async fn share_upload_omits_unset_settings() {
+    let f = fixture();
+    let seen = mock_filedrop(&f, StatusCode::CREATED, "https://example.com/filedrop/x").await;
+    let resp = share_put(&f.router, "/share/upload?name=a.txt&expires=", b"x").await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(seen.lock().unwrap().clone().unwrap().query, None);
+}
+
+#[tokio::test]
+async fn share_upload_maps_filedrop_errors() {
+    let f = fixture();
+    mock_filedrop(&f, StatusCode::INSUFFICIENT_STORAGE, "error: not enough storage left").await;
+    let resp = share_put(&f.router, "/share/upload?name=a.txt", b"x").await;
+    assert_eq!(resp.status(), StatusCode::INSUFFICIENT_STORAGE);
+    assert_eq!(body_string(resp).await, views::SHARE_ERR_FULL);
+
+    let f = fixture();
+    mock_filedrop(&f, StatusCode::BAD_REQUEST, "error: expires must be a duration\n").await;
+    let resp = share_put(&f.router, "/share/upload?name=a.txt&expires=9d", b"x").await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_string(resp).await, "expires must be a duration");
+}
+
+#[tokio::test]
+async fn share_upload_refuses_before_forwarding() {
+    let f = fixture();
+    let seen = mock_filedrop(&f, StatusCode::CREATED, "unused").await;
+
+    // Over the limit, judged on Content-Length alone.
+    let resp = f
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/share/upload?name=big.bin")
+                .header(header::CONTENT_LENGTH, share::MAX_UPLOAD_BYTES + 1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    for name in ["", "..", "a%2Fb", "a%5Cb", "a%0Ab"] {
+        let resp = share_put(&f.router, &format!("/share/upload?name={name}"), b"x").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "name {name:?} was accepted");
+    }
+    assert!(seen.lock().unwrap().is_none(), "a refused upload reached filedrop");
+}
+
+#[tokio::test]
+async fn share_upload_without_key_is_unavailable() {
+    let f = fixture();
+    let resp = share_put(&f.router, "/share/upload?name=a.txt", b"x").await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body_string(resp).await, views::SHARE_ERR_UNAVAILABLE);
+}
