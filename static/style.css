@@ -2840,17 +2840,121 @@ li.fav-divider {
   border-top: 3px solid var(--border);
 }
 
-/* ---- /share: the filedrop upload form ----------------------------------------
-   Built on the /notify form's pieces (.notify-form, .notify-fieldset,
-   .handle-*), narrower because there is no people grid to spread out. */
+/* ---- /share: the filedrop upload page ---------------------------------------
+   Two columns on a wide screen: a drop zone that takes most of the width and
+   the link settings in a panel beside it. One stacked column below 900px.
+   The row above both holds the visible title and the repository link. */
+main.share {
+  /* `body` is a flex column, so auto side margins alone would shrink main to
+     its content; the width makes it take the space up to the cap. */
+  width: 100%;
+  box-sizing: border-box;
+  max-width: 76rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.share-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+
+.share-title {
+  margin: 0;
+  font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.3rem);
+  letter-spacing: -0.01em;
+}
+
+.share-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.95rem;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.share-source:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.share-intro {
+  color: var(--muted);
+  line-height: 1.6;
+  max-width: 46rem;
+  margin: 0 0 1.25rem;
+}
+
 .share-form {
-  max-width: 40rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(19rem, 1fr);
+  gap: 1.25rem;
+  align-items: stretch;
+}
+
+/* ---- Drop zone ---- */
+.share-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 0.6rem;
+  min-height: clamp(18rem, 48vh, 30rem);
+  padding: 2rem 1.5rem;
+  border: 2px dashed var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.share-drop.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.share-drop.has-file {
+  border-style: solid;
+  border-color: var(--accent);
+}
+
+.share-drop.is-busy {
+  opacity: 0.7;
+}
+
+.share-drop-icon {
+  color: var(--accent);
+  margin-bottom: 0.25rem;
+}
+
+.share-drop-text {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.share-drop-or {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .share-pick {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 0.6rem;
+  margin-top: 0.2rem;
 }
 
 /* The real file inputs are clipped, not hidden, so they stay focusable and
@@ -2859,13 +2963,15 @@ li.fav-divider {
   position: relative;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
   cursor: pointer;
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
+  padding: 0.5rem 1.2rem;
+  border-radius: 6px;
   border: 1px solid var(--accent);
   color: var(--accent);
-  background: transparent;
-  transition: background 0.15s ease, color 0.15s ease;
+  background: var(--bg);
+  transition: background 0.15s ease;
 }
 
 .share-pick-button:hover {
@@ -2894,29 +3000,243 @@ li.fav-divider {
   cursor: default;
 }
 
+/* The chosen file, as a chip with a remove button. */
 .share-chosen {
-  margin: 0.6rem 0 0;
-  overflow-wrap: anywhere;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.35rem 0.4rem 0.35rem 0.9rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
 }
 
-.share-chosen:empty {
+.share-chosen[hidden] {
   display: none;
 }
 
-.share-select,
-.share-number {
-  max-width: 12rem;
+.share-chosen-text {
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
-.share-unlimited {
-  margin-top: 0.6rem;
+.share-clear {
+  flex: 0 0 auto;
+  width: 1.9rem;
+  height: 1.9rem;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
 }
 
-.notify-submit:disabled {
-  opacity: 0.55;
-  cursor: default;
+.share-clear:hover {
+  background: var(--accent-soft);
+}
+
+.share-limit {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---- Settings panel ---- */
+.share-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+  padding: 1.4rem 1.4rem 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.share-group {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.share-group legend {
+  padding: 0;
+  margin-bottom: 0.7rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* Expiry as a grid of pill radios rather than a dropdown: every choice
+   visible at once, and each a comfortable tap target on a phone. Three
+   columns at every width, which the nine options fill exactly. */
+.share-pills {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.share-pill {
+  position: relative;
+  cursor: pointer;
+}
+
+.share-pill input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+.share-pill span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.5rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 0.9rem;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.share-pill:hover span {
+  border-color: var(--accent);
+}
+
+.share-pill input:checked + span {
   background: var(--accent);
   border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.share-pill input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.share-pill input:disabled + span {
+  opacity: 0.55;
+}
+
+.share-downloads-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.9rem 1.4rem;
+}
+
+.share-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Hidden by "Unlimited", but it keeps its box: collapsing it would pull the
+   switch sideways (and on a phone, the Upload button up) under the finger
+   that just tapped it. `visibility` also takes it out of the tab order. */
+.share-stepper[hidden] {
+  display: inline-flex;
+  visibility: hidden;
+}
+
+.share-step {
+  width: 2.75rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.share-step:hover {
+  background: var(--accent-soft);
+}
+
+.share-step:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.share-number {
+  width: 4.5rem;
+  min-height: 2.75rem;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 1.05rem;
+  text-align: center;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.share-number::-webkit-outer-spin-button,
+.share-number::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.share-number:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* First in the row, so it sits at a fixed spot at the start whether or not
+   the counter after it is showing. */
+.share-unlimited {
+  order: -1;
+  padding: 0;
+  min-height: 2.75rem;
+}
+
+.share-hint {
+  display: block;
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.share-submit {
+  margin-top: auto;
+  width: 100%;
+  min-height: 3rem;
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.share-submit:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.share-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .share-progress {
@@ -2926,7 +3246,6 @@ li.fav-divider {
 }
 
 .share-progress[hidden],
-.share-result[hidden],
 .share-error[hidden] {
   display: none;
 }
@@ -2942,18 +3261,33 @@ li.fav-divider {
   color: var(--muted);
 }
 
-/* The message box is centred on /notify, where it sits above the form; here
-   it sits inside it, under the button. */
 .share-error {
   margin: 0;
   max-width: none;
 }
 
+/* ---- The link, as a modal dialog ---- */
 .share-result {
+  width: min(36rem, calc(100vw - 2rem));
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface);
-  padding: 0.85rem 1rem;
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+  padding: 1.2rem 1.25rem 1.1rem;
+}
+
+.share-result::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.share-result-heading {
+  margin: 0 0 0.8rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--muted);
 }
 
 .share-link-row {
@@ -2971,8 +3305,8 @@ li.fav-divider {
   font: inherit;
   cursor: pointer;
   flex: 0 0 auto;
-  padding: 0.45rem 1rem;
-  border-radius: 4px;
+  padding: 0.45rem 1.1rem;
+  border-radius: 6px;
   border: 1px solid var(--accent);
   background: var(--accent);
   color: var(--on-accent);
@@ -2983,7 +3317,73 @@ li.fav-divider {
   border-color: var(--accent-hover);
 }
 
-/* Download limit while "Unlimited" is ticked: visibly not in play. */
-.share-number:disabled {
-  opacity: 0.5;
+.share-result form {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.share-close {
+  font: inherit;
+  cursor: pointer;
+  min-height: 2.5rem;
+  padding: 0.45rem 1.1rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.share-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- Phones and narrow windows ---- */
+@media (max-width: 900px) {
+  .share-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .share-drop {
+    min-height: 16rem;
+  }
+}
+
+@media (max-width: 600px) {
+  main.share {
+    padding: 0 1rem;
+  }
+
+  .share-drop {
+    min-height: 13rem;
+    padding: 1.5rem 1rem;
+  }
+
+  /* Touch screens rarely drag files in; the pickers are the way in. */
+  .share-drop-text,
+  .share-drop-or {
+    display: none;
+  }
+
+  .share-pick {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .share-pick-button {
+    width: 100%;
+  }
+
+  .share-panel {
+    padding: 1.1rem 1rem 1.2rem;
+  }
+
+  .share-link-row {
+    flex-direction: column;
+  }
+
+  .share-copy {
+    min-height: 2.75rem;
+  }
 }

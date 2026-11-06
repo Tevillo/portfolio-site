@@ -406,13 +406,13 @@ pub const ABOUT_SECTIONS: &[(&str, &[&str], Option<(&str, &str)>)] = &[
         &[
             "I have created this site and self host it with most of my other projects being quite small. I like to make small efficient programs that fix small and specific problems in my life. Most projects can be found here https://github.com/Tevillo",
             "Portfolio Site My only long running and updated project. This site was initially created to show my friends my film photos and has evolved to become a more personal site and a place to show and deliver my photography work.",
+            "Filedrop A simple API that allows users to transfer files via a link. Files will get encrypted and stored on a third party server and have short lifespans for safety reasons. There is a frontend interface for this on this site to try.",
             "Batch This is a simple batch renamer cli tool that I primarily use to rename photos after scanning. Built it pretty quickly and as practice for learning go.",
             "Guess-Up This is a terminal version of the app heads-up. Can either play with one device or play over internet via a host. Made because me and my friends love playing custom heads-up lists over different series like ASOIAF(Game of Thrones), The Expanse, DBZ, etc.",
         ],
-        // The project's name as the label: a placeholder until the owner
-        // words it. A paragraph starting "Filedrop" also gets linked, via
+        // No button: the "Filedrop" paragraph above links to /share through
         // ABOUT_INLINE_LINKS.
-        Some((SHARE_NAME, "/share")),
+        None,
     ),
 ];
 
@@ -479,6 +479,11 @@ pub const SHARE_INTRO: &str = "";
 /// here is that chat apps fetching a pasted link for a preview use up a
 /// download (filedrop's README); the owner's to write.
 pub const SHARE_DOWNLOADS_HINT: &str = "";
+
+/// The project's repository, linked under the form.
+pub const SHARE_GITHUB_URL: &str = "https://github.com/Tevillo/encryptor-api";
+/// Text of that link: the site's name, as a placeholder for the owner's own.
+pub const SHARE_GITHUB_LABEL: &str = "GitHub";
 
 pub const SHARE_ERR_TOO_LARGE: &str = "That is over the size limit.";
 pub const SHARE_ERR_FULL: &str = "Storage is full right now. Try again later.";
@@ -2968,20 +2973,39 @@ fn size_label(bytes: u64) -> String {
     }
 }
 
-/// `/share`: pick a file or a folder, set the link's expiry and download
-/// limit, upload, get a link.
+/// Expiry choices on `/share`: (Go duration sent to filedrop, label). filedrop
+/// accepts 1s to 24h; the last entry is the default. Nine, so they fill the
+/// three-column pill grid with no stray last row.
+const SHARE_EXPIRY_OPTIONS: &[(&str, &str)] = &[
+    ("15m", "15 min"),
+    ("1h", "1 hour"),
+    ("6h", "6 hours"),
+    ("24h", "24 hours"),
+    ("48h", "48 hours"),
+];
+
+/// `/share`: pick (or drop) a file or a folder, set the link's expiry and
+/// download limit, upload, get a link.
 ///
-/// Everything happens in `share.js` — choosing a folder, zipping it, the upload
-/// progress and the link at the end — so the form has no `action` and a
-/// `<noscript>` note stands in for it without JavaScript. Messages the script
-/// shows ride on `data-*` attributes so their words stay in this file with the
-/// rest of the copy.
+/// Two columns on a wide screen — a drop zone that takes most of the width,
+/// and the link settings beside it — and one stacked column on a phone. The
+/// title and the repository link sit in a row above both.
+///
+/// Everything happens in `share.js` — choosing or dropping a folder, zipping
+/// it, the upload progress and the link at the end — so the form has no
+/// `action` and a `<noscript>` note stands in for it without JavaScript.
+/// Messages the script shows ride on `data-*` attributes so their words stay in
+/// this file with the rest of the copy.
 ///
 /// `noindex`: it is a tool, not content, and an indexed open upload form is an
 /// invitation to everyone who would abuse one.
 pub fn share_page(max_bytes: u64) -> Markup {
     let page_title = format!("{SHARE_NAME} — {OWNER_NAME}");
     let max = size_label(max_bytes);
+    let default_expiry = SHARE_EXPIRY_OPTIONS
+        .last()
+        .map(|(v, _)| *v)
+        .unwrap_or("24h");
     let crumbs = [
         Crumb {
             label: "Home".into(),
@@ -3006,23 +3030,39 @@ pub fn share_page(max_bytes: u64) -> Markup {
             ))
             body {
                 (site_header(Nav::About))
-                main {
+                main.share {
                     (crumbs_nav(&crumbs))
-                    (page_heading(SHARE_NAME))
+                    div.share-top {
+                        // Visible, unlike the other pages' hidden heading: on
+                        // a tool page the name is what tells you where you are.
+                        h1.share-title { (SHARE_NAME) }
+                        a.share-source href=(SHARE_GITHUB_URL) {
+                            svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" focusable="false" {
+                                path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" {}
+                            }
+                            span { (SHARE_GITHUB_LABEL) }
+                        }
+                    }
+                    @if !SHARE_INTRO.is_empty() {
+                        p.share-intro { (SHARE_INTRO) }
+                    }
                     noscript {
                         p.notify-message.is-error { "This page needs JavaScript to upload." }
                     }
-                    form.notify-form.share-form #share-form
+                    form.share-form #share-form
                         data-max-bytes=(max_bytes)
                         data-err-too-large=(SHARE_ERR_TOO_LARGE)
                         data-err-failed=(SHARE_ERR_FAILED)
                         data-err-too-many=(SHARE_ERR_TOO_MANY_FILES)
                     {
-                        @if !SHARE_INTRO.is_empty() {
-                            p.notify-intro { (SHARE_INTRO) }
-                        }
-                        fieldset.notify-fieldset {
-                            legend { "File" }
+                        // Drop target as well as the home of the two pickers.
+                        div #share-drop .share-drop {
+                            svg.share-drop-icon viewBox="0 0 24 24" width="44" height="44" aria-hidden="true" focusable="false" {
+                                path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+                                     d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" {}
+                            }
+                            p.share-drop-text { "Drop a file or folder here" }
+                            p.share-drop-or { "or" }
                             div.share-pick {
                                 label.share-pick-button {
                                     input #share-file type="file";
@@ -3033,50 +3073,67 @@ pub fn share_page(max_bytes: u64) -> Markup {
                                     span { "Choose folder" }
                                 }
                             }
-                            p #share-chosen .share-chosen aria-live="polite" {}
-                            span.handle-hint {
-                                "Max size: " (max) ". A folder is uploaded as one .zip."
+                            div #share-chosen .share-chosen hidden {
+                                span #share-chosen-text .share-chosen-text aria-live="polite" {}
+                                button #share-clear .share-clear type="button" aria-label="Remove" { "×" }
                             }
+                            p.share-limit { "Max size: " (max) ". A folder is uploaded as one .zip." }
                         }
-                        fieldset.notify-fieldset {
-                            legend { "Link" }
-                            label.handle-field {
-                                span.handle-label { "Expires after" }
-                                select.handle-input.share-select name="expires" {
-                                    option value="1h" { "1 hour" }
-                                    option value="6h" { "6 hours" }
-                                    option value="12h" { "12 hours" }
-                                    option value="24h" selected { "24 hours" }
+                        div.share-panel {
+                            fieldset.share-group {
+                                legend { "Expires after" }
+                                div.share-pills {
+                                    @for (value, label) in SHARE_EXPIRY_OPTIONS {
+                                        label.share-pill {
+                                            input type="radio" name="expires" value=(value)
+                                                  checked[*value == default_expiry];
+                                            span { (label) }
+                                        }
+                                    }
                                 }
                             }
-                            label.handle-field {
-                                span.handle-label { "Download limit" }
-                                input.handle-input.share-number type="number" name="downloads"
-                                      min="1" max="1000" step="1" value="1" inputmode="numeric";
-                            }
-                            label.channel-option.share-unlimited {
-                                input type="checkbox" name="unlimited";
-                                span { "Unlimited downloads" }
-                            }
-                            @if !SHARE_DOWNLOADS_HINT.is_empty() {
-                                span.handle-hint { (SHARE_DOWNLOADS_HINT) }
-                            }
-                        }
-                        button.notify-submit type="submit" disabled { "Upload" }
-                        div #share-progress .share-progress hidden {
-                            progress max="1" value="0" {}
-                            span.share-status aria-live="polite" {}
-                        }
-                        p #share-error .notify-message.is-error.share-error role="alert" hidden {}
-                        div #share-result .share-result hidden {
-                            label.handle-field {
-                                span.handle-label { "Download link" }
-                                div.share-link-row {
-                                    input #share-link .handle-input type="text" readonly;
-                                    button #share-copy .share-copy type="button" { "Copy" }
+                            fieldset.share-group {
+                                legend { "Downloads" }
+                                div.share-downloads-row {
+                                    div #share-downloads-field .share-stepper {
+                                        button.share-step type="button" data-step="-1" aria-label="Fewer downloads" { "−" }
+                                        input.share-number type="number" name="downloads"
+                                              min="1" max="1000" step="1" value="1" inputmode="numeric"
+                                              aria-label="Download limit";
+                                        button.share-step type="button" data-step="1" aria-label="More downloads" { "+" }
+                                    }
+                                    label.person-toggle.share-unlimited {
+                                        input type="checkbox" name="unlimited";
+                                        span.switch-track { span.switch-thumb {} }
+                                        span { "Unlimited" }
+                                    }
+                                }
+                                @if !SHARE_DOWNLOADS_HINT.is_empty() {
+                                    p.share-hint { (SHARE_DOWNLOADS_HINT) }
                                 }
                             }
-                            span #share-summary .handle-hint {}
+                            button.share-submit type="submit" disabled { "Upload" }
+                            div #share-progress .share-progress hidden {
+                                progress max="1" value="0" {}
+                                span.share-status aria-live="polite" {}
+                            }
+                            p #share-error .notify-message.is-error.share-error role="alert" hidden {}
+                        }
+                    }
+                    // The finished link, as a modal over the form. A native
+                    // <dialog>: `showModal()` gives the backdrop, focus
+                    // trapping and Escape-to-close for free. Outside the form
+                    // so its buttons can never submit it.
+                    dialog #share-result .share-result aria-labelledby="share-result-heading" {
+                        h2 #share-result-heading .share-result-heading { "Download link" }
+                        div.share-link-row {
+                            input #share-link .handle-input type="text" readonly
+                                  aria-labelledby="share-result-heading";
+                            button #share-copy .share-copy type="button" { "Copy" }
+                        }
+                        span #share-summary .share-hint {}
+                        form method="dialog" {
+                            button.share-close type="submit" { "Close" }
                         }
                     }
                 }

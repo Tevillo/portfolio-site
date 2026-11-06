@@ -3041,6 +3041,8 @@ async fn share_page_renders_and_is_noindex() {
     assert!(html.contains("webkitdirectory"), "no folder picker");
     assert!(html.contains("Max size: 2 GB"), "size limit not shown");
     assert!(html.contains(&format!("data-max-bytes=\"{}\"", share::MAX_UPLOAD_BYTES)));
+    assert!(html.contains(views::SHARE_GITHUB_URL), "no link to the project's repository");
+    assert!(html.contains("<dialog"), "the link is no longer shown in a dialog");
 }
 
 #[tokio::test]

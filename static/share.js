@@ -7,6 +7,9 @@
 // the upload is ever copied into memory. The one full read is computing each
 // file's CRC-32, which the format requires before the file's data.
 //
+// A file or folder can also be dropped onto the drop zone; a dropped folder is
+// walked with the File System entries API and zipped the same way.
+//
 // The upload goes to /share/upload, which streams it on to filedrop with the
 // site's API key; XHR rather than fetch because only XHR reports upload
 // progress.
@@ -21,11 +24,16 @@
 
   var fileInput = document.getElementById('share-file');
   var folderInput = document.getElementById('share-folder');
+  var drop = document.getElementById('share-drop');
   var chosen = document.getElementById('share-chosen');
+  var chosenText = document.getElementById('share-chosen-text');
+  var clearBtn = document.getElementById('share-clear');
   var submit = form.querySelector('button[type="submit"]');
-  var expires = form.elements.expires;
+  var expiryRadios = form.querySelectorAll('input[name="expires"]');
+  var stepButtons = form.querySelectorAll('.share-step');
   var downloads = form.elements.downloads;
   var unlimited = form.elements.unlimited;
+  var downloadsField = document.getElementById('share-downloads-field');
   var progressBox = document.getElementById('share-progress');
   var bar = progressBox.querySelector('progress');
   var statusEl = progressBox.querySelector('.share-status');
@@ -35,7 +43,8 @@
   var copyBtn = document.getElementById('share-copy');
   var summaryEl = document.getElementById('share-summary');
 
-  // { name, size, file } for a file, { name, size, files } for a folder.
+  // { name, size, file } for a file; { name, size, files } for a folder, where
+  // each of `files` is { file, path } and `path` is its name inside the zip.
   var selection = null;
   var busy = false;
 
@@ -58,7 +67,10 @@
     busy = on;
     fileInput.disabled = on;
     folderInput.disabled = on;
-    expires.disabled = on;
+    clearBtn.disabled = on;
+    drop.classList.toggle('is-busy', on);
+    for (var i = 0; i < expiryRadios.length; i++) expiryRadios[i].disabled = on;
+    for (var j = 0; j < stepButtons.length; j++) stepButtons[j].disabled = on;
     unlimited.disabled = on;
     downloads.disabled = on || unlimited.checked;
     sync();
@@ -80,32 +92,165 @@
     return parts.join(' · ');
   }
 
+  function select(sel) {
+    selection = sel;
+    chosenText.textContent = describe(sel);
+    chosen.hidden = !sel;
+    drop.classList.toggle('has-file', !!sel);
+    sync();
+  }
+
+  function folderSelection(name, entries) {
+    if (!entries.length) return null;
+    var size = 0;
+    for (var i = 0; i < entries.length; i++) size += entries[i].file.size;
+    return { name: name, size: size, files: entries };
+  }
+
   fileInput.addEventListener('change', function () {
     var f = fileInput.files[0];
     folderInput.value = '';
-    selection = f ? { name: f.name, size: f.size, file: f } : null;
-    chosen.textContent = describe(selection);
-    sync();
+    select(f ? { name: f.name, size: f.size, file: f } : null);
   });
 
   folderInput.addEventListener('change', function () {
     var files = Array.prototype.slice.call(folderInput.files);
     fileInput.value = '';
-    if (!files.length) {
-      selection = null;
-    } else {
-      var root = (files[0].webkitRelativePath || files[0].name).split('/')[0];
-      var size = 0;
-      for (var i = 0; i < files.length; i++) size += files[i].size;
-      selection = { name: root, size: size, files: files };
-    }
-    chosen.textContent = describe(selection);
-    sync();
+    var entries = files.map(function (f) {
+      return { file: f, path: f.webkitRelativePath || f.name };
+    });
+    var root = entries.length ? entries[0].path.split('/')[0] : '';
+    select(folderSelection(root, entries));
   });
 
-  unlimited.addEventListener('change', function () {
-    downloads.disabled = busy || unlimited.checked;
+  clearBtn.addEventListener('click', function () {
+    fileInput.value = '';
+    folderInput.value = '';
+    select(null);
   });
+
+  // ---- Drag and drop -----------------------------------------------------
+
+  function readAllEntries(reader) {
+    // readEntries hands back a directory in batches; an empty batch is the end.
+    return new Promise(function (resolve, reject) {
+      var out = [];
+      (function next() {
+        reader.readEntries(function (batch) {
+          if (!batch.length) return resolve(out);
+          out = out.concat(batch);
+          next();
+        }, reject);
+      })();
+    });
+  }
+
+  async function walk(entry, prefix, out) {
+    if (entry.isFile) {
+      var f = await new Promise(function (resolve, reject) {
+        entry.file(resolve, reject);
+      });
+      out.push({ file: f, path: prefix + f.name });
+    } else if (entry.isDirectory) {
+      var kids = await readAllEntries(entry.createReader());
+      for (var i = 0; i < kids.length; i++) {
+        await walk(kids[i], prefix + entry.name + '/', out);
+      }
+    }
+  }
+
+  // Without this a file dropped a few pixels outside the zone would make the
+  // browser navigate away to display it.
+  window.addEventListener('dragover', function (ev) {
+    ev.preventDefault();
+  });
+  window.addEventListener('drop', function (ev) {
+    ev.preventDefault();
+  });
+
+  var dragDepth = 0;
+  drop.addEventListener('dragenter', function (ev) {
+    ev.preventDefault();
+    if (busy) return;
+    dragDepth++;
+    drop.classList.add('is-over');
+  });
+  drop.addEventListener('dragleave', function () {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) drop.classList.remove('is-over');
+  });
+  drop.addEventListener('drop', async function (ev) {
+    ev.preventDefault();
+    dragDepth = 0;
+    drop.classList.remove('is-over');
+    if (busy || !ev.dataTransfer) return;
+
+    // Entries must be taken while the event is being dispatched; the list is
+    // emptied once the handler yields.
+    var items = ev.dataTransfer.items;
+    var entries = [];
+    if (items) {
+      for (var i = 0; i < items.length; i++) {
+        var e = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+        if (e) entries.push(e);
+      }
+    }
+    var plain = Array.prototype.slice.call(ev.dataTransfer.files || []);
+    fileInput.value = '';
+    folderInput.value = '';
+
+    if (!entries.length) {
+      // No entries API: plain files only.
+      if (plain.length === 1) select({ name: plain[0].name, size: plain[0].size, file: plain[0] });
+      else select(folderSelection('files', plain.map(function (f) {
+        return { file: f, path: 'files/' + f.name };
+      })));
+      return;
+    }
+    if (entries.length === 1 && entries[0].isFile && plain.length === 1) {
+      select({ name: plain[0].name, size: plain[0].size, file: plain[0] });
+      return;
+    }
+    // One folder keeps its own name; several dropped things are gathered
+    // under one top-level folder so the zip unpacks tidily.
+    var root = entries.length === 1 ? entries[0].name : 'files';
+    var prefix = entries.length === 1 ? '' : 'files/';
+    var out = [];
+    try {
+      for (var j = 0; j < entries.length; j++) await walk(entries[j], prefix, out);
+    } catch (err) {
+      showError(form.dataset.errFailed);
+      return;
+    }
+    select(folderSelection(root, out));
+  });
+
+  function checkedExpiry() {
+    for (var i = 0; i < expiryRadios.length; i++) {
+      if (expiryRadios[i].checked) return expiryRadios[i];
+    }
+    return expiryRadios[expiryRadios.length - 1];
+  }
+
+  // ---- Download count ----------------------------------------------------
+
+  for (var s = 0; s < stepButtons.length; s++) {
+    stepButtons[s].addEventListener('click', function () {
+      var n = parseInt(downloads.value, 10) || 1;
+      n += Number(this.dataset.step);
+      n = Math.min(Number(downloads.max) || 1000, Math.max(Number(downloads.min) || 1, n));
+      downloads.value = n;
+    });
+  }
+
+  // An unlimited link has no limit to set, so the field goes away rather than
+  // sitting there greyed out. Disabled as well as hidden, so the browser's
+  // validation never stops the form over a field nobody can see.
+  function syncUnlimited() {
+    downloadsField.hidden = unlimited.checked;
+    downloads.disabled = busy || unlimited.checked;
+  }
+  unlimited.addEventListener('change', syncUnlimited);
 
   // ---- Stored zip --------------------------------------------------------
 
@@ -163,16 +308,16 @@
 
   async function buildZip(files, onProgress) {
     var total = 0;
-    for (var i = 0; i < files.length; i++) total += files[i].size;
+    for (var i = 0; i < files.length; i++) total += files[i].file.size;
     var done = 0;
     var parts = [];
     var central = [];
     var offset = 0;
 
     for (var j = 0; j < files.length; j++) {
-      var f = files[j];
+      var f = files[j].file;
       var e = {
-        name: encoder.encode(f.webkitRelativePath || f.name),
+        name: encoder.encode(files[j].path),
         size: f.size,
         dt: dosDateTime(f.lastModified),
         crc: await crc32(f, function (n) {
@@ -218,7 +363,7 @@
 
   function upload(body, name, contentType) {
     return new Promise(function (resolve, reject) {
-      var q = 'name=' + encodeURIComponent(name) + '&expires=' + encodeURIComponent(expires.value);
+      var q = 'name=' + encodeURIComponent(name) + '&expires=' + encodeURIComponent(checkedExpiry().value);
       q += '&downloads=' + (unlimited.checked ? '-1' : encodeURIComponent(downloads.value));
       var xhr = new XMLHttpRequest();
       xhr.open('PUT', '/share/upload?' + q);
@@ -244,7 +389,7 @@
   function summary() {
     var n = Number(downloads.value);
     var dl = unlimited.checked ? 'unlimited downloads' : n + (n === 1 ? ' download' : ' downloads');
-    return 'Expires in ' + expires.options[expires.selectedIndex].text + ' · ' + dl;
+    return 'Expires in ' + checkedExpiry().parentNode.textContent.trim() + ' · ' + dl;
   }
 
   form.addEventListener('submit', async function (ev) {
@@ -256,7 +401,7 @@
     }
     var sel = selection;
     showError('');
-    resultBox.hidden = true;
+    if (resultBox.open) resultBox.close();
     setBusy(true);
     progressBox.hidden = false;
     bar.value = 0;
@@ -281,7 +426,7 @@
       var link = await upload(body, name, type);
       linkEl.value = link;
       summaryEl.textContent = summary();
-      resultBox.hidden = false;
+      resultBox.showModal();
       linkEl.focus();
       linkEl.select();
     } catch (err) {
@@ -310,5 +455,17 @@
     }
   });
 
+  // Clicking the backdrop (the dialog element itself, outside its content box)
+  // closes it, as a popup is expected to.
+  resultBox.addEventListener('click', function (ev) {
+    if (ev.target !== resultBox) return;
+    var r = resultBox.getBoundingClientRect();
+    var inside = ev.clientX >= r.left && ev.clientX <= r.right &&
+      ev.clientY >= r.top && ev.clientY <= r.bottom;
+    if (!inside) resultBox.close();
+  });
+
+  // A reload can restore the checkbox ticked; match the field to it.
+  syncUnlimited();
   sync();
 })();
