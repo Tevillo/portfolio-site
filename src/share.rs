@@ -9,7 +9,7 @@
 //!
 //! Open to anyone, by the owner's choice. What bounds the damage a stranger can
 //! do is filedrop's own limits: 2 GiB per file, `FILEDROP_MAX_TOTAL_BYTES` in
-//! total (507 once full), and at most 24 hours before the cleaner removes it.
+//! total (507 once full), and at most 48 hours before the cleaner removes it.
 //!
 //! Configuration, one secret per file like the notify credentials:
 //!
@@ -197,4 +197,86 @@ pub async fn upload(
             )
         }
     }
+}
+
+/// filedrop's `GET /filedrop/api/status` answer, as far as the status page
+/// reads it. Entries are anonymous by filedrop's design — no name, ID or link —
+/// so nothing here can leak a share link.
+#[derive(Deserialize, Debug, Clone)]
+pub struct Status {
+    pub storage: Storage,
+    pub files: Files,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct Storage {
+    /// Total of the files uploaded with this site's key.
+    pub used_bytes: u64,
+    pub service_limit_bytes: u64,
+    /// What a new upload can use, across every key.
+    pub service_remaining_bytes: u64,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct Files {
+    pub items: Vec<OpenFile>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct OpenFile {
+    pub size_bytes: u64,
+    pub expires_in_seconds: u64,
+    /// `None` is unlimited.
+    pub downloads_left: Option<u64>,
+}
+
+/// How long the status page waits on filedrop before showing it as down. The
+/// upload client has no overall timeout; a status read is small and has no
+/// reason to take long.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Ask filedrop for this key's open files and the service's storage. `None`
+/// for anything short of a clean answer — no key, filedrop down, a rejected
+/// key, a body that does not parse — each logged, all shown the same way.
+async fn fetch_status(state: &AppState) -> Option<Status> {
+    let data = state.data_root();
+    let Some(key) = read_secret(token_path(data, KEY_FILE)).await else {
+        warn!("share status unavailable: no {KEY_FILE} under data/token");
+        return None;
+    };
+    let endpoint = read_secret(token_path(data, ENDPOINT_FILE))
+        .await
+        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+    let url = format!("{}/api/status", endpoint.trim_end_matches('/'));
+    let resp = match client()
+        .get(url)
+        .bearer_auth(key)
+        .timeout(STATUS_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "filedrop status request failed");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        warn!(status = resp.status().as_u16(), "filedrop status answered an error");
+        return None;
+    }
+    match resp.json::<Status>().await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!(error = %e, "filedrop status body did not parse");
+            None
+        }
+    }
+}
+
+/// `GET /share/status`: storage left and the files still open. Rendered on
+/// the server so the key never reaches the browser.
+pub async fn status_page(State(state): State<AppState>) -> Response {
+    let status = fetch_status(&state).await;
+    views::share_status_page(status.as_ref()).into_response()
 }

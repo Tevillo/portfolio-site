@@ -479,6 +479,15 @@ pub const SHARE_ERR_UNAVAILABLE: &str = "Uploads are not available right now.";
 pub const SHARE_ERR_FAILED: &str = "The upload did not complete.";
 pub const SHARE_ERR_BAD_NAME: &str = "That file name cannot be used.";
 pub const SHARE_ERR_TOO_MANY_FILES: &str = "That folder has too many files.";
+
+/// Name of the `/share/status` page, as its link on `/share` and its heading.
+pub const SHARE_STATUS_LABEL: &str = "Status";
+/// Shown on `/share/status` when filedrop cannot be asked: no key, filedrop
+/// down, or an answer that does not parse.
+pub const SHARE_STATUS_UNAVAILABLE: &str = "Status is not available right now.";
+/// Under the open-files heading when there are none. Empty renders nothing —
+/// the count beside the heading already reads 0. The owner's to write.
+pub const SHARE_STATUS_EMPTY: &str = "";
 // What someone reads once the confirmation link has been followed. Assembled
 // from these three pieces, because which of them applies depends on what they
 // ticked: the people half, the all-rolls half, or both.
@@ -2906,7 +2915,7 @@ fn size_label(bytes: u64) -> String {
 }
 
 /// Expiry choices on `/share`: (Go duration sent to filedrop, label). filedrop
-/// accepts 1s to 24h. [`SHARE_DEFAULT_EXPIRY`] picks the one checked by default.
+/// accepts 1s to 48h. [`SHARE_DEFAULT_EXPIRY`] picks the one checked by default.
 /// Nine, so they fill the three-column pill grid with no stray last row.
 const SHARE_EXPIRY_OPTIONS: &[(&str, &str)] = &[
     ("15m", "15 min"),
@@ -2954,11 +2963,17 @@ pub fn share_page(max_bytes: u64) -> Markup {
                         // Visible, unlike the other pages' hidden heading: on
                         // a tool page the name is what tells you where you are.
                         h1.share-title { (SHARE_NAME) }
+                        div.share-links {
                         a.share-source href=(SHARE_GITHUB_URL) {
                             svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" focusable="false" {
                                 path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" {}
                             }
                             span { (SHARE_GITHUB_LABEL) }
+                        }
+                        a.share-source href="/share/status" {
+                            (status_icon())
+                            span { (SHARE_STATUS_LABEL) }
+                        }
                         }
                     }
                     @if !SHARE_INTRO.is_empty() {
@@ -3056,6 +3071,207 @@ pub fn share_page(max_bytes: u64) -> Markup {
                     }
                 }
                 (site_footer())
+            }
+        }
+    }
+}
+
+/// A small pie glyph for the status link.
+fn status_icon() -> Markup {
+    html! {
+        svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" {
+            path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"
+                 d="M8 1.75a6.25 6.25 0 1 0 6.25 6.25H8z" {}
+            path fill="currentColor" d="M9.5 0.5v6h6A6 6 0 0 0 9.5 0.5z" {}
+        }
+    }
+}
+
+/// A byte count for people: one decimal below 10 of a unit, none above.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else if v < 10.0 {
+        format!("{v:.1} {}", UNITS[unit])
+    } else {
+        format!("{v:.0} {}", UNITS[unit])
+    }
+}
+
+/// Time left as its two largest units, dropping a zero second one: `1d 3h`,
+/// `5h 12m`, `23h`, `12m`, `<1m`.
+fn human_duration(secs: u64) -> String {
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
+    match (d, h, m) {
+        (0, 0, 0) => "<1m".to_string(),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
+/// `/share/status`: a donut of the service's storage and a list of the files
+/// uploaded through this site that can still be downloaded.
+///
+/// Rendered from filedrop's status answer on the server, with no script: the
+/// page is a snapshot, and reloading it is the refresh. `None` is filedrop
+/// unavailable, which still renders the page chrome and says so.
+///
+/// The donut is three circles drawn with `stroke-dasharray` on a
+/// `pathLength` of 100, so each slice's dash is simply its percentage. Slices
+/// start at twelve o'clock and run clockwise: this site's files, then other
+/// keys' files, over a track that is the free space.
+///
+/// `noindex` like `/share`.
+pub fn share_status_page(status: Option<&crate::share::Status>) -> Markup {
+    let page_title = format!("{SHARE_NAME} {SHARE_STATUS_LABEL} \u{2014} {OWNER_NAME}");
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block(
+                Head::new(&page_title, site_description(), "/share/status").noindex(),
+            ))
+            body {
+                (site_header(Nav::About))
+                main.share.share-status-page {
+                    div.share-top {
+                        h1.share-title {
+                            (SHARE_NAME)
+                            span.share-title-sub { (SHARE_STATUS_LABEL) }
+                        }
+                        div.share-links {
+                            a.share-source href="/share" {
+                                svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" {
+                                    path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+                                         d="M8 12.5V3m0 0L4.5 6.5M8 3l3.5 3.5M2.5 13.5h11" {}
+                                }
+                                span { (SHARE_NAME) }
+                            }
+                        }
+                    }
+                    @match status {
+                        None => {
+                            p.notify-message.is-error.share-status-error role="alert" { (SHARE_STATUS_UNAVAILABLE) }
+                        }
+                        Some(st) => {
+                            (status_body(st))
+                        }
+                    }
+                }
+                (site_footer())
+            }
+        }
+    }
+}
+
+fn status_body(st: &crate::share::Status) -> Markup {
+    let s = &st.storage;
+    let limit = s.service_limit_bytes.max(1);
+    let free = s.service_remaining_bytes.min(limit);
+    let ours = s.used_bytes.min(limit - free);
+    let others = limit - free - ours;
+    let pct = |b: u64| b as f64 * 100.0 / limit as f64;
+    let (p_ours, p_others, p_free) = (pct(ours), pct(others), pct(free));
+    // Rounded down, so a nearly full disk never reads as more free than it is.
+    let free_label = format!("{}%", p_free.floor() as u64);
+    let files = &st.files.items;
+    html! {
+        div.status-grid {
+            section.status-card.status-storage aria-labelledby="status-storage-heading" {
+                h2 #status-storage-heading .status-heading { "Storage" }
+                div.status-donut-wrap {
+                    svg.status-donut viewBox="0 0 42 42" role="img"
+                        aria-label=(format!("{} free of {}", human_bytes(free), human_bytes(limit))) {
+                        circle.donut-track cx="21" cy="21" r="15.915" pathLength="100" {}
+                        @if p_others > 0.0 {
+                            circle.donut-slice.donut-others cx="21" cy="21" r="15.915" pathLength="100"
+                                stroke-dasharray=(format!("{p_others:.3} {:.3}", 100.0 - p_others))
+                                stroke-dashoffset=(format!("{:.3}", 25.0 - p_ours)) {}
+                        }
+                        @if p_ours > 0.0 {
+                            circle.donut-slice.donut-ours cx="21" cy="21" r="15.915" pathLength="100"
+                                stroke-dasharray=(format!("{p_ours:.3} {:.3}", 100.0 - p_ours))
+                                stroke-dashoffset="25" {}
+                        }
+                    }
+                    div.status-donut-center aria-hidden="true" {
+                        span.status-donut-value { (free_label) }
+                        span.status-donut-caption { "free" }
+                    }
+                }
+                ul.status-legend {
+                    li {
+                        span.legend-swatch.donut-ours-bg {}
+                        span.legend-label { "This site" }
+                        span.legend-value { (human_bytes(ours)) }
+                    }
+                    li {
+                        span.legend-swatch.donut-others-bg {}
+                        span.legend-label { "Other" }
+                        span.legend-value { (human_bytes(others)) }
+                    }
+                    li {
+                        span.legend-swatch.donut-free-bg {}
+                        span.legend-label { "Free" }
+                        span.legend-value { (human_bytes(free)) }
+                    }
+                    li.legend-total {
+                        span.legend-label { "Total" }
+                        span.legend-value { (human_bytes(limit)) }
+                    }
+                }
+            }
+            section.status-card.status-files aria-labelledby="status-files-heading" {
+                h2 #status-files-heading .status-heading {
+                    "Open files"
+                    span.status-count { (files.len()) }
+                }
+                @if files.is_empty() {
+                    @if !SHARE_STATUS_EMPTY.is_empty() {
+                        p.share-hint { (SHARE_STATUS_EMPTY) }
+                    }
+                } @else {
+                    ol.status-file-list {
+                        @for f in files {
+                            li.status-file {
+                                svg.status-file-icon viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false" {
+                                    path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"
+                                         d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5" {}
+                                }
+                                span.status-file-size { (human_bytes(f.size_bytes)) }
+                                span.status-file-meta {
+                                    span.status-chip title="Expires in" {
+                                        svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false" {
+                                            circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5" {}
+                                            path d="M8 4.5V8l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" {}
+                                        }
+                                        span.visually-hidden { "Expires in " }
+                                        (human_duration(f.expires_in_seconds))
+                                    }
+                                    span.status-chip title="Downloads left" {
+                                        svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false" {
+                                            path d="M8 2.5v8m0 0L4.75 7.25M8 10.5l3.25-3.25M3 13.5h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" {}
+                                        }
+                                        span.visually-hidden { "Downloads left: " }
+                                        @match f.downloads_left {
+                                            Some(n) => (n),
+                                            None => "\u{221e}",
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

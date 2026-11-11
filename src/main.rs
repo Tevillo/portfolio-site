@@ -222,6 +222,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         // limit that applies is filedrop's, checked in `share::upload` before
         // any of the body is read.
         .route("/share", get(share::page))
+        .route("/share/status", get(share::status_page))
         .route(
             "/share/upload",
             put(share::upload).layer(DefaultBodyLimit::disable()),
@@ -242,6 +243,7 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/work/", get(|| permanent("/work")))
         .route("/nether/", get(|| permanent("/nether")))
         .route("/share/", get(|| permanent("/share")))
+        .route("/share/status/", get(|| permanent("/share/status")))
         // On the pages router, and before the layer below, so an unmatched URL
         // gets the same `no-cache` treatment as a real page — and so the assets
         // router, merged in below, contributes no fallback of its own.

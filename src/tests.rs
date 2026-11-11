@@ -3189,3 +3189,92 @@ async fn rolls_are_in_the_sitemap() {
     assert!(sitemap.contains(&views::abs_url("/roll/2024")));
     assert!(!sitemap.contains("/roll/2024/favs"));
 }
+
+/// A stand-in filedrop that answers `GET /filedrop/api/status` with `reply`
+/// and records the Authorization header it was sent.
+async fn mock_filedrop_status(
+    f: &Fixture,
+    reply: &'static str,
+) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+    use axum::extract::State as AxState;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let app = Router::new()
+        .route(
+            "/filedrop/api/status",
+            axum::routing::get(
+                move |AxState(seen): AxState<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+                      headers: axum::http::HeaderMap| async move {
+                    *seen.lock().unwrap() = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    ([(header::CONTENT_TYPE, "application/json")], reply)
+                },
+            ),
+        )
+        .with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tokens = f.data.join(notify::TOKENS_DIR);
+    std::fs::create_dir_all(&tokens).unwrap();
+    std::fs::write(tokens.join(share::KEY_FILE), "fd_testkey\n").unwrap();
+    std::fs::write(
+        tokens.join(share::ENDPOINT_FILE),
+        format!("http://{addr}/filedrop"),
+    )
+    .unwrap();
+    seen
+}
+
+#[tokio::test]
+async fn share_page_links_to_status() {
+    let f = fixture();
+    let html = body_of(&f.router, "/share").await;
+    assert!(html.contains("href=\"/share/status\""), "/share does not link to its status page");
+}
+
+#[tokio::test]
+async fn share_status_renders_storage_and_open_files() {
+    let f = fixture();
+    let seen = mock_filedrop_status(
+        &f,
+        r#"{"storage":{"used_bytes":3221225472,"service_limit_bytes":10737418240,"service_remaining_bytes":5368709120},
+            "files":{"count":2,"items":[
+              {"size_bytes":2147483648,"expires_in_seconds":3540,"downloads_left":1},
+              {"size_bytes":1073741824,"expires_in_seconds":90000,"downloads_left":null}]}}"#,
+    )
+    .await;
+    let resp = get(&f.router, "/share/status").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_string(resp).await;
+    assert_eq!(seen.lock().unwrap().as_deref(), Some("Bearer fd_testkey"));
+    assert!(html.contains("noindex"));
+    assert!(html.contains("50%"), "free share of storage not shown");
+    assert!(html.contains("5.0 GB free of 10 GB"), "donut has no accessible summary");
+    // This site 3 GB, other keys 2 GB, free 5 GB.
+    assert!(html.contains("3.0 GB") && html.contains("2.0 GB"));
+    assert_eq!(html.matches("class=\"status-file\"").count(), 2);
+    assert!(html.contains("59m"), "time left not shown");
+    assert!(html.contains("1d 1h"));
+    assert!(html.contains('\u{221e}'), "unlimited downloads not shown");
+    assert!(!html.contains(views::SHARE_STATUS_UNAVAILABLE));
+}
+
+#[tokio::test]
+async fn share_status_says_so_when_filedrop_is_unavailable() {
+    // No key file at all.
+    let f = fixture();
+    let resp = get(&f.router, "/share/status").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_string(resp).await;
+    assert!(html.contains(views::SHARE_STATUS_UNAVAILABLE));
+    assert!(!html.contains("status-donut"));
+
+    // A key, but an answer that does not parse.
+    let f = fixture();
+    mock_filedrop_status(&f, "not json").await;
+    let html = body_of(&f.router, "/share/status").await;
+    assert!(html.contains(views::SHARE_STATUS_UNAVAILABLE));
+}

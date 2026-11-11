@@ -31,6 +31,12 @@
      cannot reuse this value: a near-black shadow on a near-black ground is
      invisible, so it needs its own opacity rather than its own colour. */
   --shadow-card: 0 6px 16px rgba(47, 58, 38, 0.14);
+  /* /share/status donut: other keys' files, a warm tan that sits apart from
+     the accent green (this site's files) in both hue and lightness. */
+  --chart-other: #b48a4a;
+  /* Free space: the donut's track. --border in the light theme; the dark
+     theme lifts it, since --border there nearly vanishes into --surface. */
+  --chart-free: #c9d1b8;
 }
 
 /* Dark theme — opt-in site-wide. The inline head script in views.rs sets
@@ -47,6 +53,8 @@ html[data-theme="dark"] {
   --accent-hover: #a8c884;
   --accent-soft: rgba(141, 177, 104, 0.26);
   --shadow-card: 0 8px 20px rgba(0, 0, 0, 0.55);
+  --chart-other: #c9a36b;
+  --chart-free: #363b31;
 }
 
 * {
@@ -3279,8 +3287,239 @@ main.share {
 }
 
 /* ---- Phones and narrow windows ---- */
+/* ---- /share/status --------------------------------------------------------
+   Two cards side by side — the storage donut and the open-files list — and one
+   stacked column below 900px. */
+.share-links {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.share-title-sub {
+  margin-left: 0.6rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: minmax(18rem, 1fr) minmax(0, 1.5fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.status-card {
+  padding: 1.4rem 1.4rem 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  min-width: 0;
+}
+
+.status-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1.1rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.status-count {
+  min-width: 1.7rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: center;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Donut ---- */
+.status-donut-wrap {
+  position: relative;
+  width: min(15rem, 100%);
+  aspect-ratio: 1;
+  margin: 0.25rem auto 1.4rem;
+}
+
+.status-donut {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.status-donut circle {
+  fill: none;
+  stroke-width: 5.2;
+}
+
+.donut-track {
+  stroke: var(--chart-free);
+}
+
+.donut-slice {
+  transition: stroke-dasharray 0.6s ease;
+}
+
+.donut-ours {
+  stroke: var(--accent);
+}
+
+.donut-others {
+  stroke: var(--chart-other);
+}
+
+.status-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.status-donut-value {
+  font-size: clamp(1.8rem, 1.4rem + 1.2vw, 2.4rem);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-donut-caption {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+/* ---- Legend ---- */
+.status-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.status-legend li {
+  display: grid;
+  grid-template-columns: 0.85rem 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.95rem;
+}
+
+.legend-swatch {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 3px;
+}
+
+.donut-ours-bg { background: var(--accent); }
+.donut-others-bg { background: var(--chart-other); }
+.donut-free-bg { background: var(--chart-free); }
+
+.legend-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.status-legend .legend-total {
+  margin-top: 0.35rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.legend-total .legend-label {
+  grid-column: 1 / 3;
+}
+
+.legend-total .legend-value {
+  color: var(--text);
+}
+
+/* ---- Open files ---- */
+.status-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.status-file {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  transition: border-color 0.15s ease;
+}
+
+.status-file:hover {
+  border-color: var(--accent);
+}
+
+.status-file-icon {
+  color: var(--accent);
+}
+
+.status-file-size {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-file-meta {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.share-status-error {
+  max-width: 40rem;
+}
+
 @media (max-width: 900px) {
-  .share-form {
+  .share-form,
+  .status-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
