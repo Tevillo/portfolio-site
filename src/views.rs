@@ -2906,8 +2906,8 @@ fn size_label(bytes: u64) -> String {
 }
 
 /// Expiry choices on `/share`: (Go duration sent to filedrop, label). filedrop
-/// accepts 1s to 24h; the last entry is the default. Nine, so they fill the
-/// three-column pill grid with no stray last row.
+/// accepts 1s to 24h. [`SHARE_DEFAULT_EXPIRY`] picks the one checked by default.
+/// Nine, so they fill the three-column pill grid with no stray last row.
 const SHARE_EXPIRY_OPTIONS: &[(&str, &str)] = &[
     ("15m", "15 min"),
     ("1h", "1 hour"),
@@ -2915,6 +2915,10 @@ const SHARE_EXPIRY_OPTIONS: &[(&str, &str)] = &[
     ("24h", "24 hours"),
     ("48h", "48 hours"),
 ];
+
+/// The expiry pre-selected on `/share`; must match a value in
+/// [`SHARE_EXPIRY_OPTIONS`].
+const SHARE_DEFAULT_EXPIRY: &str = "24h";
 
 /// `/share`: pick (or drop) a file or a folder, set the link's expiry and
 /// download limit, upload, get a link.
@@ -2934,10 +2938,7 @@ const SHARE_EXPIRY_OPTIONS: &[(&str, &str)] = &[
 pub fn share_page(max_bytes: u64) -> Markup {
     let page_title = format!("{SHARE_NAME} — {OWNER_NAME}");
     let max = size_label(max_bytes);
-    let default_expiry = SHARE_EXPIRY_OPTIONS
-        .last()
-        .map(|(v, _)| *v)
-        .unwrap_or("24h");
+    let default_expiry = SHARE_DEFAULT_EXPIRY;
     html! {
         (DOCTYPE)
         html lang="en" {
