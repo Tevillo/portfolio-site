@@ -105,6 +105,7 @@ async fn resolve_folder(photos_root: &Path, rel: &str) -> Result<PathBuf> {
 /// than a skip — the point of the subcommand is to catch a typo at the moment
 /// it is made, instead of silently writing a set that renders short.
 pub async fn validate(photos_root: &Path, folders: &[String]) -> Result<Vec<String>> {
+    let index = crate::tags::load_for_cli(photos_root).await?;
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for folder in folders {
@@ -113,7 +114,7 @@ pub async fn validate(photos_root: &Path, folders: &[String]) -> Result<Vec<Stri
             bail!("empty folder path");
         }
         let abs = resolve_folder(photos_root, &rel).await?;
-        if !crate::handlers::subtree_has_jpeg(&abs).await {
+        if !crate::handlers::subtree_has_jpeg(photos_root, &abs, index.clone()).await {
             bail!("{rel} holds no visible photos");
         }
         if seen.insert(rel.clone()) {

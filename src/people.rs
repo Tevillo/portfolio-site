@@ -116,8 +116,9 @@ pub(crate) fn open_readonly(db_path: &Path) -> Result<Connection> {
     .with_context(|| format!("opening digikam db at {}", db_path.display()))
 }
 
-// Same rules as the filesystem walker: only .jpg/.jpeg, no "hidden" filenames,
-// and skip any album path with a "negative" segment. SQLite LIKE is ASCII
+// Same rules as the filesystem walker: only .jpg/.jpeg, nothing withheld by
+// the `Archive` tag tree (see `tags::withheld_filter`), and skip any album path
+// with a "negative" segment. SQLite LIKE is ASCII
 // case-insensitive by default, which mirrors the Rust helpers in handlers.rs.
 //
 // Split in two because one query needs half of it. A person's *tag thumbnail*
@@ -148,7 +149,7 @@ macro_rules! outside_negatives_filter {
 }
 macro_rules! published_place_filter {
     () => {
-        concat!("i.name NOT LIKE '%hidden%' AND ", outside_negatives_filter!())
+        concat!(crate::tags::withheld_filter!(), " AND ", outside_negatives_filter!())
     };
 }
 pub(crate) const PUBLISHED_PLACE_FILTER: &str = published_place_filter!();
@@ -177,9 +178,9 @@ const PERSON_TAG_FILTER: &str = "
 ";
 pub(crate) const VISIBLE_IMAGE_FILTER: &str =
     concat!(jpeg_name_filter!(), " AND ", published_place_filter!());
-/// A work job's cover: a JPEG outside any `negative/` folder, `hidden` name or
-/// not. A frame cropped for the card is named `hidden` precisely so it stays out
-/// of the job's gallery — see `paths::is_hidden`.
+/// A work job's cover: a JPEG outside any `negative/` folder, withheld or not.
+/// A frame cropped for the card is tagged `Archive/hidden` precisely so it
+/// stays out of the job's gallery — see `handlers::is_hidden_work_cover`.
 pub(crate) const COVER_IMAGE_FILTER: &str =
     concat!(jpeg_name_filter!(), " AND ", outside_negatives_filter!());
 
@@ -266,7 +267,7 @@ fn biggest_face(mut faces: Vec<Face>) -> Option<Face> {
 /// it.
 ///
 /// So the only rows filtered out here are the ones that are not published at
-/// all — a lost file, a `hidden` name, a `negative/` folder — because those are
+/// all — a lost file, an `Archive` tag, a `negative/` folder — because those are
 /// statements about the archive rather than about a person's setup.
 fn list_tag_thumbnail_faces_blocking(conn: &Connection) -> Result<HashMap<String, Face>> {
     let sql = format!(
@@ -318,7 +319,7 @@ fn list_tag_thumbnail_faces_blocking(conn: &Connection) -> Result<HashMap<String
 /// is in a frame, and the site does not need a face detector of its own.
 ///
 /// The same visibility rules as everything else, for the same reasons: a
-/// negative scan or a `hidden` frame is not published, so it cannot be someone's
+/// negative scan or an `Archive`-tagged frame is not published, so it cannot be someone's
 /// portrait either. `i.status = 1` drops the rows digiKam keeps for files it has
 /// lost track of, which would otherwise put a tile on a path that is gone.
 fn list_faces_blocking(conn: &Connection) -> Result<HashMap<String, Vec<Face>>> {

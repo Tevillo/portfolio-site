@@ -90,39 +90,33 @@ pub fn is_jpeg(name: &str) -> bool {
     has_ext(name, &["jpg", "jpeg"])
 }
 
-/// A file is "hidden" if its basename contains the substring "hidden"
-/// (case-insensitive). Applied on top of the .jpg/.jpeg filter everywhere —
-/// `/roll`, `/all`, people, and a work job's gallery, counts, archives and
-/// per-file downloads. In work it is how a cover cropped for the `/work` card
-/// stays out of the job; see `handlers::is_hidden_work_cover`.
-pub fn is_hidden(name: &str) -> bool {
-    name.to_ascii_lowercase().contains("hidden")
-}
-
 /// Directories the lister and subtree scanners should pretend don't exist.
 pub fn is_skipped_dir(name: &str) -> bool {
     name.eq_ignore_ascii_case("negative")
 }
 
-/// A JPEG the site will show: the filter every photo listing and walk applies.
-pub fn is_visible_photo(name: &str) -> bool {
-    is_jpeg(name) && !is_hidden(name)
-}
-
-/// Visit every visible photo under `root`: dotfiles are skipped, skipped
-/// directories are not descended into, and files must pass
-/// [`is_visible_photo`]. One definition of "the photos in this tree", for the
-/// cache warmer, the subtree checks and the recency scan alike.
+/// Visit every JPEG under `photos_root`/`start` that `skip` does not reject:
+/// dotfiles are skipped, skipped directories are not descended into, and
+/// `skip` is asked about each JPEG by its path relative to `photos_root`. One
+/// definition of "the photos in this tree", for the cache warmer, the subtree
+/// checks and the recency scan alike.
+///
+/// `skip` is where the tag rules come in. Whether a photo is shown is decided
+/// by its digiKam tags (see `tags.rs`), not by anything on disk, so the public
+/// callers pass `TagIndex::withheld`, and the cache warmer, which also builds
+/// renditions for the private archive, passes `TagIndex::hidden`.
 ///
 /// Synchronous, so call it from `spawn_blocking`. `visit` can end the walk
 /// early by returning `Break`. A directory that cannot be listed is reported to
 /// `on_unreadable` and skipped rather than failing the walk.
 pub fn walk_visible_photos(
-    root: &Path,
+    photos_root: &Path,
+    start: &Path,
+    skip: impl Fn(&str) -> bool,
     mut visit: impl FnMut(PathBuf) -> ControlFlow<()>,
     mut on_unreadable: impl FnMut(&Path, &std::io::Error),
 ) {
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![start.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let read = match std::fs::read_dir(&dir) {
             Ok(r) => r,
@@ -145,7 +139,21 @@ pub fn walk_visible_photos(
                 if !is_skipped_dir(&name) {
                     stack.push(entry.path());
                 }
-            } else if ftype.is_file() && is_visible_photo(&name) && visit(entry.path()).is_break() {
+                continue;
+            }
+            if !ftype.is_file() || !is_jpeg(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(photos_root)
+                .ok()
+                .and_then(|r| r.to_str())
+                .map(|r| r.replace(std::path::MAIN_SEPARATOR, "/"));
+            if rel.as_deref().is_some_and(&skip) {
+                continue;
+            }
+            if visit(path).is_break() {
                 return;
             }
         }
@@ -220,16 +228,16 @@ mod tests {
         assert!(is_jpeg("foo.jpeg"));
         assert!(!is_jpeg("foo.cr3"));
         assert!(!is_jpeg("foo"));
-        assert!(!is_visible_photo("hidden-album-cover.jpg"));
     }
 
     #[test]
-    fn the_walk_sees_only_visible_photos_and_can_stop_early() {
+    fn the_walk_sees_only_unskipped_jpegs_and_can_stop_early() {
         let dir = tempfile::tempdir().unwrap();
         for rel in [
             "2024/roll/a.jpg",
             "2024/roll/b.JPEG",
             "2024/roll/hidden-cover.jpg",
+            "2024/roll/tagged.jpg",
             "2024/roll/a.cr3",
             "2024/roll/.c.jpg",
             "2024/roll/negative/n.jpg",
@@ -240,9 +248,13 @@ mod tests {
             std::fs::write(path, b"").unwrap();
         }
 
+        // A name with `hidden` in it is an ordinary photo now; only `skip`
+        // withholds anything.
         let mut seen = Vec::new();
         walk_visible_photos(
             dir.path(),
+            dir.path(),
+            |rel| rel == "2024/roll/tagged.jpg",
             |p| {
                 seen.push(p.strip_prefix(dir.path()).unwrap().to_path_buf());
                 ControlFlow::Continue(())
@@ -254,13 +266,16 @@ mod tests {
             seen,
             [
                 PathBuf::from("2024/roll/a.jpg"),
-                PathBuf::from("2024/roll/b.JPEG")
+                PathBuf::from("2024/roll/b.JPEG"),
+                PathBuf::from("2024/roll/hidden-cover.jpg"),
             ]
         );
 
         let mut visits = 0;
         walk_visible_photos(
             dir.path(),
+            dir.path(),
+            |_| false,
             |_| {
                 visits += 1;
                 ControlFlow::Break(())

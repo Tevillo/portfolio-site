@@ -195,9 +195,30 @@ pub enum Nav {
     People,
     Work,
     About,
+    /// The key-gated archive. Its tab renders only for a key holder; see
+    /// [`ARCHIVE_TAB`].
+    Archive,
     /// Pages that belong to no nav entry — the Nether vault, which is reachable
     /// by URL and from the About page but has no top-nav tab of its own.
     None,
+}
+
+tokio::task_local! {
+    /// The archive tab's label for the request being rendered, or `None` when
+    /// the visitor holds no valid archive key.
+    ///
+    /// Set per request by `archive::nav_layer` around every page handler, so
+    /// that the header can show the tab to key holders without each of the
+    /// thirty-odd page functions growing an argument for it. The label is the
+    /// root tag's own name from digiKam (`Archive`), the word the owner chose
+    /// when they made the tag, not one written here.
+    pub static ARCHIVE_TAB: Option<String>;
+}
+
+/// The current request's archive tab label, if the visitor is a key holder.
+/// `None` outside a request scope, which is every unit test and CLI render.
+fn archive_tab() -> Option<String> {
+    ARCHIVE_TAB.try_with(Clone::clone).ok().flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -807,6 +828,9 @@ struct Head<'a> {
     /// Keeps this page out of search results while still letting the crawler
     /// follow its links.
     noindex: bool,
+    /// Also tells the crawler not to follow the links, for the private
+    /// archive, whose links lead only to more of itself. Implies `noindex`.
+    nofollow: bool,
     /// Serialised `application/ld+json` for the page's subject.
     jsonld: Option<String>,
 }
@@ -821,6 +845,7 @@ impl<'a> Head<'a> {
             preload_image: None,
             og_image: None,
             noindex: false,
+            nofollow: false,
             jsonld: None,
         }
     }
@@ -842,6 +867,12 @@ impl<'a> Head<'a> {
 
     fn noindex(mut self) -> Self {
         self.noindex = true;
+        self
+    }
+
+    fn private(mut self) -> Self {
+        self.noindex = true;
+        self.nofollow = true;
         self
     }
 
@@ -879,7 +910,9 @@ fn head_block(h: Head) -> Markup {
             @if !h.canonical.is_empty() {
                 link rel="canonical" href=(canonical);
             }
-            @if h.noindex {
+            @if h.nofollow {
+                meta name="robots" content="noindex, nofollow";
+            } @else if h.noindex {
                 meta name="robots" content="noindex, follow";
             }
             @if let Some(href) = h.preload_image {
@@ -980,6 +1013,11 @@ fn site_header_titled(active: Nav, title: Option<&str>) -> Markup {
                 a href="/work" aria-current=[(active == Nav::Work).then_some("page")] { "Work" }
                 a href="/people" aria-current=[(active == Nav::People).then_some("page")] { "People" }
                 a href="/all" aria-current=[(active == Nav::All).then_some("page")] { "All" }
+                // Key holders only. Nothing on the site names the archive to
+                // anyone else; see `ARCHIVE_TAB`.
+                @if let Some(label) = archive_tab() {
+                    a href="/archive" aria-current=[(active == Nav::Archive).then_some("page")] { (label) }
+                }
                 a href="/about" aria-current=[(active == Nav::About).then_some("page")] { "About" }
             }
         }
@@ -1840,6 +1878,48 @@ pub fn portfolio_page(
                 // `SITE_DESCRIPTION` in the `<head>` rather than from anything
                 // on the page. `<title>`, that description and the JSON-LD
                 // `Person` are untouched.
+                (site_footer())
+            }
+        }
+    }
+}
+
+/// `/archive` and `/archive/:slug` — one section of the key-gated archive.
+///
+/// The portfolio's layout, under the archive's own route family: the same
+/// column grid and sub-tab strip, one section per page, the leading section at
+/// `/archive`. Every word on it is a tag name the owner gave in digiKam, run
+/// through the same mechanical title template the portfolio sections use.
+///
+/// Private all the way down: `noindex, nofollow`, no description, no Open
+/// Graph image (the preview fetcher has no cookie and would get a 404
+/// anyway), and no structured data.
+pub fn archive_page(section: Option<&FolderGroup>, canonical: &str, tabs: &[SectionTab]) -> Markup {
+    let lcp = section
+        .and_then(|g| g.images.first())
+        .map(|img| img.thumb_url.as_str());
+    let page_title = match section {
+        Some(g) => section_title(&g.label),
+        None => OWNER_NAME.to_string(),
+    };
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            (head_block(
+                Head::new(&page_title, "", canonical)
+                    .scripts(&["/static/lightbox.js"])
+                    .preload(lcp)
+                    .private(),
+            ))
+            body {
+                (site_header(Nav::Archive))
+                (subnav_tabs(tabs, "Archive sections"))
+                main.portfolio {
+                    (page_heading(&page_title))
+                    @if let Some(g) = section {
+                        (column_grid(&g.images, PORTFOLIO_EAGER_TILES))
+                    }
+                }
                 (site_footer())
             }
         }

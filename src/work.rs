@@ -1,7 +1,9 @@
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
-use crate::paths::{has_ext, is_hidden, is_jpeg, join_rel, parent_rel};
+use crate::paths::{has_ext, is_jpeg, join_rel, parent_rel};
+use crate::tags::TagIndex;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -219,8 +221,9 @@ fn list_thumbnails_blocking(db_path: &Path) -> Result<HashMap<String, String>> {
     // and reading those back would point a card at a path that is not there.
     //
     // `COVER_IMAGE_FILTER` rather than `VISIBLE_IMAGE_FILTER`: a cover is
-    // allowed a `hidden` name, which is how a crop made only for the card stays
-    // out of the job's own gallery. See `paths::is_hidden`.
+    // allowed an `Archive/hidden` tag, which is how a crop made only for the
+    // card stays out of the job's own gallery. See
+    // `handlers::is_hidden_work_cover`.
     let sql = format!(
         "
         SELECT a.relativePath, i.name
@@ -322,13 +325,13 @@ pub fn work_root(photos_root: &Path) -> PathBuf {
     photos_root.join("work")
 }
 
-pub async fn list_work(photos_root: PathBuf) -> Result<Vec<WorkSummary>> {
-    tokio::task::spawn_blocking(move || list_work_blocking(&photos_root))
+pub async fn list_work(photos_root: PathBuf, index: Arc<TagIndex>) -> Result<Vec<WorkSummary>> {
+    tokio::task::spawn_blocking(move || list_work_blocking(&photos_root, &index))
         .await
         .context("list_work task panicked")?
 }
 
-fn list_work_blocking(photos_root: &Path) -> Result<Vec<WorkSummary>> {
+fn list_work_blocking(photos_root: &Path, index: &TagIndex) -> Result<Vec<WorkSummary>> {
     let root = work_root(photos_root);
     let mut out = Vec::new();
     let read = match std::fs::read_dir(&root) {
@@ -348,7 +351,7 @@ fn list_work_blocking(photos_root: &Path) -> Result<Vec<WorkSummary>> {
         if !ft.is_dir() {
             continue;
         }
-        let (jpeg_count, raw_count) = count_files_recursive(&entry.path());
+        let (jpeg_count, raw_count) = count_files_recursive(photos_root, &entry.path(), index);
         let title = read_title_blocking(&entry.path());
         out.push(WorkSummary {
             name,
@@ -362,10 +365,10 @@ fn list_work_blocking(photos_root: &Path) -> Result<Vec<WorkSummary>> {
 }
 
 /// Recursively count JPEG and RAW files anywhere under `dir`. Dotfiles and
-/// `hidden` names are skipped, as in every walk of a job — see
-/// [`is_hidden`]; directory names are walked unconditionally, so the
-/// `negative` convention used elsewhere does not apply to work.
-fn count_files_recursive(dir: &Path) -> (u32, u32) {
+/// withheld files are skipped, as in every walk of a job — see [`withheld`];
+/// directory names are walked unconditionally, so the `negative` convention
+/// used elsewhere does not apply to work.
+fn count_files_recursive(photos_root: &Path, dir: &Path, index: &TagIndex) -> (u32, u32) {
     let mut jpeg = 0u32;
     let mut raw = 0u32;
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
@@ -379,7 +382,7 @@ fn count_files_recursive(dir: &Path) -> (u32, u32) {
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if name.starts_with('.') || is_hidden(&name) {
+            if name.starts_with('.') {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -388,7 +391,7 @@ fn count_files_recursive(dir: &Path) -> (u32, u32) {
             };
             if ft.is_dir() {
                 stack.push(entry.path());
-            } else if ft.is_file() {
+            } else if ft.is_file() && !withheld(index, photos_root, &entry.path()) {
                 if is_jpeg(&name) {
                     jpeg += 1;
                 } else if is_raw_name(&name) {
@@ -400,13 +403,21 @@ fn count_files_recursive(dir: &Path) -> (u32, u32) {
     (jpeg, raw)
 }
 
-pub async fn read_work(photos_root: PathBuf, name: String) -> Result<Option<WorkDetail>> {
-    tokio::task::spawn_blocking(move || read_work_blocking(&photos_root, &name))
+pub async fn read_work(
+    photos_root: PathBuf,
+    name: String,
+    index: Arc<TagIndex>,
+) -> Result<Option<WorkDetail>> {
+    tokio::task::spawn_blocking(move || read_work_blocking(&photos_root, &name, &index))
         .await
         .context("read_work task panicked")?
 }
 
-fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetail>> {
+fn read_work_blocking(
+    photos_root: &Path,
+    name: &str,
+    index: &TagIndex,
+) -> Result<Option<WorkDetail>> {
     let dir = work_root(photos_root).join(name);
     let meta = match std::fs::metadata(&dir) {
         Ok(m) => m,
@@ -434,7 +445,7 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if fname.starts_with('.') || is_hidden(&fname) {
+            if fname.starts_with('.') {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -449,6 +460,9 @@ fn read_work_blocking(photos_root: &Path, name: &str) -> Result<Option<WorkDetai
                 continue;
             }
             let path = entry.path();
+            if withheld(index, photos_root, &path) {
+                continue;
+            }
             let subpath = match relative_subpath(&dir, &path) {
                 Some(s) => s,
                 None => continue,
@@ -645,9 +659,10 @@ pub async fn build_or_get_zip(
     name: String,
     scope: Scope,
     kind: DownloadKind,
+    index: Arc<TagIndex>,
 ) -> Result<PathBuf> {
     tokio::task::spawn_blocking(move || {
-        build_or_get_zip_blocking(&photos_root, &cache_root, &name, scope, kind)
+        build_or_get_zip_blocking(&photos_root, &cache_root, &name, scope, kind, &index)
     })
     .await
     .context("build_or_get_zip task panicked")?
@@ -659,6 +674,7 @@ fn build_or_get_zip_blocking(
     name: &str,
     scope: Scope,
     kind: DownloadKind,
+    index: &TagIndex,
 ) -> Result<PathBuf> {
     let work_dir = work_root(photos_root).join(name);
     let cache_dir = cache_root.join("work");
@@ -667,7 +683,7 @@ fn build_or_get_zip_blocking(
 
     let zip_path = cache_dir.join(zip_file_name(name, scope, kind));
 
-    let sources = collect_sources(&work_dir, scope, kind)?;
+    let sources = collect_sources(photos_root, &work_dir, scope, kind, index)?;
     if sources.is_empty() {
         anyhow::bail!(
             "no files for scope {:?} kind {:?} in job",
@@ -686,7 +702,12 @@ fn build_or_get_zip_blocking(
     let zip_mtime = std::fs::metadata(&zip_path)
         .ok()
         .and_then(|m| m.modified().ok());
-    let fresh = zip_mtime.map(|t| t >= newest_source).unwrap_or(false);
+    // Newer than every source is not enough on its own. Tagging a file into
+    // `Archive` changes which files belong in the archive without touching
+    // any of them, and a zip that still held the newly withheld file would
+    // look fresh by mtime alone. So the entry list has to match too.
+    let fresh = zip_mtime.map(|t| t >= newest_source).unwrap_or(false)
+        && zip_entries_match(&zip_path, &sources);
     if fresh {
         return Ok(zip_path);
     }
@@ -710,9 +731,11 @@ pub(crate) fn zip_file_name(name: &str, scope: Scope, kind: DownloadKind) -> Str
 /// so the archive preserves the digital/film/edited grouping the client
 /// sees on the page. Files are filtered by both `scope` and `kind`.
 fn collect_sources(
+    photos_root: &Path,
     work_dir: &Path,
     scope: Scope,
     kind: DownloadKind,
+    index: &TagIndex,
 ) -> Result<Vec<(String, PathBuf)>> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     let mut stack: Vec<PathBuf> = vec![work_dir.to_path_buf()];
@@ -727,7 +750,7 @@ fn collect_sources(
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            if name.starts_with('.') || is_hidden(&name) {
+            if name.starts_with('.') {
                 continue;
             }
             let ft = entry.file_type()?;
@@ -742,6 +765,9 @@ fn collect_sources(
                 continue;
             }
             let path = entry.path();
+            if withheld(index, photos_root, &path) {
+                continue;
+            }
             let subpath = match relative_subpath(work_dir, &path) {
                 Some(s) => s,
                 None => continue,
@@ -754,6 +780,33 @@ fn collect_sources(
     }
     out.sort_by_key(|a| a.0.to_lowercase());
     Ok(out)
+}
+
+/// Whether the cached zip at `zip_path` holds exactly the entries `sources`
+/// names. Reads the central directory only, not the file data.
+fn zip_entries_match(zip_path: &Path, sources: &[(String, PathBuf)]) -> bool {
+    let Ok(file) = File::open(zip_path) else {
+        return false;
+    };
+    let Ok(archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    let mut have: Vec<&str> = archive.file_names().collect();
+    let mut want: Vec<&str> = sources.iter().map(|(n, _)| n.as_str()).collect();
+    have.sort_unstable();
+    want.sort_unstable();
+    have == want
+}
+
+/// Whether a file in a job is withheld by the `Archive` tag tree. Work jobs
+/// follow the same rule as every public page: a card cover tagged
+/// `Archive/hidden` stays out of the gallery, the counts and the zips, and
+/// `handlers::is_hidden_work_cover` lets it render on the `/work` card alone.
+fn withheld(index: &TagIndex, photos_root: &Path, path: &Path) -> bool {
+    path.strip_prefix(photos_root)
+        .ok()
+        .and_then(|r| r.to_str())
+        .is_some_and(|rel| index.withheld(rel))
 }
 
 fn write_zip(zip_path: &Path, sources: &[(String, PathBuf)]) -> Result<()> {

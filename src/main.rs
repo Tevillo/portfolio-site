@@ -1,3 +1,4 @@
+mod archive;
 mod audit;
 mod handlers;
 mod nether;
@@ -8,6 +9,7 @@ mod portfolio;
 mod recent;
 mod share;
 mod state;
+mod tags;
 mod thumbs;
 mod views;
 mod work;
@@ -227,6 +229,10 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
             "/share/upload",
             put(share::upload).layer(DefaultBodyLimit::disable()),
         )
+        // The key-gated archive. Its file routes are with the assets below.
+        // See `archive.rs`.
+        .route("/archive", get(archive::front))
+        .route("/archive/:slug", get(archive::section))
         .route("/nether", get(nether::root))
         .route("/nether/graph", get(nether::graph))
         .route("/nether/*path", get(nether::note))
@@ -256,6 +262,11 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, private"),
+        ))
+        // Shows key holders the archive tab, on every page including the 404.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            archive::nav_layer,
         ));
 
     let mut assets = Router::new()
@@ -275,6 +286,8 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
         // under /nether so it keeps its own ETag/max-age handling.
         .route("/nether-media/*path", get(nether::media))
         .route("/download/*path", get(handlers::download))
+        .route("/archive/image/*path", get(archive::image))
+        .route("/archive/download/*path", get(archive::download))
         // Keyed by person, not by path: a face is a crop the database chooses,
         // so it cannot ride the `/<rendition>/<photo path>` shape the
         // renditions below share. See `handlers::face`.
@@ -299,6 +312,10 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
             &format!("/{}/*path", kind.route()),
             get(move |state, path, headers| handlers::rendition(kind, state, path, headers)),
         );
+        assets = assets.route(
+            &format!("{}/{}/*path", archive::PREFIX, kind.route()),
+            get(move |state, path, headers| archive::rendition(kind, state, path, headers)),
+        );
     }
 
     pages.merge(assets).with_state(state)
@@ -319,14 +336,18 @@ fn build_router(state: AppState, static_dir: PathBuf) -> Router {
 /// atomic (temp file + rename) so it can run against a live server.
 ///
 /// With `--prune`, after warming it also deletes any cached rendition whose
-/// source photo is no longer servable (deleted, renamed, now hidden, or moved
+/// source photo is no longer servable (deleted, renamed, tagged `Archive/hidden`, or moved
 /// into a skipped dir) so the cache doesn't accumulate orphans over time.
 async fn warm_cmd(args: &[String]) -> Result<()> {
     let prune = args.iter().any(|a| a == "--prune");
     let (photos_root, cache_root, _data_root) = resolve_roots()?;
 
     println!("scanning {} for photos...", photos_root.display());
-    let jpegs = collect_jpegs(&photos_root).await;
+    // Archived photos are warmed too, since the archive serves them. Only
+    // `Archive/hidden` is left out, so `--prune` clears any renditions a
+    // newly hidden photo left in the cache.
+    let index = tags::load_for_cli(&photos_root).await?;
+    let jpegs = collect_jpegs(&photos_root, move |rel| index.hidden(rel)).await;
     let total = jpegs.len();
     if total == 0 {
         println!("no photos found under {}", photos_root.display());
@@ -618,15 +639,21 @@ async fn prune_orphans(cache_root: &Path, servable: &HashSet<PathBuf>) {
     );
 }
 
-/// Every servable JPEG under `root`, by the same visibility rules the request
-/// handlers use — see [`paths::walk_visible_photos`]. Unreadable directories
-/// go to stderr, since the CLI commands that call this run without tracing.
-pub(crate) async fn collect_jpegs(root: &Path) -> Vec<PathBuf> {
+/// Every JPEG under `root` that `skip` does not reject, by the same walk the
+/// request handlers use — see [`paths::walk_visible_photos`]. `skip` takes a
+/// path relative to `root`. Unreadable directories go to stderr, since the CLI
+/// commands that call this run without tracing.
+pub(crate) async fn collect_jpegs(
+    root: &Path,
+    skip: impl Fn(&str) -> bool + Send + 'static,
+) -> Vec<PathBuf> {
     let root = root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut out = Vec::new();
         paths::walk_visible_photos(
             &root,
+            &root,
+            skip,
             |photo| {
                 out.push(photo);
                 ControlFlow::Continue(())
@@ -792,9 +819,10 @@ async fn recent_cmd(args: &[String]) -> Result<()> {
 /// ever sees a complete archive.
 async fn prebuild_cmd(args: &[String]) -> Result<()> {
     let (photos_root, cache_root, _data_root) = resolve_roots()?;
+    let index = tags::load_for_cli(&photos_root).await?;
     let all_mode = args.iter().any(|a| a == "--all");
     let names: Vec<String> = if all_mode {
-        let summaries = work::list_work(photos_root.clone()).await?;
+        let summaries = work::list_work(photos_root.clone(), index.clone()).await?;
         if summaries.is_empty() {
             eprintln!("no work items found under {}", photos_root.join("work").display());
             return Ok(());
@@ -835,6 +863,7 @@ async fn prebuild_cmd(args: &[String]) -> Result<()> {
                     name.clone(),
                     scope,
                     kind,
+                    index.clone(),
                 )
                 .await;
                 match result {

@@ -2340,20 +2340,83 @@ async fn work_tabs_offer_the_edited_sets_and_not_the_originals() {
     );
 }
 
-/// A cover cropped for the card is named `hidden`: it renders on the card
-/// and nowhere in the job itself — not its gallery, not its downloads.
+/// Tag `rel` (relative to the photos root) in the fixture database at `db`
+/// with bare `Archive`, or with `Archive/<child>`, adding whatever tag, album
+/// and image rows that takes. The root tag is spelled `Archive`, as the
+/// owner's is, so every test also covers case-insensitive matching.
+fn tag_archive(db: &Path, rel: &str, child: Option<&str>) {
+    let conn = rusqlite::Connection::open(db).expect("open fixture db");
+    let tag_id = |pid: i64, name: &str| -> i64 {
+        conn.query_row(
+            "SELECT id FROM Tags WHERE pid = ?1 AND name = ?2",
+            rusqlite::params![pid, name],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| {
+            conn.execute(
+                "INSERT INTO Tags (pid, name) VALUES (?1, ?2)",
+                rusqlite::params![pid, name],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        })
+    };
+    let root = tag_id(0, "Archive");
+    let tag = match child {
+        Some(c) => tag_id(root, c),
+        None => root,
+    };
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let album_path = format!("/{dir}");
+    let album: i64 = conn
+        .query_row(
+            "SELECT id FROM Albums WHERE relativePath = ?1",
+            [&album_path],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| {
+            conn.execute("INSERT INTO Albums (relativePath) VALUES (?1)", [&album_path])
+                .unwrap();
+            conn.last_insert_rowid()
+        });
+    let image: i64 = conn
+        .query_row(
+            "SELECT id FROM Images WHERE album = ?1 AND name = ?2",
+            rusqlite::params![album, name],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| {
+            conn.execute(
+                "INSERT INTO Images (album, name, status) VALUES (?1, ?2, 1)",
+                rusqlite::params![album, name],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        });
+    conn.execute(
+        "INSERT INTO ImageTags (tagid, imageid) VALUES (?1, ?2)",
+        rusqlite::params![tag, image],
+    )
+    .unwrap();
+}
+
+/// A cover cropped for the card is tagged `Archive/hidden`: it renders on the
+/// card and nowhere in the job itself, not its gallery and not its downloads.
+/// A `hidden` filename means nothing any more.
 #[tokio::test]
 async fn a_hidden_cover_shows_on_the_card_and_not_in_the_job() {
-    let cover = "work/big-job/digital/edited/hidden-album-cover.jpg";
-    let f = work_sets_fixture_tagged(Some(&[(
-        "/work/big-job/digital/edited",
-        "hidden-album-cover.jpg",
-    )]));
-    for rel in [cover, "work/big-job/digital/edited/hidden-untagged.jpg"] {
+    let cover = "work/big-job/digital/edited/album-cover.jpg";
+    let crop = "work/big-job/digital/edited/crop.jpg";
+    let named = "work/big-job/digital/edited/hidden-by-name-only.jpg";
+    let f = work_sets_fixture_tagged(Some(&[("/work/big-job/digital/edited", "album-cover.jpg")]));
+    for rel in [cover, crop, named] {
         image::RgbImage::from_pixel(900, 600, image::Rgb([90, 90, 90]))
             .save(f.photos.join(rel))
             .unwrap();
     }
+    let db = f.photos.join("digikam4.db");
+    tag_archive(&db, cover, Some("hidden"));
+    tag_archive(&db, crop, Some("hidden"));
 
     let index = body_string(get(&f.router, "/work").await).await;
     assert!(
@@ -2366,15 +2429,19 @@ async fn a_hidden_cover_shows_on_the_card_and_not_in_the_job() {
     for uri in [
         format!("/thumb/{cover}"),
         format!("/image/{cover}"),
-        "/preview/work/big-job/digital/edited/hidden-untagged.jpg".to_string(),
+        format!("/preview/{crop}"),
     ] {
         assert_eq!(get(&f.router, &uri).await.status(), StatusCode::NOT_FOUND, "{uri}");
     }
 
     let gallery = body_string(get(&f.router, "/work/big-job?set=digital").await).await;
-    for name in ["hidden-album-cover", "hidden-untagged"] {
+    for name in ["album-cover", "crop.jpg"] {
         assert!(!gallery.contains(name), "{name} reached the gallery: {gallery}");
     }
+    assert!(
+        gallery.contains("hidden-by-name-only"),
+        "a `hidden` filename still hides a photo: {gallery}"
+    );
 
     let unlocked = post(&f.router, "/work/big-job/auth", "password=hunter2").await;
     let cookie = unlocked
@@ -2390,7 +2457,7 @@ async fn a_hidden_cover_shows_on_the_card_and_not_in_the_job() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/work/big-job/file/digital/edited/hidden-album-cover.jpg")
+                .uri("/work/big-job/file/digital/edited/album-cover.jpg")
                 .header(header::COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -3277,4 +3344,363 @@ async fn share_status_says_so_when_filedrop_is_unavailable() {
     mock_filedrop_status(&f, "not json").await;
     let html = body_of(&f.router, "/share/status").await;
     assert!(html.contains(views::SHARE_STATUS_UNAVAILABLE));
+}
+
+// ---------------------------------------------------------------------------
+// The private archive, and hiding by tag
+// ---------------------------------------------------------------------------
+
+const ELIANA_KEY: &str = "eliana-key-0123456789";
+const PAUL_KEY: &str = "paul-key-0123456789ab";
+
+/// A photos tree with one public photo and one of every archive case, a
+/// portfolio section, and two issued keys.
+///
+/// - `public.jpg`: no tags. Public.
+/// - `arch.jpg` + `arch.dng`: `Archive/Eliana` on the JPEG only, plus a
+///   `portfolio/sepia` tag that the archive must win over.
+/// - `scan.jpg` + `scan.tif`: `Archive/Paul` on the TIFF only. The JPEG is
+///   withheld and archived through its stem.
+/// - `loose.jpg`: bare `Archive`. Goes in the unsorted section.
+/// - `secret.jpg`: `Archive/hidden` and `Archive/Eliana`. Hidden wins.
+/// - `hidden-name.jpg`: no tags. Public, despite the name.
+fn archive_fixture() -> Fixture {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let photos = root.join("photos");
+    let cache = root.join("cache");
+    let data = root.join("data");
+    let static_dir = root.join("static");
+    for p in [&photos, &cache, &data, &static_dir] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    std::fs::write(static_dir.join("style.css"), b"body{}").unwrap();
+    std::fs::create_dir_all(photos.join("2026/roll")).unwrap();
+    for name in ["public", "arch", "scan", "loose", "secret", "hidden-name"] {
+        image::RgbImage::from_pixel(900, 600, image::Rgb([120, 140, 100]))
+            .save(photos.join(format!("2026/roll/{name}.jpg")))
+            .unwrap();
+    }
+    std::fs::write(photos.join("2026/roll/arch.dng"), b"raw").unwrap();
+    std::fs::write(photos.join("2026/roll/scan.tif"), b"tiff").unwrap();
+
+    let db = photos.join("digikam4.db");
+    write_portfolio_db(&db, &[]);
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "INSERT INTO Tags (id, pid, name) VALUES (50, 1, 'sepia');
+             INSERT INTO Albums (id, relativePath) VALUES (50, '/2026/roll');
+             INSERT INTO Images (id, album, name, status) VALUES (50, 50, 'arch.jpg', 1);
+             INSERT INTO Images (id, album, name, status) VALUES (51, 50, 'public.jpg', 1);
+             -- digiKam indexes the JPEG beside a scan even though only the
+             -- scan carries the tag.
+             INSERT INTO Images (id, album, name, status) VALUES (52, 50, 'scan.jpg', 1);
+             INSERT INTO ImageTags (tagid, imageid) VALUES (50, 50);
+             INSERT INTO ImageTags (tagid, imageid) VALUES (50, 51);",
+        )
+        .unwrap();
+    }
+    tag_archive(&db, "2026/roll/arch.jpg", Some("Eliana"));
+    tag_archive(&db, "2026/roll/scan.tif", Some("Paul"));
+    tag_archive(&db, "2026/roll/loose.jpg", None);
+    tag_archive(&db, "2026/roll/secret.jpg", Some("hidden"));
+    tag_archive(&db, "2026/roll/secret.jpg", Some("Eliana"));
+
+    std::fs::write(
+        data.join(archive::KEYS_FILE),
+        format!("# issued by archive_key.sh\neliana {ELIANA_KEY}\npaul {PAUL_KEY}\n"),
+    )
+    .unwrap();
+
+    let state = AppState::new(photos.clone(), cache, data.clone(), Some(db), root.join("nether"));
+    Fixture {
+        router: build_router(state, static_dir),
+        _dir: dir,
+        data,
+        photos,
+    }
+}
+
+async fn get_with_cookie(router: &Router, uri: &str, key: &str) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, format!("theme=dark; archive_key={key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+fn archive_log(f: &Fixture) -> Vec<String> {
+    let path = f.data.join(notify::LOGS_DIR).join(audit::ARCHIVE_LOG);
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Without a valid key, the archive does not exist: every page and file URL
+/// is the same 404 a made-up URL gets, headers and all.
+#[tokio::test]
+async fn without_a_key_the_archive_is_an_ordinary_404() {
+    let f = archive_fixture();
+    let made_up = get(&f.router, "/no-such-page").await;
+    let made_up_headers = made_up.headers().clone();
+    let made_up_body = body_string(made_up).await;
+
+    for key in [None, Some("wrong"), Some("")] {
+        for uri in ["/archive", "/archive/paul", "/archive/archive"] {
+            let resp = match key {
+                Some(k) => get_with_cookie(&f.router, uri, k).await,
+                None => get(&f.router, uri).await,
+            };
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} with {key:?}");
+            assert!(resp.headers().get("x-robots-tag").is_none(), "{uri} marked private");
+            assert_eq!(
+                resp.headers().get(header::CACHE_CONTROL),
+                made_up_headers.get(header::CACHE_CONTROL)
+            );
+            assert_eq!(body_string(resp).await, made_up_body, "{uri} differs from a real 404");
+        }
+        for uri in [
+            "/archive/preview/2026/roll/arch.jpg",
+            "/archive/image/2026/roll/arch.jpg",
+            "/archive/download/2026/roll/arch.jpg",
+        ] {
+            let resp = match key {
+                Some(k) => get_with_cookie(&f.router, uri, k).await,
+                None => get(&f.router, uri).await,
+            };
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} with {key:?}");
+        }
+    }
+
+    let wrong = get(&f.router, "/archive?k=not-a-key").await;
+    assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+    assert!(wrong.headers().get(header::SET_COOKIE).is_none());
+    assert!(archive_log(&f).is_empty());
+}
+
+/// The link sets a year-long cookie carrying the key and redirects to a clean
+/// URL. The cookie then opens the archive, and each view renews it.
+#[tokio::test]
+async fn the_link_unlocks_the_archive_and_the_cookie_keeps_it_open() {
+    let f = archive_fixture();
+    let resp = get(&f.router, &format!("/archive?k={ELIANA_KEY}")).await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()[header::LOCATION], "/archive");
+    assert_eq!(resp.headers()[header::REFERRER_POLICY], "no-referrer");
+    let cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap().to_string();
+    assert!(cookie.starts_with(&format!("archive_key={ELIANA_KEY};")), "{cookie}");
+    for attr in ["Path=/", "Max-Age=31536000", "HttpOnly", "Secure", "SameSite=Lax"] {
+        assert!(cookie.contains(attr), "cookie lacks {attr}: {cookie}");
+    }
+
+    let resp = get_with_cookie(&f.router, "/archive", ELIANA_KEY).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-robots-tag"], "noindex, nofollow");
+    assert!(resp.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("private"));
+    assert!(resp.headers()[header::SET_COOKIE].to_str().unwrap().contains("Max-Age=31536000"));
+    let html = body_string(resp).await;
+    assert!(html.contains(r#"<meta name="robots" content="noindex, nofollow">"#), "{html}");
+    // Sections: the named ones alphabetically, then the unsorted one under the
+    // root tag's own name. Eliana leads, so it is the page at /archive.
+    let eliana = html.find(r#"href="/archive" aria-current="page">Eliana<"#);
+    let paul = html.find(r#"href="/archive/paul">Paul<"#);
+    let unsorted = html.find(r#"href="/archive/archive">Archive<"#);
+    assert!(eliana.is_some() && paul.is_some() && unsorted.is_some(), "tabs: {html}");
+    assert!(eliana < paul && paul < unsorted, "tab order: {html}");
+    assert!(html.contains("/archive/preview/2026/roll/arch.jpg"), "{html}");
+    assert!(html.contains("/archive/download/2026/roll/arch.dng"), "no raw link: {html}");
+    assert!(!html.contains("secret"), "a hidden photo is in the archive: {html}");
+    assert!(!html.contains("public.jpg"), "a public photo is in the archive: {html}");
+
+    // A tag on the TIFF files the JPEG made from it.
+    let paul = body_string(get_with_cookie(&f.router, "/archive/paul", ELIANA_KEY).await).await;
+    assert!(paul.contains("/archive/preview/2026/roll/scan.jpg"), "{paul}");
+    let unsorted =
+        body_string(get_with_cookie(&f.router, "/archive/archive", ELIANA_KEY).await).await;
+    assert!(unsorted.contains("/archive/preview/2026/roll/loose.jpg"), "{unsorted}");
+    // The leading section's own slug is a second address for /archive.
+    let resp = get_with_cookie(&f.router, "/archive/eliana", ELIANA_KEY).await;
+    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+
+    for uri in [
+        "/archive/preview/2026/roll/arch.jpg",
+        "/archive/thumb/2026/roll/arch.jpg",
+        "/archive/image/2026/roll/arch.jpg",
+    ] {
+        let resp = get_with_cookie(&f.router, uri, ELIANA_KEY).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let cc = resp.headers()[header::CACHE_CONTROL].to_str().unwrap();
+        assert!(cc.contains("private") && !cc.contains("public"), "{uri}: {cc}");
+        assert_eq!(resp.headers()["x-robots-tag"], "noindex, nofollow", "{uri}");
+    }
+
+    let log = archive_log(&f);
+    assert!(log.iter().any(|l| l.contains(r#""viewer":"eliana""#) && l.contains("unlock")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains(r#""viewer":"eliana""#) && l.contains("view")), "{log:?}");
+}
+
+/// `Archive/hidden` is served nowhere, the archive included, and the archive
+/// routes serve nothing but archived photos.
+#[tokio::test]
+async fn the_archive_routes_serve_archived_photos_and_nothing_else() {
+    let f = archive_fixture();
+    for uri in [
+        "/archive/preview/2026/roll/secret.jpg",
+        "/archive/image/2026/roll/secret.jpg",
+        "/archive/download/2026/roll/secret.jpg",
+        "/archive/image/2026/roll/public.jpg",
+        "/archive/download/2026/roll/public.jpg",
+        "/archive/hidden",
+    ] {
+        let resp = get_with_cookie(&f.router, uri, PAUL_KEY).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+/// Archived photos are gone from every public page and route, by stem and by
+/// canonical path. A photo that is merely *named* `hidden` is public.
+#[tokio::test]
+async fn archived_photos_are_withheld_from_the_public_site() {
+    let f = archive_fixture();
+    for page in ["/all", "/roll/2026/roll", "/"] {
+        let html = body_string(get(&f.router, page).await).await;
+        for name in ["arch.jpg", "scan.jpg", "loose.jpg", "secret.jpg"] {
+            assert!(!html.contains(name), "{name} is on {page}: {html}");
+        }
+        if page != "/" {
+            assert!(html.contains("hidden-name.jpg"), "a hidden-named photo is gone from {page}");
+        }
+    }
+    // The portfolio is `portfolio/sepia`, which tags `arch.jpg` and
+    // `public.jpg`. The archive wins.
+    let front = body_string(get(&f.router, "/").await).await;
+    assert!(front.contains("public.jpg"), "{front}");
+
+    for uri in [
+        "/image/2026/roll/arch.jpg",
+        "/preview/2026/roll/arch.jpg",
+        "/download/2026/roll/arch.jpg",
+        // The RAW beside an archived JPEG, untagged itself.
+        "/download/2026/roll/arch.dng",
+        // The JPEG beside a tagged TIFF.
+        "/image/2026/roll/scan.jpg",
+        // Spellings of the same path that only canonicalisation catches.
+        "/image/2026/./roll/arch.jpg",
+        "/image/2026//roll/arch.jpg",
+        "/preview/2026/roll/./loose.jpg",
+    ] {
+        assert_eq!(get(&f.router, uri).await.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+    assert_eq!(
+        get(&f.router, "/image/2026/roll/hidden-name.jpg").await.status(),
+        StatusCode::OK
+    );
+
+    let sitemap = body_string(get(&f.router, "/sitemap.xml").await).await;
+    assert!(!sitemap.contains("archive"), "{sitemap}");
+    let robots = body_string(get(&f.router, "/robots.txt").await).await;
+    assert!(!robots.contains("archive"), "{robots}");
+}
+
+/// Deleting a key's line locks that person out on their very next request,
+/// and leaves everyone else in.
+#[tokio::test]
+async fn a_revoked_key_stops_working_immediately() {
+    let f = archive_fixture();
+    assert_eq!(get_with_cookie(&f.router, "/archive", ELIANA_KEY).await.status(), StatusCode::OK);
+    std::fs::write(f.data.join(archive::KEYS_FILE), format!("paul {PAUL_KEY}\n")).unwrap();
+    assert_eq!(
+        get_with_cookie(&f.router, "/archive", ELIANA_KEY).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_with_cookie(&f.router, "/archive/image/2026/roll/arch.jpg", ELIANA_KEY)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(get(&f.router, &format!("/archive?k={ELIANA_KEY}")).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(get_with_cookie(&f.router, "/archive", PAUL_KEY).await.status(), StatusCode::OK);
+}
+
+/// The tab is in the header for key holders on every page, and on no page
+/// for anyone else.
+#[tokio::test]
+async fn only_key_holders_see_the_archive_tab() {
+    let f = archive_fixture();
+    for page in ["/about", "/all", "/no-such-page"] {
+        let anon = get(&f.router, page).await;
+        assert!(
+            anon.headers().get_all(header::VARY).iter().any(|v| v == "Cookie"),
+            "{page} lacks Vary: Cookie"
+        );
+        let html = body_string(anon).await;
+        assert!(!html.contains("/archive"), "{page} names the archive: {html}");
+
+        let html = body_string(get_with_cookie(&f.router, page, PAUL_KEY).await).await;
+        assert!(html.contains(r#"<a href="/archive">Archive</a>"#), "{page} has no tab: {html}");
+    }
+}
+
+/// A key holder's download is logged under their name.
+#[tokio::test]
+async fn an_archive_download_is_logged_under_the_key_holder() {
+    let f = archive_fixture();
+    let resp = get_with_cookie(&f.router, "/archive/download/2026/roll/arch.dng", PAUL_KEY).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let log = download_log(&f);
+    assert!(
+        log.iter().any(|l| l.contains(r#""route":"archive""#) && l.contains(r#""viewer":"paul""#)),
+        "{log:?}"
+    );
+}
+
+/// The unlock link is rate-limited per client, valid key or not.
+#[tokio::test]
+async fn too_many_unlock_attempts_are_refused() {
+    let f = archive_fixture();
+    for _ in 0..20 {
+        get(&f.router, "/archive?k=guess").await;
+    }
+    let resp = get(&f.router, &format!("/archive?k={ELIANA_KEY}")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// The SQL filter and the Rust index must agree on what is withheld, or a
+/// photo hidden from `/all` could still reach `/people` or the portfolio.
+#[test]
+fn sql_and_rust_agree_on_what_is_withheld() {
+    let f = archive_fixture();
+    let db = f.photos.join("digikam4.db");
+    let index = tags::load_blocking(&db).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let sql = format!(
+        "SELECT a.relativePath, i.name, {} FROM Images i JOIN Albums a ON a.id = i.album",
+        concat!("(", tags::withheld_filter!(), ")")
+    );
+    let mut stmt = conn.prepare(&sql).unwrap();
+    let rows: Vec<(String, String, bool)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(rows.len() >= 6);
+    for (album, name, visible) in rows {
+        let rel = paths::join_rel(&album, &name);
+        assert_eq!(visible, !index.withheld(&rel), "{rel}");
+    }
+    // And the stem rule reaches files digiKam has no row for.
+    assert!(index.withheld("2026/roll/arch.dng"));
+    assert!(index.withheld("2026/roll/scan.jpg"));
+    assert!(index.hidden("2026/roll/secret.jpg"));
+    assert!(!index.withheld("2026/roll/hidden-name.jpg"));
 }

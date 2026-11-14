@@ -76,15 +76,16 @@ Anyone without a valid key gets the site's ordinary 404, so the page cannot be
 told apart from one that does not exist.
 
 **Hiding moves to tags.** Today a photograph is hidden by putting `hidden` in
-its filename. That convention goes away entirely; hiding becomes two digiKam
-tags:
+its filename. That convention goes away entirely, and everything hidden lives
+under one digiKam tag, `archive`:
 
-- `hidden`: the photo is never shown anywhere on the site, archive included.
-- `archive`: the photo is off every public page but shows in the archive.
-  Sub-tags under `archive` become the archive's sections, the way
-  `portfolio/<x>` does for the portfolio. A photo tagged with plain `archive`
-  and no sub-tag goes in an unsorted section. If a photo somehow carries both
-  `archive` and a `portfolio` tag, the archive wins.
+- `archive/hidden`: the photo is never shown anywhere on the site, archive
+  included.
+- Anything else under `archive`: the photo is off every public page but shows
+  in the archive. Sub-tags under `archive` become the archive's sections, the
+  way `portfolio/<x>` does for the portfolio. A photo tagged with plain
+  `archive` and no sub-tag goes in an unsorted section. If a photo somehow
+  carries both `archive` and a `portfolio` tag, the archive wins.
 
 Before the filename rule is removed, every file currently named `hidden` (13
 of them, one a work job's card cover) has to be tagged, or it goes public on

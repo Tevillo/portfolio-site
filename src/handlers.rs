@@ -14,9 +14,10 @@ use tracing::warn;
 use crate::audit;
 use crate::work::{self, DownloadKind, Scope};
 use crate::paths::{
-    PathError, is_hidden, is_jpeg, is_skipped_dir, is_visible_photo, join_rel, leading_year,
-    mtime_secs, parent_rel, safe_resolve, walk_visible_photos,
+    PathError, is_jpeg, is_skipped_dir, join_rel, leading_year, mtime_secs, parent_rel,
+    safe_resolve, walk_visible_photos,
 };
+use crate::tags::TagIndex;
 use crate::people;
 use crate::portfolio;
 use crate::notify;
@@ -130,7 +131,7 @@ async fn portfolio_response(state: &AppState, want: Option<&str>) -> Response {
     let Some(active) = sections.iter().find(|sec| sec.slug == active_slug) else {
         return not_found_response();
     };
-    let group = portfolio_group(state, active).await;
+    let group = portfolio_group(state, active, "").await;
     views::portfolio_page(group.as_ref(), &active_slug, &canonical, &tabs).into_response()
 }
 
@@ -156,7 +157,15 @@ async fn portfolio_sections(state: &AppState) -> Vec<portfolio::Section> {
 /// Resolve one section's tagged photos into a renderable [`FolderGroup`],
 /// dropping anything that cannot be turned into a live URL. `None` when nothing
 /// in the section survived.
-async fn portfolio_group(state: &AppState, section: &portfolio::Section) -> Option<FolderGroup> {
+///
+/// `prefix` is prepended to every file URL: empty for the portfolio, and
+/// [`crate::archive::PREFIX`] for the archive, whose photos are served only
+/// by its own gated routes.
+pub(crate) async fn portfolio_group(
+    state: &AppState,
+    section: &portfolio::Section,
+    prefix: &str,
+) -> Option<FolderGroup> {
     // Tagged photos arrive as flat rel paths scattered across the tree, so —
     // exactly as in `person_photos` — there is no directory walk to piggyback
     // the raw-sibling lookup on. Cache each album folder's stem->raw map, which
@@ -184,14 +193,14 @@ async fn portfolio_group(state: &AppState, section: &portfolio::Section) -> Opti
         let raw_download_url = dir_raws
             .get(&parent)
             .and_then(|m| m.get(&file_stem_lower(&p.name)))
-            .map(|raw| format!("/download/{}", encode_path(&join_rel(&parent, raw))));
+            .map(|raw| format!("{prefix}/download/{}", encode_path(&join_rel(&parent, raw))));
         sources.push(abs);
         images.push(ImageEntry {
             // The portfolio shows large tiles, so it loads the 1600px preview
             // rendition rather than the 400px grid thumb that dense listings use.
-            thumb_url: format!("/preview/{}", encode_path(&p.rel)),
-            image_url: format!("/image/{}", encode_path(&p.rel)),
-            jpg_download_url: format!("/download/{}", encode_path(&p.rel)),
+            thumb_url: format!("{prefix}/preview/{}", encode_path(&p.rel)),
+            image_url: format!("{prefix}/image/{}", encode_path(&p.rel)),
+            jpg_download_url: format!("{prefix}/download/{}", encode_path(&p.rel)),
             raw_download_url,
             // The archive galleries download over GET; the POST route
             // belongs to the work delivery pages alone.
@@ -420,7 +429,10 @@ pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
 
     // Every roll. Folded first so a `favs/` folder is not listed as a URL that
     // only redirects to its parent; the root's own photos have no roll.
-    if let Ok(groups) = walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None).await {
+    let index = state.tag_index().await;
+    if let Ok(groups) =
+        walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None, &index).await
+    {
         paths.extend(
             fold_favs_into_rolls(groups)
                 .iter()
@@ -488,13 +500,20 @@ pub async fn version() -> Response {
         .unwrap()
 }
 
-/// Whether any visible photo sits anywhere under `root`; stops at the first.
-pub(crate) async fn subtree_has_jpeg(root: &Path) -> bool {
+/// Whether any public photo sits anywhere under `root`; stops at the first.
+pub(crate) async fn subtree_has_jpeg(
+    photos_root: &Path,
+    root: &Path,
+    index: std::sync::Arc<TagIndex>,
+) -> bool {
+    let photos_root = photos_root.to_path_buf();
     let root = root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut found = false;
         walk_visible_photos(
+            &photos_root,
             &root,
+            |rel| index.withheld(rel),
             |_| {
                 found = true;
                 ControlFlow::Break(())
@@ -548,7 +567,8 @@ pub async fn person_photos(
     if photos.is_empty() {
         return not_found_response();
     }
-    sort_person_photos(state.photos_root(), &mut photos).await;
+    let index = state.tag_index().await;
+    sort_person_photos(state.photos_root(), &mut photos, &index).await;
     // People photos come from the tag DB as flat rel paths, so there's no
     // directory walk to piggyback the raw-sibling lookup on. Scan each
     // distinct album folder once and cache its stem->raw map.
@@ -616,7 +636,11 @@ fn roll_rel(rel: &str) -> &str {
 /// folder's photographs in the sequence they came off the scanner.
 ///
 /// The page stays a flat gallery: ordering by year does not add year headings.
-async fn sort_person_photos(photos_root: &Path, photos: &mut [people::PersonPhoto]) {
+async fn sort_person_photos(
+    photos_root: &Path,
+    photos: &mut [people::PersonPhoto],
+    index: &std::sync::Arc<TagIndex>,
+) {
     // One subtree walk per distinct roll, not per photograph. A person appears
     // in a handful of rolls, so this is a few walks of a few dozen files each.
     let mut recency: HashMap<String, Option<u64>> = HashMap::new();
@@ -626,7 +650,7 @@ async fn sort_person_photos(photos_root: &Path, photos: &mut [people::PersonPhot
             continue;
         }
         let newest = match safe_resolve(photos_root, roll).await {
-            Ok(abs) => newest_subtree_mtime(&abs).await,
+            Ok(abs) => newest_subtree_mtime(photos_root, &abs, index.clone()).await,
             // A roll the tag database knows about and the filesystem does not:
             // no recency, so it sorts to the back of its year rather than the
             // front, and the photographs still render.
@@ -759,7 +783,8 @@ fn people_unavailable_response() -> Response {
 }
 
 pub async fn all_photos(State(state): State<AppState>) -> Response {
-    match walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None).await {
+    let index = state.tag_index().await;
+    match walk_groups(state.photos_root(), "", ThumbKind::Grid, false, None, &index).await {
         Ok(groups) => views::all_photos_page(&groups).into_response(),
         Err(status) => status.into_response(),
     }
@@ -801,13 +826,14 @@ pub async fn roll(State(state): State<AppState>, AxumPath(path): AxumPath<String
     if safe_resolve(root, &rel).await.is_err() {
         return not_found_response();
     }
+    let index = state.tag_index().await;
     if let Some(parent) = favs_parent(&rel)
-        && dir_has_visible_photo(root, parent).await
+        && dir_has_visible_photo(root, parent, &index).await
     {
         return Redirect::permanent(&views::roll_url(parent)).into_response();
     }
 
-    let groups = match walk_groups(root, &rel, ThumbKind::Grid, false, None).await {
+    let groups = match walk_groups(root, &rel, ThumbKind::Grid, false, None, &index).await {
         Ok(g) => g,
         Err(status) => return status.into_response(),
     };
@@ -831,13 +857,16 @@ pub async fn roll(State(state): State<AppState>, AxumPath(path): AxumPath<String
 
 /// Whether `root`/`rel` directly holds a photo the site would show. One
 /// directory, not a subtree: this is "does this folder have a roll of its own".
-async fn dir_has_visible_photo(root: &Path, rel: &str) -> bool {
+async fn dir_has_visible_photo(root: &Path, rel: &str, index: &TagIndex) -> bool {
     let Ok(mut read) = tokio::fs::read_dir(root.join(rel)).await else {
         return false;
     };
     while let Ok(Some(entry)) = read.next_entry().await {
         let is_file = entry.file_type().await.is_ok_and(|t| t.is_file());
-        if is_file && entry.file_name().to_str().is_some_and(is_visible_photo) {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if is_file && is_jpeg(&name) && !index.withheld(&join_rel(rel, &name)) {
             return true;
         }
     }
@@ -905,7 +934,7 @@ pub async fn notify_form(
 ///
 /// With no header at all (a direct request in development) everything shares one
 /// bucket, which throttles too much rather than too little.
-fn client_key(headers: &HeaderMap) -> String {
+pub(crate) fn client_key(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -1138,6 +1167,7 @@ fn fold_favs_into_rolls(groups: Vec<FolderGroup>) -> Vec<FolderGroup> {
 /// viewport and defeat `loading="lazy"`.
 pub async fn recent_photos(State(state): State<AppState>) -> Response {
     let folders = recent::load(state.photos_root()).await;
+    let index = state.tag_index().await;
     let mut groups: Vec<FolderGroup> = Vec::new();
     for folder in &folders {
         // Grid for the tile, Medium as the second candidate: /recent's tiles are
@@ -1149,6 +1179,7 @@ pub async fn recent_photos(State(state): State<AppState>) -> Response {
             ThumbKind::Grid,
             true,
             Some(ThumbKind::Medium),
+            &index,
         )
         .await
         {
@@ -1188,6 +1219,7 @@ async fn walk_groups(
     kind: ThumbKind,
     natural_ratio: bool,
     srcset_kind: Option<ThumbKind>,
+    index: &TagIndex,
 ) -> Result<Vec<FolderGroup>, StatusCode> {
     let start_abs = if start_rel.is_empty() {
         root.to_path_buf()
@@ -1237,8 +1269,10 @@ async fn walk_groups(
                     continue;
                 }
                 child_dirs.push((entry.path(), rel_child));
-            } else if ftype.is_file() && is_visible_photo(&name) {
-                jpegs.push((name, rel_child));
+            } else if ftype.is_file() && is_jpeg(&name) {
+                if !index.withheld(&rel_child) {
+                    jpegs.push((name, rel_child));
+                }
             } else if ftype.is_file() && work::is_raw_name(&name) {
                 raw_by_stem.insert(file_stem_lower(&name), name);
             }
@@ -1331,12 +1365,19 @@ async fn newest_mtime_secs(files: Vec<PathBuf>) -> Option<u64> {
 /// Newest photograph mtime anywhere under `dir`, by the same rules the tree walk
 /// uses — only visible JPEGs count, and skipped directories are not descended
 /// into — so a roll gets the same recency here as it does on `/all`.
-async fn newest_subtree_mtime(dir: &Path) -> Option<u64> {
+async fn newest_subtree_mtime(
+    photos_root: &Path,
+    dir: &Path,
+    index: std::sync::Arc<TagIndex>,
+) -> Option<u64> {
+    let photos_root = photos_root.to_path_buf();
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut newest: Option<u64> = None;
         walk_visible_photos(
+            &photos_root,
             &dir,
+            |rel| index.withheld(rel),
             |photo| {
                 newest = newest.max(mtime_secs(&photo));
                 ControlFlow::Continue(())
@@ -1415,10 +1456,15 @@ async fn fill_image_dims(
 }
 
 /// `/thumb/2026/a.jpg` -> `/medium/2026/a.jpg`. `None` if `url` is not under
-/// `from`'s route, which yields a tile with no `srcset` rather than a 404.
+/// `from`'s route, which yields a tile with no `srcset` rather than a 404. An
+/// archive URL keeps its `/archive` prefix.
 fn swap_rendition_route(url: &str, from: ThumbKind, to: ThumbKind) -> Option<String> {
-    let rel = url.strip_prefix(&format!("/{}/", from.route()))?;
-    Some(format!("/{}/{}", to.route(), rel))
+    let (base, rest) = match url.strip_prefix(crate::archive::PREFIX) {
+        Some(rest) => (crate::archive::PREFIX, rest),
+        None => ("", url),
+    };
+    let rel = rest.strip_prefix(&format!("/{}/", from.route()))?;
+    Some(format!("{base}/{}/{}", to.route(), rel))
 }
 
 pub async fn image(
@@ -1426,11 +1472,63 @@ pub async fn image(
     AxumPath(rel): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    let path = match safe_resolve(state.photos_root(), &rel).await {
+    serve_image(&state, &rel, &headers, Audience::Public).await
+}
+
+/// Who a file route is serving, which decides what the `Archive` tag tree
+/// allows. See [`allowed`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Audience {
+    /// Anyone. Nothing withheld is served.
+    Public,
+    /// An archive key holder, already authorized by the caller. Only archived
+    /// photos are served, and never a hidden one. The public photographs have
+    /// public routes of their own, so this route family serves nothing else.
+    Archive,
+}
+
+/// Resolve a user-supplied path and return it with its canonical form relative
+/// to the photos root.
+///
+/// The tag checks run against the canonical path, never the one in the URL.
+/// `precheck` lets `./` segments and doubled slashes through, and a symlink
+/// can name a file by a second path, so comparing the URL's own spelling would
+/// let `2026/./misc/x.jpg` past a tag on `2026/misc/x.jpg`.
+pub(crate) async fn resolve_photo(
+    state: &AppState,
+    rel: &str,
+) -> Result<(PathBuf, String), StatusCode> {
+    let path = safe_resolve(state.photos_root(), rel)
+        .await
+        .map_err(map_path_err)?;
+    let canon = path
+        .strip_prefix(state.photos_root())
+        .ok()
+        .and_then(|r| r.to_str())
+        .map(|r| r.replace(std::path::MAIN_SEPARATOR, "/"))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok((path, canon))
+}
+
+/// Whether `audience` may be served the file at canonical path `canon`.
+pub(crate) fn allowed(index: &TagIndex, canon: &str, audience: Audience) -> bool {
+    match audience {
+        Audience::Public => !index.withheld(canon),
+        Audience::Archive => index.archived(canon),
+    }
+}
+
+pub(crate) async fn serve_image(
+    state: &AppState,
+    rel: &str,
+    headers: &HeaderMap,
+    audience: Audience,
+) -> Response {
+    let (path, canon) = match resolve_photo(state, rel).await {
         Ok(p) => p,
-        Err(e) => return map_path_err(e).into_response(),
+        Err(status) => return status.into_response(),
     };
-    if !is_jpeg(&rel) || rel_filename_is_hidden(&rel) {
+    if !is_jpeg(&canon) || !allowed(&*state.tag_index().await, &canon, audience) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let meta = match tokio::fs::metadata(&path).await {
@@ -1442,7 +1540,7 @@ pub async fn image(
         Err(_) => SystemTime::now(),
     };
     let etag = build_etag(mtime, meta.len());
-    if matches_etag(&headers, &etag) {
+    if matches_etag(headers, &etag) {
         return not_modified(&etag);
     }
     let bytes = match tokio::fs::read(&path).await {
@@ -1458,22 +1556,36 @@ pub async fn image(
 /// Per-photo download: GET /download/*path. Streams the file as an attachment
 /// (Content-Disposition), unlike `/image` which serves inline. Serves both the
 /// JPEG and its sibling raw/edit-master files (the URLs are minted by the
-/// gallery views), so the allowlist here is JPEG ∪ raw extensions. Hidden
-/// files stay unreachable, matching `/image`.
+/// gallery views), so the allowlist here is JPEG ∪ raw extensions. Withheld
+/// files stay unreachable, matching `/image`, and a RAW is withheld whenever
+/// the JPEG beside it is (see `tags.rs` on stems).
 pub async fn download(
     State(state): State<AppState>,
     AxumPath(rel): AxumPath<String>,
 ) -> Response {
-    let path = match safe_resolve(state.photos_root(), &rel).await {
+    serve_download(&state, &rel, Audience::Public, None).await
+}
+
+/// Shared body of `/download` and `/archive/download`. `viewer` is the key
+/// holder's name for an archive download, recorded in the log.
+pub(crate) async fn serve_download(
+    state: &AppState,
+    rel: &str,
+    audience: Audience,
+    viewer: Option<String>,
+) -> Response {
+    let (path, canon) = match resolve_photo(state, rel).await {
         Ok(p) => p,
-        Err(e) => return map_path_err(e).into_response(),
+        Err(status) => return status.into_response(),
     };
-    let basename = match Path::new(&rel).file_name().and_then(|s| s.to_str()) {
-        Some(b) => b,
-        None => return StatusCode::NOT_FOUND.into_response(),
+    let basename = match canon.rsplit('/').next() {
+        Some(b) if !b.is_empty() => b.to_string(),
+        _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    let is_jpeg_file = is_jpeg(basename);
-    if (!is_jpeg_file && !work::is_raw_name(basename)) || is_hidden(basename) {
+    let is_jpeg_file = is_jpeg(&basename);
+    if (!is_jpeg_file && !work::is_raw_name(&basename))
+        || !allowed(&*state.tag_index().await, &canon, audience)
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::metadata(&path).await {
@@ -1485,14 +1597,11 @@ pub async fn download(
     } else {
         "application/octet-stream"
     };
-    stream_and_log(
-        &state,
-        &path,
-        mime,
-        basename,
-        audit::Download::public(rel.clone()),
-    )
-    .await
+    let rec = match viewer {
+        Some(name) => audit::Download::archive(name, canon),
+        None => audit::Download::public(rel.to_string()),
+    };
+    stream_and_log(state, &path, mime, &basename, rec).await
 }
 
 /// `/<kind.route()>/*path`, one route per [`ThumbKind`] — see `build_router`.
@@ -1502,15 +1611,15 @@ pub async fn rendition(
     AxumPath(rel): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    render_thumb_response(&state, &rel, &headers, kind).await
+    render_thumb_response(&state, &rel, &headers, kind, Audience::Public).await
 }
 
-/// The one exception to hidden files being unreachable: a work job's cover,
+/// The one exception to withheld files being unreachable: a work job's cover,
 /// at the preview size the `/work` card asks for. A frame cropped for the card
-/// is named `hidden` to keep it out of the job's gallery, and it still has to
-/// render on the card. Only the database's `thumbnail` picks qualify, so naming
-/// a file `hidden` alone never publishes it. Checked only once the name is
-/// already hidden, so ordinary renditions never touch the database.
+/// is tagged `Archive/hidden` to keep it out of the job's gallery, and it still
+/// has to render on the card. Only the database's `thumbnail` picks qualify, so
+/// the tag alone never publishes anything. Checked only once the file is
+/// already withheld, so ordinary renditions never run the cover query.
 async fn is_hidden_work_cover(state: &AppState, rel: &str, kind: ThumbKind) -> bool {
     if !matches!(kind, ThumbKind::Preview) {
         return false;
@@ -1527,18 +1636,23 @@ async fn is_hidden_work_cover(state: &AppState, rel: &str, kind: ThumbKind) -> b
     }
 }
 
-async fn render_thumb_response(
+pub(crate) async fn render_thumb_response(
     state: &AppState,
     rel: &str,
     headers: &HeaderMap,
     kind: ThumbKind,
+    audience: Audience,
 ) -> Response {
-    let source = match safe_resolve(state.photos_root(), rel).await {
+    let (source, canon) = match resolve_photo(state, rel).await {
         Ok(p) => p,
-        Err(e) => return map_path_err(e).into_response(),
+        Err(status) => return status.into_response(),
     };
-    let hidden = rel_filename_is_hidden(rel) && !is_hidden_work_cover(state, rel, kind).await;
-    if !is_jpeg(rel) || hidden {
+    if !is_jpeg(&canon) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let ok = allowed(&*state.tag_index().await, &canon, audience)
+        || (audience == Audience::Public && is_hidden_work_cover(state, &canon, kind).await);
+    if !ok {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -1646,13 +1760,6 @@ pub(crate) fn is_work_root(parent_rel: &str, name: &str) -> bool {
     parent_rel.is_empty() && name == "work"
 }
 
-fn rel_filename_is_hidden(rel: &str) -> bool {
-    Path::new(rel)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(is_hidden)
-        .unwrap_or(false)
-}
 
 pub(crate) fn encode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1689,7 +1796,7 @@ pub(crate) fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
 }
 
 pub async fn work_index(State(state): State<AppState>) -> Response {
-    let work_list = match work::list_work(state.photos_root().clone()).await {
+    let work_list = match work::list_work(state.photos_root().clone(), state.tag_index().await).await {
         Ok(j) => j,
         Err(e) => {
             warn!(error = ?e, "listing work failed");
@@ -1803,7 +1910,13 @@ async fn render_work_page(
     if !is_valid_work_name(name) {
         return not_found_response();
     }
-    let detail = match work::read_work(state.photos_root().clone(), name.to_string()).await {
+    let detail = match work::read_work(
+        state.photos_root().clone(),
+        name.to_string(),
+        state.tag_index().await,
+    )
+    .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return not_found_response(),
         Err(e) => {
@@ -2082,6 +2195,7 @@ pub async fn work_download(
         name.clone(),
         scope,
         kind,
+        state.tag_index().await,
     )
     .await
     {
@@ -2125,12 +2239,9 @@ pub async fn work_file_download(
     if !is_valid_work_subpath(&subpath) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    // Only allow the extensions a job page actually links to, and nothing the
-    // job keeps out of its delivery (a cover crop named `hidden`).
+    // Only allow the extensions a job page actually links to.
     let basename = subpath.rsplit('/').next().unwrap_or("");
-    if !(is_jpeg(basename) || work::is_raw_name(basename))
-        || is_hidden(basename)
-    {
+    if !(is_jpeg(basename) || work::is_raw_name(basename)) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -2138,11 +2249,16 @@ pub async fn work_file_download(
         return err;
     }
 
+    // Nothing the job keeps out of its delivery, such as a cover crop tagged
+    // `Archive/hidden`. Checked on the canonical path; see `resolve_photo`.
     let rel = format!("work/{}/{}", name, subpath);
-    let path = match safe_resolve(state.photos_root(), &rel).await {
+    let (path, canon) = match resolve_photo(&state, &rel).await {
         Ok(p) => p,
-        Err(e) => return map_path_err(e).into_response(),
+        Err(status) => return status.into_response(),
     };
+    if !allowed(&*state.tag_index().await, &canon, Audience::Public) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let mime = if is_jpeg(basename) {
         "image/jpeg"
     } else {
@@ -2595,7 +2711,7 @@ mod tests {
             photo("2026/alpha/favs/f.jpg"),
             photo("2026/gamma/g.jpg"),
         ];
-        sort_person_photos(root, &mut photos).await;
+        sort_person_photos(root, &mut photos, &std::sync::Arc::new(TagIndex::default())).await;
 
         let order: Vec<&str> = photos.iter().map(|p| p.rel.as_str()).collect();
         assert_eq!(

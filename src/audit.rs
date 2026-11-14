@@ -42,7 +42,16 @@ pub const DOWNLOADS_LOG: &str = "downloads.log";
 /// attempts without recording who made them.
 pub const AUTH_FAILURES_LOG: &str = "work-auth-failures.log";
 
-/// Which of the three download routes served a response.
+/// The private archive: one line per unlock (`?k=` accepted) and per page
+/// view, naming whose key it was.
+///
+/// This is the one log that names a person, on purpose. The archive's whole
+/// audience is a handful of people the owner handed a key to, and "whose key
+/// opened it" is how a forwarded link gets noticed. It records the key's label
+/// and never an address.
+pub const ARCHIVE_LOG: &str = "archive-access.log";
+
+/// Which of the download routes served a response.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Route {
@@ -52,6 +61,8 @@ pub enum Route {
     WorkZip,
     /// `POST /work/:name/file/*filename` — one file out of a delivery.
     WorkFile,
+    /// `GET /archive/download/*path` — an archived original, by a key holder.
+    Archive,
 }
 
 impl Route {
@@ -60,6 +71,7 @@ impl Route {
             Route::Public => "public",
             Route::WorkZip => "work zip",
             Route::WorkFile => "work file",
+            Route::Archive => "archive",
         }
     }
 }
@@ -82,11 +94,34 @@ pub struct Download {
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// The archive key holder, on [`Route::Archive`] rows only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<String>,
 }
 
 impl Download {
     pub fn public(path: String) -> Self {
-        Self { route: Route::Public, path, ts: notify::now(), job: None, scope: None, kind: None }
+        Self {
+            route: Route::Public,
+            path,
+            ts: notify::now(),
+            job: None,
+            scope: None,
+            kind: None,
+            viewer: None,
+        }
+    }
+
+    pub fn archive(viewer: String, path: String) -> Self {
+        Self {
+            route: Route::Archive,
+            path,
+            ts: notify::now(),
+            job: None,
+            scope: None,
+            kind: None,
+            viewer: Some(viewer),
+        }
     }
 
     pub fn work_zip(job: String, scope: &str, kind: &str, path: String) -> Self {
@@ -97,6 +132,7 @@ impl Download {
             job: Some(job),
             scope: Some(scope.to_string()),
             kind: Some(kind.to_string()),
+            viewer: None,
         }
     }
 
@@ -108,8 +144,46 @@ impl Download {
             job: Some(job),
             scope: None,
             kind: None,
+            viewer: None,
         }
     }
+}
+
+/// What a key holder did in the archive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveEvent {
+    /// A `?k=` link was opened and the key accepted.
+    Unlock,
+    /// An archive page was viewed with a valid cookie.
+    View,
+}
+
+/// One line of [`ARCHIVE_LOG`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchiveAccess {
+    pub viewer: String,
+    pub event: ArchiveEvent,
+    pub path: String,
+    pub ts: u64,
+}
+
+/// Append one archive access, best-effort, like [`record_download`].
+pub async fn record_archive(data_root: &Path, viewer: &str, event: ArchiveEvent, path: &str) {
+    let log = notify::log_path(data_root, ARCHIVE_LOG);
+    let rec = ArchiveAccess {
+        viewer: viewer.to_string(),
+        event,
+        path: path.to_string(),
+        ts: notify::now(),
+    };
+    if let Err(e) = notify::append_line(&log, &rec).await {
+        warn!(error = ?e, "recording archive access failed");
+    }
+}
+
+pub async fn read_archive(data_root: &Path) -> Vec<ArchiveAccess> {
+    notify::read_log(&notify::log_path(data_root, ARCHIVE_LOG)).await
 }
 
 /// One wrong password against one job.
@@ -197,7 +271,63 @@ pub async fn report(photos_root: &Path, data_root: &Path) -> anyhow::Result<()> 
     let downloads = read_downloads(data_root).await;
     downloads_section(photos_root, &downloads, now).await;
     work_section(photos_root, data_root, &downloads, now).await;
+    archive_section(data_root, &downloads, now).await;
     Ok(())
+}
+
+// --- archive ---------------------------------------------------------------
+
+/// Per key holder: last seen, unlocks, page views and downloads. A key whose
+/// unlock count keeps climbing is a link being opened in new browsers, which
+/// is what a forwarded link looks like.
+async fn archive_section(data_root: &Path, downloads: &[Download], now: u64) {
+    heading("ARCHIVE");
+    let keys = crate::archive::read_keys(data_root).await;
+    let access = read_archive(data_root).await;
+    if keys.is_empty() && access.is_empty() {
+        println!("  no keys issued (see archive_key.sh)");
+        return;
+    }
+
+    #[derive(Default)]
+    struct Row {
+        unlocks: usize,
+        views: usize,
+        downloads: usize,
+        last: Option<u64>,
+    }
+    let mut rows: BTreeMap<String, Row> = BTreeMap::new();
+    for k in &keys {
+        rows.entry(k.name.clone()).or_default();
+    }
+    for a in &access {
+        let row = rows.entry(a.viewer.clone()).or_default();
+        match a.event {
+            ArchiveEvent::Unlock => row.unlocks += 1,
+            ArchiveEvent::View => row.views += 1,
+        }
+        row.last = row.last.max(Some(a.ts));
+    }
+    for d in downloads.iter().filter(|d| d.route == Route::Archive) {
+        let Some(viewer) = &d.viewer else { continue };
+        let row = rows.entry(viewer.clone()).or_default();
+        row.downloads += 1;
+        row.last = row.last.max(Some(d.ts));
+    }
+
+    let issued: HashSet<&str> = keys.iter().map(|k| k.name.as_str()).collect();
+    println!("  {:<16} {:>7} {:>6} {:>9}   last seen", "key", "unlocks", "views", "downloads");
+    for (name, row) in &rows {
+        let last = match row.last {
+            Some(ts) => format!("{} ago", fmt_age(now.saturating_sub(ts))),
+            None => "never".to_string(),
+        };
+        let revoked = if issued.contains(name.as_str()) { "" } else { "  (revoked)" };
+        println!(
+            "  {name:<16} {:>7} {:>6} {:>9}   {last}{revoked}",
+            row.unlocks, row.views, row.downloads,
+        );
+    }
 }
 
 // --- subscribers -----------------------------------------------------------
@@ -386,8 +516,13 @@ async fn downloads_section(photos_root: &Path, downloads: &[Download], now: u64)
     // answered against the files that exist — the log alone cannot name a photo
     // nobody has ever asked for. Files under `work/` are served by the work
     // routes and belong in that section.
-    let servable: Vec<String> = crate::collect_jpegs(photos_root)
-        .await
+    let servable: Vec<String> = match crate::tags::load_for_cli(photos_root).await {
+        Ok(index) => crate::collect_jpegs(photos_root, move |rel| index.withheld(rel)).await,
+        Err(e) => {
+            println!("  reading the Archive tags failed: {e:#}");
+            Vec::new()
+        }
+    }
         .iter()
         .filter_map(|p| p.strip_prefix(photos_root).ok())
         .filter_map(|p| p.to_str())
@@ -424,7 +559,14 @@ async fn work_section(photos_root: &Path, data_root: &Path, downloads: &[Downloa
     heading("WORK");
     println!("  (deliveries are noindex and unlisted, so a download nobody asked for is worth seeing)");
 
-    let jobs = match crate::work::list_work(photos_root.to_path_buf()).await {
+    let index = match crate::tags::load_for_cli(photos_root).await {
+        Ok(i) => i,
+        Err(e) => {
+            println!("  reading the Archive tags failed: {e:#}");
+            return;
+        }
+    };
+    let jobs = match crate::work::list_work(photos_root.to_path_buf(), index).await {
         Ok(j) => j,
         Err(e) => {
             println!("  listing work items failed: {e:#}");
@@ -486,7 +628,7 @@ async fn work_section(photos_root: &Path, data_root: &Path, downloads: &[Downloa
                     *combos.entry(format!("{scope}/{kind}")).or_default() += 1;
                 }
                 Route::WorkFile => files += 1,
-                Route::Public => {}
+                Route::Public | Route::Archive => {}
             }
         }
         if combos.is_empty() {
